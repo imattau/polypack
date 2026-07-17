@@ -103,8 +103,13 @@ export class PersistedGraphQuery {
     return this
   }
 
-  private async serialized(includeOrder = true): Promise<SerializedNode[]> {
-    const query = includeOrder ? this.query : { ...this.query, orderBy: undefined }
+  private async serialized(includeOrder = true, includePagination = false): Promise<SerializedNode[]> {
+    const query: PersistedNodeQuery = {
+      ...this.query,
+      orderBy: includeOrder ? this.query.orderBy : undefined,
+      offset: includePagination ? this.resultOffset : undefined,
+      limit: includePagination ? this.resultLimit : undefined,
+    }
     if (this.adapter.queryNodes) return this.adapter.queryNodes(query)
     const ids = await this.adapter.allNodeIds()
     return applyPersistedNodeQuery(await this.adapter.getNodes(ids), query)
@@ -196,7 +201,9 @@ export class PersistedGraphQuery {
 
   async toArray(): Promise<PolyNode[]> {
     const hasTraversal = this.traversals.length > 0
-    let serialized = await this.serialized(!hasTraversal)
+    const adapterCanPaginate = !this.similarVector && !this.edgeType && !this.edgeSource &&
+      this.joins.length === 0 && !hasTraversal
+    let serialized = await this.serialized(!hasTraversal, adapterCanPaginate)
     serialized = await this.applyEdgeFilters(serialized)
     serialized = await this.applyJoins(serialized)
     if (hasTraversal) serialized = await this.applyTraversals(serialized)
@@ -223,8 +230,10 @@ export class PersistedGraphQuery {
       results = (topK === undefined ? scored : scored.slice(0, topK)).map(result => result.node)
     }
 
-    if (this.resultOffset !== undefined) results = results.slice(this.resultOffset)
-    if (this.resultLimit !== undefined) results = results.slice(0, this.resultLimit)
+    if (!adapterCanPaginate) {
+      if (this.resultOffset !== undefined) results = results.slice(this.resultOffset)
+      if (this.resultLimit !== undefined) results = results.slice(0, this.resultLimit)
+    }
     return results
   }
 

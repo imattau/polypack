@@ -6,6 +6,8 @@ export interface PersistedNodeQuery {
   attributes?: Record<string, unknown>
   attributeRanges?: Record<string, { above?: number; below?: number }>
   orderBy?: { field: string; direction: 'asc' | 'desc' }
+  offset?: number
+  limit?: number
 }
 
 /** Storage contract used by {@link PolyGraph}. Implement all writes atomically where possible. */

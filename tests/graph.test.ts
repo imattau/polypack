@@ -461,6 +461,27 @@ describe('PolyGraph', () => {
       expect(await g.queryPersisted().whereNodeType('doc').count()).toBe(1)
     })
 
+    it('delegates safe pagination to the persistence adapter', async () => {
+      class InspectingAdapter extends MemoryAdapter {
+        lastQuery?: Parameters<MemoryAdapter['queryNodes']>[0]
+        override async queryNodes(query: Parameters<MemoryAdapter['queryNodes']>[0]) {
+          this.lastQuery = query
+          return super.queryNodes(query)
+        }
+      }
+      const adapter = new InspectingAdapter()
+      await adapter.bulkPutNodes([
+        { id: 'a', type: 'doc', data: {}, vector: null, insertedAt: 1, updatedAt: 1 },
+        { id: 'b', type: 'doc', data: {}, vector: null, insertedAt: 2, updatedAt: 2 },
+        { id: 'c', type: 'doc', data: {}, vector: null, insertedAt: 3, updatedAt: 3 },
+      ])
+      const g = new PolyGraph(adapter)
+
+      expect(await g.queryPersisted().whereNodeType('doc').offset(1).limit(1).ids()).toEqual(['b'])
+      expect(adapter.lastQuery?.offset).toBe(1)
+      expect(adapter.lastQuery?.limit).toBe(1)
+    })
+
     it('supports persisted edge filters and joins', async () => {
       const adapter = new MemoryAdapter()
       await adapter.bulkPutNodes([

@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { PolyGraph } from '../src/graph'
+import { MemoryAdapter } from '../src/persistence/memory'
 
 const COUNT = 10_000
 
@@ -88,6 +89,32 @@ describe('Performance benchmarks', () => {
     const avg = (t1 - t0) / 20
     console.log(`  Feed query (20 runs): avg ${formatMs(avg)} (${(20 / ((t1 - t0) / 1000)).toFixed(0)} qps)`)
     expect(avg).toBeLessThan(100)
+  })
+
+  it('persisted filtered page over 10K nodes under 100ms', async () => {
+    const adapter = new MemoryAdapter()
+    await adapter.bulkPutNodes(Array.from({ length: COUNT }, (_, i) => ({
+      id: `persisted-${i}`,
+      type: i % 2 === 0 ? 'post' : 'comment',
+      data: { bucket: i % 5, score: i },
+      vector: null,
+      insertedAt: i,
+      updatedAt: i,
+    })))
+    const graph = new PolyGraph(adapter)
+
+    const t0 = performance.now()
+    const results = await graph.queryPersisted()
+      .whereNodeType('post')
+      .where('bucket', 2)
+      .offset(100)
+      .limit(25)
+      .toArray()
+    const elapsed = performance.now() - t0
+
+    console.log(`  Persisted filtered page: ${formatMs(elapsed)}`)
+    expect(results).toHaveLength(25)
+    expect(elapsed).toBeLessThan(100)
   })
 
   it('vector similarity search: 10K vectors in under 200ms', () => {

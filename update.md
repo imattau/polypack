@@ -3,9 +3,12 @@
 ## 1. Complete persisted graph queries
 
 - [x] Add persisted edge filters, joins, collection, and traversal.
-- Push ordering and pagination into adapters to avoid loading every matching node.
+- [x] Push pagination into adapters and stop IndexedDB cursor scans early when
+  query ordering and shape permit it.
+- Push indexed ordering into adapters to avoid sorting every matching node.
 - Add configurable IndexedDB indexes for frequently queried attributes.
-- Add persisted-query benchmarks and large-dataset tests.
+- [x] Add initial persisted-query benchmarks and 10K-node coverage.
+- Add larger persisted traversal and IndexedDB-specific benchmarks.
 
 ## 2. Build reliable synchronization
 

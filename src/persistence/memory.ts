@@ -1,6 +1,6 @@
 import type { SerializedNode, SerializedEdge } from '../types.js'
 import type { PersistenceAdapter, PersistedNodeQuery } from './adapter.js'
-import { applyPersistedNodeQuery, matchesPersistedNode } from './query.js'
+import { applyPersistedCountPagination, applyPersistedNodeQuery, matchesPersistedNode } from './query.js'
 
 /** Volatile persistence adapter for Node.js, tests, and temporary graphs. */
 export class MemoryAdapter implements PersistenceAdapter {
@@ -45,7 +45,7 @@ export class MemoryAdapter implements PersistenceAdapter {
     for (const node of this.nodes.values()) {
       if (matchesPersistedNode(node, query)) count++
     }
-    return count
+    return applyPersistedCountPagination(count, query)
   }
 
   async putEdge(edge: SerializedEdge): Promise<void> {

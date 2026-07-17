@@ -38,5 +38,14 @@ export function applyPersistedNodeQuery(
       return direction === 'asc' ? an - bn : bn - an
     })
   }
+  if (query.offset !== undefined) results = results.slice(query.offset)
+  if (query.limit !== undefined) results = results.slice(0, query.limit)
   return results
+}
+
+export function applyPersistedCountPagination(count: number, query: PersistedNodeQuery): number {
+  const afterOffset = query.offset === undefined
+    ? count
+    : Math.max(0, count - (query.offset < 0 ? Math.max(0, count + query.offset) : query.offset))
+  return query.limit === undefined ? afterOffset : Math.max(0, Math.min(afterOffset, query.limit))
 }

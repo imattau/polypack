@@ -1,6 +1,6 @@
 import type { SerializedNode, SerializedEdge } from '../types.js'
 import type { PersistenceAdapter, PersistedNodeQuery } from './adapter.js'
-import { applyPersistedNodeQuery } from './query.js'
+import { applyPersistedCountPagination, applyPersistedNodeQuery, matchesPersistedNode } from './query.js'
 
 /** IndexedDB database name and schema version. */
 export interface IndexedDBConfig {
@@ -63,6 +63,37 @@ function cursorAll<T>(store: IDBObjectStore): Promise<T[]> {
       } else {
         resolve(results)
       }
+    }
+    req.onerror = () => reject(req.error)
+  })
+}
+
+function cursorQueryNodes(
+  source: IDBObjectStore | IDBIndex,
+  query: PersistedNodeQuery,
+  range?: IDBKeyRange,
+): Promise<SerializedNode[]> {
+  if (query.limit === 0) return Promise.resolve([])
+  return new Promise((resolve, reject) => {
+    const results: SerializedNode[] = []
+    let matched = 0
+    const offset = query.offset ?? 0
+    const req = source.openCursor(range)
+    req.onsuccess = () => {
+      const cursor = req.result
+      if (!cursor) {
+        resolve(results)
+        return
+      }
+      const node = cursor.value as SerializedNode
+      if (matchesPersistedNode(node, query)) {
+        if (matched++ >= offset) results.push(node)
+        if (query.limit !== undefined && results.length >= query.limit) {
+          resolve(results)
+          return
+        }
+      }
+      cursor.continue()
     }
     req.onerror = () => reject(req.error)
   })
@@ -153,6 +184,17 @@ export class IndexedDBAdapter implements PersistenceAdapter {
     const database = await this.db()
     const tx = database.transaction('nodes')
     const store = tx.objectStore('nodes')
+    const cursorPage = query.orderBy === undefined &&
+      Number.isInteger(query.offset ?? 0) && (query.offset ?? 0) >= 0 &&
+      (query.limit === undefined || (Number.isInteger(query.limit) && query.limit >= 0))
+
+    if (cursorPage && (!query.nodeTypes || query.nodeTypes.length === 1)) {
+      if (query.nodeTypes?.length === 1 && store.indexNames.contains('type')) {
+        return cursorQueryNodes(store.index('type'), query, IDBKeyRange.only(query.nodeTypes[0]))
+      }
+      if (!query.nodeTypes) return cursorQueryNodes(store, query)
+    }
+
     let candidates: SerializedNode[]
 
     if (query.nodeTypes && query.nodeTypes.length === 0) {
@@ -177,7 +219,8 @@ export class IndexedDBAdapter implements PersistenceAdapter {
       const database = await this.db()
       const store = database.transaction('nodes').objectStore('nodes')
       if (store.indexNames.contains('type')) {
-        return idbRequest(store.index('type').count(query.nodeTypes![0]))
+        const count = await idbRequest(store.index('type').count(query.nodeTypes![0]))
+        return applyPersistedCountPagination(count, query)
       }
     }
     return (await this.queryNodes(query)).length

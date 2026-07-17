@@ -74,6 +74,8 @@ function runAdapterTests(label: string, create: () => PersistenceAdapter) {
 
         expect(nodes.map(node => node.id)).toEqual(['b', 'a'])
         expect(await adapter.countNodes!({ nodeTypes: ['book'] })).toBe(3)
+        expect((await adapter.queryNodes!({ nodeTypes: ['book'], offset: 1, limit: 1 })).map(node => node.id)).toEqual(['b'])
+        expect(await adapter.countNodes!({ nodeTypes: ['book'], offset: 1, limit: 1 })).toBe(1)
       })
     })
 

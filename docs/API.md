@@ -116,6 +116,11 @@ storage-level execution, plus `getEdgesBySources(ids, type?)` and
 Polypack falls back to the original node and edge methods, preserving
 compatibility with existing custom adapters.
 
+For node-only queries, offset and limit are delegated to the adapter. IndexedDB
+uses an early-stopping cursor when ordering and query shape permit it. Queries
+with similarity or graph post-processing retain pagination in the query layer so
+that filtering, traversal, and ranking occur before the page is selected.
+
 ### Vector search
 
 - `new VectorIndex(onChange?, distanceFn?)` creates an exact in-memory index.
