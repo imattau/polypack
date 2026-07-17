@@ -99,6 +99,19 @@ function runAdapterTests(label: string, create: () => PersistenceAdapter) {
         await adapter.deleteEdge('a::R::b')
         expect(await adapter.getAllEdges()).toHaveLength(0)
       })
+
+      it('looks up edges by indexed source and target', async () => {
+        await adapter.bulkPutEdges([
+          { id: 'a::R::b', source: 'a', target: 'b', type: 'R', data: null, createdAt: 1 },
+          { id: 'a::S::c', source: 'a', target: 'c', type: 'S', data: null, createdAt: 2 },
+          { id: 'd::R::b', source: 'd', target: 'b', type: 'R', data: null, createdAt: 3 },
+        ])
+        expect(adapter.getEdgesBySources).toBeDefined()
+        expect(adapter.getEdgesByTargets).toBeDefined()
+
+        expect((await adapter.getEdgesBySources!(['a'], 'R')).map(edge => edge.id)).toEqual(['a::R::b'])
+        expect((await adapter.getEdgesByTargets!(['b'], 'R')).map(edge => edge.id).sort()).toEqual(['a::R::b', 'd::R::b'])
+      })
     })
 
     describe('vectors', () => {

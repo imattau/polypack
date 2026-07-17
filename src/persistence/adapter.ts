@@ -25,6 +25,10 @@ export interface PersistenceAdapter {
   putEdge(edge: SerializedEdge): Promise<void>
   bulkPutEdges(edges: SerializedEdge[]): Promise<void>
   getAllEdges(): Promise<SerializedEdge[]>
+  /** Optional indexed lookup used by persisted graph queries. */
+  getEdgesBySources?(sources: string[], type?: string): Promise<SerializedEdge[]>
+  /** Optional indexed reverse lookup used by persisted graph queries. */
+  getEdgesByTargets?(targets: string[], type?: string): Promise<SerializedEdge[]>
   deleteEdge(id: string): Promise<void>
   bulkDeleteEdges(ids: string[]): Promise<void>
 

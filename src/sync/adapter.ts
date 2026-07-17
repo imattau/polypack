@@ -1,4 +1,5 @@
-import type { PersistenceAdapter } from '../persistence/adapter.js'
+import type { PersistenceAdapter, PersistedNodeQuery } from '../persistence/adapter.js'
+import { applyPersistedNodeQuery } from '../persistence/query.js'
 import type { SerializedNode, SerializedEdge } from '../types.js'
 import { edgeId } from '../utils.js'
 import { OpLog } from './oplog.js'
@@ -66,6 +67,17 @@ export class SyncAdapter implements PersistenceAdapter {
     return this.inner.allNodeIds()
   }
 
+  async queryNodes(query: PersistedNodeQuery): Promise<SerializedNode[]> {
+    if (this.inner.queryNodes) return this.inner.queryNodes(query)
+    const nodes = await this.inner.getNodes(await this.inner.allNodeIds())
+    return applyPersistedNodeQuery(nodes, query)
+  }
+
+  async countNodes(query: PersistedNodeQuery): Promise<number> {
+    if (this.inner.countNodes) return this.inner.countNodes(query)
+    return (await this.queryNodes(query)).length
+  }
+
   async putEdge(edge: SerializedEdge): Promise<void> {
     this.validateEdge(edge)
     await this.inner.putEdge(edge)
@@ -82,6 +94,22 @@ export class SyncAdapter implements PersistenceAdapter {
 
   async getAllEdges(): Promise<SerializedEdge[]> {
     return this.inner.getAllEdges()
+  }
+
+  async getEdgesBySources(sources: string[], type?: string): Promise<SerializedEdge[]> {
+    if (this.inner.getEdgesBySources) return this.inner.getEdgesBySources(sources, type)
+    const sourceSet = new Set(sources)
+    return (await this.inner.getAllEdges()).filter(edge =>
+      sourceSet.has(edge.source) && (type === undefined || edge.type === type)
+    )
+  }
+
+  async getEdgesByTargets(targets: string[], type?: string): Promise<SerializedEdge[]> {
+    if (this.inner.getEdgesByTargets) return this.inner.getEdgesByTargets(targets, type)
+    const targetSet = new Set(targets)
+    return (await this.inner.getAllEdges()).filter(edge =>
+      targetSet.has(edge.target) && (type === undefined || edge.type === type)
+    )
   }
 
   async deleteEdge(id: string): Promise<void> {

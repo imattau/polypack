@@ -69,8 +69,9 @@ Reactivity and batching:
 `queryPersisted()` creates a mutable `PersistedGraphQuery`. Its terminal methods
 are asynchronous and inspect the complete backing store without loading results
 into the hot working set. Results are detached node copies, and mutations must be
-flushed before they become visible. The initial persisted-query API supports
-node type, attribute and range filters, ordering, similarity, offset, and limit.
+flushed before they become visible. The persisted-query API supports node type,
+attribute and range filters, edge filters, joins, traversal, collection,
+ordering, similarity, offset, and limit.
 
 ### `GraphQuery`
 
@@ -105,12 +106,15 @@ the final ordering before offset and limit.
 ### `PersistedGraphQuery`
 
 Chainable filters are `where`, `whereAttribute`, `whereAttributeRange`,
-`whereNodeType`, `orderBy`, `similarTo`, `offset`, and `limit`. The asynchronous
-terminal methods are `toArray()`, `first()`, `count()`, and `ids()`.
+`whereNodeType`, `whereEdge`, `whereEdgeSource`, `join`, `traverse`, `orderBy`,
+`similarTo`, `offset`, and `limit`. The asynchronous terminal methods are
+`toArray()`, `first()`, `count()`, `ids()`, and `collect()`.
 
 Adapters may implement `queryNodes(query)` and `countNodes(query)` for optimized
-storage-level execution. When absent, Polypack falls back to `allNodeIds()` and
-`getNodes()`, preserving compatibility with existing custom adapters.
+storage-level execution, plus `getEdgesBySources(ids, type?)` and
+`getEdgesByTargets(ids, type?)` for indexed graph operations. When absent,
+Polypack falls back to the original node and edge methods, preserving
+compatibility with existing custom adapters.
 
 ### Vector search
 

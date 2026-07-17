@@ -1,0 +1,55 @@
+# Polypack remaining work
+
+## 1. Complete persisted graph queries
+
+- [x] Add persisted edge filters, joins, collection, and traversal.
+- Push ordering and pagination into adapters to avoid loading every matching node.
+- Add configurable IndexedDB indexes for frequently queried attributes.
+- Add persisted-query benchmarks and large-dataset tests.
+
+## 2. Build reliable synchronization
+
+- Add acknowledgements and retain unacknowledged operations.
+- Add retry and reconnection behavior.
+- Deduplicate operations on the server.
+- Recover through snapshots or deltas after reconnect.
+- Define an explicit conflict-resolution policy.
+- Add durable server operation storage.
+- Provide authentication integration hooks while leaving authentication policy to applications.
+
+## 3. Harden mutation boundaries
+
+- Prevent callers from silently mutating internal node and data references.
+- Add explicit vector removal support.
+- Validate IDs, timestamps, vectors, pagination values, and traversal depth.
+- Decide whether mutations clone input or take ownership.
+- Consider readonly node views.
+
+## 4. Improve persistence consistency
+
+- Define atomic node, edge, and vector transaction expectations.
+- Test partial adapter failures across mixed operations.
+- Add IndexedDB schema migration tests from version 1 to version 2.
+- Prefer adapter-native persisted counts over `allNodeIds()` fallbacks.
+
+## 5. Expand React verification
+
+- Add mounted-hook tests for changing `nodeTypes` and `delay`.
+- Test asynchronous query races, unmounting, and rapid mutation bursts.
+- Consider an explicit error result or callback instead of only logging failures.
+
+## 6. Prepare the next release
+
+- Bump the package version beyond `1.1.0`.
+- Update `CHANGELOG.md`.
+- Choose `1.2.0` or a larger release based on persisted-query stability.
+- Inspect package contents with `npm pack --dry-run`.
+- Verify the IndexedDB version-2 migration in a real browser.
+
+## Recommended sequence
+
+1. Persisted edge traversal and join support.
+2. Persisted query performance and adapter pagination.
+3. Reliable synchronization as a separate milestone.
+4. Mutation-boundary and persistence hardening.
+5. React verification and release preparation.

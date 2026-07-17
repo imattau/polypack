@@ -460,6 +460,47 @@ describe('PolyGraph', () => {
       expect(await g.queryPersisted().whereNodeType('doc').where('rank', 2).ids()).toEqual(['a'])
       expect(await g.queryPersisted().whereNodeType('doc').count()).toBe(1)
     })
+
+    it('supports persisted edge filters and joins', async () => {
+      const adapter = new MemoryAdapter()
+      await adapter.bulkPutNodes([
+        { id: 'alice', type: 'user', data: { name: 'Alice' }, vector: null, insertedAt: 1, updatedAt: 1 },
+        { id: 'bob', type: 'user', data: { name: 'Bob' }, vector: null, insertedAt: 2, updatedAt: 2 },
+        { id: 'dune', type: 'book', data: { genre: 'sci-fi' }, vector: null, insertedAt: 3, updatedAt: 3 },
+        { id: 'lotr', type: 'book', data: { genre: 'fantasy' }, vector: null, insertedAt: 4, updatedAt: 4 },
+      ])
+      await adapter.bulkPutEdges([
+        { id: 'alice::RATED::dune', source: 'alice', target: 'dune', type: 'RATED', data: null, createdAt: 1 },
+        { id: 'bob::RATED::lotr', source: 'bob', target: 'lotr', type: 'RATED', data: null, createdAt: 2 },
+      ])
+      const g = new PolyGraph(adapter)
+
+      expect(await g.queryPersisted().whereNodeType('user').whereEdge('RATED', 'dune').ids()).toEqual(['alice'])
+      expect(await g.queryPersisted().whereNodeType('book').whereEdgeSource('alice').ids()).toEqual(['dune'])
+      expect(await g.queryPersisted().whereNodeType('user').join('RATED', 'out', node => node.data.genre === 'sci-fi').ids()).toEqual(['alice'])
+      expect(await g.queryPersisted().whereNodeType('book').join('RATED', 'in', node => node.data.name === 'Bob').ids()).toEqual(['lotr'])
+    })
+
+    it('supports persisted traversal and collection in both directions', async () => {
+      const adapter = new MemoryAdapter()
+      await adapter.bulkPutNodes([
+        { id: 'a', type: 'node', data: { order: 1 }, vector: null, insertedAt: 1, updatedAt: 1 },
+        { id: 'b', type: 'node', data: { order: 2 }, vector: null, insertedAt: 2, updatedAt: 2 },
+        { id: 'c', type: 'node', data: { order: 3 }, vector: null, insertedAt: 3, updatedAt: 3 },
+        { id: 'd', type: 'node', data: { order: 4 }, vector: null, insertedAt: 4, updatedAt: 4 },
+      ])
+      await adapter.bulkPutEdges([
+        { id: 'a::NEXT::b', source: 'a', target: 'b', type: 'NEXT', data: null, createdAt: 1 },
+        { id: 'b::NEXT::c', source: 'b', target: 'c', type: 'NEXT', data: null, createdAt: 2 },
+        { id: 'c::OTHER::d', source: 'c', target: 'd', type: 'OTHER', data: null, createdAt: 3 },
+      ])
+      const g = new PolyGraph(adapter)
+
+      expect(await g.queryPersisted().where('order', 1).traverse('NEXT', 2).ids()).toEqual(['a', 'b', 'c'])
+      expect(await g.queryPersisted().where('order', 3).traverse('NEXT', 2, 'in').ids()).toEqual(['c', 'b', 'a'])
+      expect((await g.queryPersisted().where('order', 1).collect('NEXT')).map(node => node.id)).toEqual(['b'])
+      expect((await g.queryPersisted().where('order', 3).collect('NEXT', 'in')).map(node => node.id)).toEqual(['b'])
+    })
   })
 
   describe('persistence with indexeddb adapter', () => {

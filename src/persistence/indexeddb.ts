@@ -204,6 +204,30 @@ export class IndexedDBAdapter implements PersistenceAdapter {
     return cursorAll<SerializedEdge>(database.transaction('edges').objectStore('edges'))
   }
 
+  private async getEdgesByIndex(
+    indexName: 'source' | 'target',
+    values: string[],
+    type?: string,
+  ): Promise<SerializedEdge[]> {
+    if (values.length === 0) return []
+    const database = await this.db()
+    const store = database.transaction('edges').objectStore('edges')
+    const index = store.index(indexName)
+    const groups = await Promise.all(
+      [...new Set(values)].map(value => idbRequest<SerializedEdge[]>(index.getAll(value))),
+    )
+    const edges = groups.flat()
+    return type === undefined ? edges : edges.filter(edge => edge.type === type)
+  }
+
+  async getEdgesBySources(sources: string[], type?: string): Promise<SerializedEdge[]> {
+    return this.getEdgesByIndex('source', sources, type)
+  }
+
+  async getEdgesByTargets(targets: string[], type?: string): Promise<SerializedEdge[]> {
+    return this.getEdgesByIndex('target', targets, type)
+  }
+
   async deleteEdge(id: string): Promise<void> {
     const database = await this.db()
     const tx = database.transaction('edges', 'readwrite')

@@ -1,4 +1,4 @@
-import type { PolyNode, SerializedNode } from './types.js'
+import type { PolyNode, SerializedEdge, SerializedNode } from './types.js'
 import type { PersistenceAdapter, PersistedNodeQuery } from './persistence/adapter.js'
 import { applyPersistedNodeQuery } from './persistence/query.js'
 import { cosineSimilarity } from './vector-index.js'
@@ -21,6 +21,19 @@ export class PersistedGraphQuery {
   private resultOffset?: number
   private resultLimit?: number
   private similarVector?: { vector: number[]; threshold: number; topK?: number }
+  private edgeType?: string
+  private edgeTarget?: string
+  private edgeSource?: string
+  private joins: Array<{
+    edgeType: string
+    direction: 'out' | 'in'
+    predicate?: (node: PolyNode) => boolean
+  }> = []
+  private traversals: Array<{
+    edgeType: string
+    depth: number
+    direction: 'out' | 'in'
+  }> = []
 
   constructor(adapter: PersistenceAdapter) {
     this.adapter = adapter
@@ -45,6 +58,31 @@ export class PersistedGraphQuery {
     return this
   }
 
+  whereEdge(type: string, target?: string): this {
+    this.edgeType = type
+    this.edgeTarget = target
+    return this
+  }
+
+  whereEdgeSource(source: string): this {
+    this.edgeSource = source
+    return this
+  }
+
+  join(
+    edgeType: string,
+    direction: 'out' | 'in' = 'out',
+    predicate?: (connectedNode: PolyNode) => boolean,
+  ): this {
+    this.joins.push({ edgeType, direction, predicate })
+    return this
+  }
+
+  traverse(edgeType: string, depth: number, direction: 'out' | 'in' = 'out'): this {
+    this.traversals.push({ edgeType, depth, direction })
+    return this
+  }
+
   orderBy(field: string, direction: 'asc' | 'desc' = 'asc'): this {
     this.query.orderBy = { field, direction }
     return this
@@ -65,14 +103,115 @@ export class PersistedGraphQuery {
     return this
   }
 
-  private async serialized(): Promise<SerializedNode[]> {
-    if (this.adapter.queryNodes) return this.adapter.queryNodes(this.query)
+  private async serialized(includeOrder = true): Promise<SerializedNode[]> {
+    const query = includeOrder ? this.query : { ...this.query, orderBy: undefined }
+    if (this.adapter.queryNodes) return this.adapter.queryNodes(query)
     const ids = await this.adapter.allNodeIds()
-    return applyPersistedNodeQuery(await this.adapter.getNodes(ids), this.query)
+    return applyPersistedNodeQuery(await this.adapter.getNodes(ids), query)
+  }
+
+  private async edgesBySources(sources: string[], type?: string): Promise<SerializedEdge[]> {
+    if (this.adapter.getEdgesBySources) return this.adapter.getEdgesBySources(sources, type)
+    const sourceSet = new Set(sources)
+    return (await this.adapter.getAllEdges()).filter(edge =>
+      sourceSet.has(edge.source) && (type === undefined || edge.type === type)
+    )
+  }
+
+  private async edgesByTargets(targets: string[], type?: string): Promise<SerializedEdge[]> {
+    if (this.adapter.getEdgesByTargets) return this.adapter.getEdgesByTargets(targets, type)
+    const targetSet = new Set(targets)
+    return (await this.adapter.getAllEdges()).filter(edge =>
+      targetSet.has(edge.target) && (type === undefined || edge.type === type)
+    )
+  }
+
+  private async applyEdgeFilters(nodes: SerializedNode[]): Promise<SerializedNode[]> {
+    let results = nodes
+    if (this.edgeType) {
+      const edges = await this.edgesBySources(results.map(node => node.id), this.edgeType)
+      const sources = new Set(edges
+        .filter(edge => this.edgeTarget === undefined || edge.target === this.edgeTarget)
+        .map(edge => edge.source))
+      results = results.filter(node => sources.has(node.id))
+    }
+    if (this.edgeSource) {
+      const edges = await this.edgesBySources([this.edgeSource], this.edgeType)
+      const targets = new Set(edges.map(edge => edge.target))
+      results = results.filter(node => targets.has(node.id))
+    }
+    return results
+  }
+
+  private async applyJoins(nodes: SerializedNode[]): Promise<SerializedNode[]> {
+    let results = nodes
+    for (const join of this.joins) {
+      const ids = results.map(node => node.id)
+      const edges = join.direction === 'out'
+        ? await this.edgesBySources(ids, join.edgeType)
+        : await this.edgesByTargets(ids, join.edgeType)
+      const connectedIds = [...new Set(edges.map(edge =>
+        join.direction === 'out' ? edge.target : edge.source
+      ))]
+      const connected = new Map(
+        (await this.adapter.getNodes(connectedIds)).map(node => [node.id, restoreNode(node)]),
+      )
+      const matched = new Set<string>()
+      for (const edge of edges) {
+        const candidateId = join.direction === 'out' ? edge.source : edge.target
+        const connectedId = join.direction === 'out' ? edge.target : edge.source
+        const connectedNode = connected.get(connectedId)
+        if (connectedNode && (!join.predicate || join.predicate(connectedNode))) {
+          matched.add(candidateId)
+        }
+      }
+      results = results.filter(node => matched.has(node.id))
+    }
+    return results
+  }
+
+  private async applyTraversals(nodes: SerializedNode[]): Promise<SerializedNode[]> {
+    let currentIds = nodes.map(node => node.id)
+    for (const traversal of this.traversals) {
+      const visited = new Set(currentIds)
+      let frontier = [...currentIds]
+      for (let depth = 0; depth < traversal.depth && frontier.length > 0; depth++) {
+        const edges = traversal.direction === 'out'
+          ? await this.edgesBySources(frontier, traversal.edgeType)
+          : await this.edgesByTargets(frontier, traversal.edgeType)
+        const next: string[] = []
+        for (const edge of edges) {
+          const id = traversal.direction === 'out' ? edge.target : edge.source
+          if (!visited.has(id)) {
+            visited.add(id)
+            next.push(id)
+          }
+        }
+        frontier = next
+      }
+      currentIds = [...visited]
+    }
+    return this.adapter.getNodes(currentIds)
   }
 
   async toArray(): Promise<PolyNode[]> {
-    let results = (await this.serialized()).map(restoreNode)
+    const hasTraversal = this.traversals.length > 0
+    let serialized = await this.serialized(!hasTraversal)
+    serialized = await this.applyEdgeFilters(serialized)
+    serialized = await this.applyJoins(serialized)
+    if (hasTraversal) serialized = await this.applyTraversals(serialized)
+    let results = serialized.map(restoreNode)
+
+    if (hasTraversal && this.query.orderBy) {
+      const { field, direction } = this.query.orderBy
+      results.sort((a, b) => {
+        const av = a.data[field]
+        const bv = b.data[field]
+        const an = typeof av === 'number' && Number.isFinite(av) ? av : 0
+        const bn = typeof bv === 'number' && Number.isFinite(bv) ? bv : 0
+        return direction === 'asc' ? an - bn : bn - an
+      })
+    }
 
     if (this.similarVector) {
       const { vector, threshold, topK } = this.similarVector
@@ -98,10 +237,27 @@ export class PersistedGraphQuery {
   }
 
   async count(): Promise<number> {
-    if (this.similarVector || this.resultOffset !== undefined || this.resultLimit !== undefined) {
+    if (this.similarVector || this.resultOffset !== undefined || this.resultLimit !== undefined ||
+        this.edgeType || this.edgeSource || this.joins.length > 0 || this.traversals.length > 0) {
       return (await this.toArray()).length
     }
     if (this.adapter.countNodes) return this.adapter.countNodes(this.query)
     return (await this.serialized()).length
+  }
+
+  async collect(
+    edgeType: string,
+    direction: 'out' | 'in' = 'out',
+    predicate?: (node: PolyNode) => boolean,
+  ): Promise<PolyNode[]> {
+    const seeds = await this.toArray()
+    const seedIds = seeds.map(node => node.id)
+    const edges = direction === 'out'
+      ? await this.edgesBySources(seedIds, edgeType)
+      : await this.edgesByTargets(seedIds, edgeType)
+    const connectedIds = [...new Set(edges.map(edge => direction === 'out' ? edge.target : edge.source))]
+    return (await this.adapter.getNodes(connectedIds))
+      .map(restoreNode)
+      .filter(node => !predicate || predicate(node))
   }
 }

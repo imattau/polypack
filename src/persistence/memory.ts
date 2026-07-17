@@ -60,6 +60,20 @@ export class MemoryAdapter implements PersistenceAdapter {
     return [...this.edges.values()]
   }
 
+  async getEdgesBySources(sources: string[], type?: string): Promise<SerializedEdge[]> {
+    const sourceSet = new Set(sources)
+    return [...this.edges.values()].filter(edge =>
+      sourceSet.has(edge.source) && (type === undefined || edge.type === type)
+    )
+  }
+
+  async getEdgesByTargets(targets: string[], type?: string): Promise<SerializedEdge[]> {
+    const targetSet = new Set(targets)
+    return [...this.edges.values()].filter(edge =>
+      targetSet.has(edge.target) && (type === undefined || edge.type === type)
+    )
+  }
+
   async deleteEdge(id: string): Promise<void> {
     this.edges.delete(id)
   }
