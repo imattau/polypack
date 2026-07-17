@@ -1,5 +1,5 @@
 {
-  "name": "polypack",
+  "name": "@0xx0lostcause0xx0/polypack",
   "version": "1.1.0",
   "description": "Generic property graph engine with vector similarity search — extracted from scrollstr's PolyGraph",
   "keywords": [

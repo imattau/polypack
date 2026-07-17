@@ -472,7 +472,7 @@ describe('PolyGraph', () => {
       expect(results[0].id).toBe('a')
     })
 
-    it('similarTo scores nodes without vector as 0', () => {
+    it('similarTo excludes nodes without vectors', () => {
       graph.addNode({ id: 'a', type: 't', data: {}, vector: new Float64Array([1, 0, 0]), insertedAt: 1, updatedAt: 1 })
       graph.addNode({ id: 'b', type: 't', data: {}, insertedAt: 2, updatedAt: 2 })
 
@@ -481,8 +481,7 @@ describe('PolyGraph', () => {
         .orderBy('insertedAt', 'asc')
         .toArray()
 
-      // Both pass threshold 0; b has score 0
-      expect(results).toHaveLength(2)
+      expect(results.map(node => node.id)).toEqual(['a'])
     })
 
     it('markVectorDirty for existing vector schedules persist without throwing', () => {

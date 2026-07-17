@@ -5,15 +5,15 @@ Generic property graph engine with vector similarity search, edge ownership sema
 ## Install
 
 ```sh
-npm install polypack
+npm install @0xx0lostcause0xx0/polypack
 ```
 
-React is an optional peer dependency and is only required when importing from `polypack/react`.
+React is an optional peer dependency and is only required when importing from `@0xx0lostcause0xx0/polypack/react`.
 
 ## Features
 
 - **Property graph** — typed nodes and edges with arbitrary data payloads
-- **LRU hot cache** — 10K node limit by default, spills to pluggable persistence
+- **LRU working set** — 10K loaded-node limit by default, with explicit restoration from persistence
 - **Vector similarity** — cosine, euclidean, or pluggable distance functions
 - **Fluent query builder** — filter by type/attribute/edge/range, BFS traversal, vector similarity
 - **Relational extensions** — `pluck`, `aggregate`, `groupAggregate`, `join`, `groupByVector` (clustering)
@@ -25,7 +25,7 @@ React is an optional peer dependency and is only required when importing from `p
 ## Quick start
 
 ```typescript
-import { PolyGraph, MemoryAdapter } from 'polypack'
+import { PolyGraph, MemoryAdapter } from '@0xx0lostcause0xx0/polypack'
 
 const graph = new PolyGraph()
 
@@ -69,9 +69,9 @@ graph.query()
 
 | Subpath | Contents |
 |---------|----------|
-| `polypack` | Core: PolyGraph, VectorIndex, GraphQuery, persistence adapters |
-| `polypack/react` | React hooks: `useGraphQuery`, `useLiveQuery` |
-| `polypack/sync` | Sync layer: OpLog, SyncAdapter, SyncClient, SyncServer |
+| `@0xx0lostcause0xx0/polypack` | Core: PolyGraph, VectorIndex, GraphQuery, persistence adapters |
+| `@0xx0lostcause0xx0/polypack/react` | React hooks: `useGraphQuery`, `useLiveQuery` |
+| `@0xx0lostcause0xx0/polypack/sync` | Sync layer: OpLog, SyncAdapter, SyncClient, SyncServer |
 
 See the complete [API reference](docs/API.md), including persistence, React,
 sync, lifecycle, ownership, and error contracts.

@@ -1,6 +1,7 @@
 export { OpLog } from './oplog.js'
 export { SyncAdapter } from './adapter.js'
 export { SyncServer } from './server.js'
+export type { SyncServerClient } from './server.js'
 export { SyncClient } from './client.js'
 export { MemoryTransport } from './transport.js'
 export type { SyncTransport } from './transport.js'

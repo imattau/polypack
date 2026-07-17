@@ -69,7 +69,7 @@ export function useGraphQuery<T>(
           clearTimeout(timerRef.current)
           timerRef.current = setTimeout(() => {
             if (mountedRef.current) setResult(resolved)
-          }, delay)
+          }, delayRef.current)
         }
       }
       if (value instanceof Promise) {
@@ -108,8 +108,8 @@ export function useGraphQuery<T>(
 
     runQuery()
 
-    const types = nodeTypesRef.current
     const subscription = graph.changes.subscribe((event) => {
+      const types = nodeTypesRef.current
       if (types && event.nodeType && !types.includes(event.nodeType)) {
         return
       }

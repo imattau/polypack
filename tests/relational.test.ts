@@ -294,6 +294,25 @@ describe('relational query extensions', () => {
       expect(c).toBe(0)
     })
 
+    it('count respects similarity and pagination', () => {
+      graph.updateNode('b1', {}, new Float64Array([1, 0]))
+      graph.updateNode('b2', {}, new Float64Array([0.9, 0.1]))
+      graph.updateNode('b3', {}, new Float64Array([0.8, 0.2]))
+      const c = graph.query()
+        .whereNodeType('book')
+        .similarTo([1, 0], 0)
+        .offset(1)
+        .limit(2)
+        .count()
+      expect(c).toBe(2)
+    })
+
+    it('aggregates only finite numeric values', () => {
+      graph.addNode({ id: 'bad-price', type: 'book', data: { price: 'expensive' }, insertedAt: 10, updatedAt: 10 })
+      graph.addNode({ id: 'nan-price', type: 'book', data: { price: Number.NaN }, insertedAt: 11, updatedAt: 11 })
+      expect(graph.query().whereNodeType('book').aggregate('price', 'sum')).toEqual({ value: 71, count: 5 })
+    })
+
     it('first returns first match or null', () => {
       const first = graph.query().whereNodeType('book').orderBy('price', 'asc').first()
       expect(first).not.toBeNull()

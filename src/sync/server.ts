@@ -1,6 +1,6 @@
 import type { SyncMessage, SyncOp } from './types.js'
 
-type ClientHandle = {
+export type SyncServerClient = {
   send: (msg: SyncMessage) => void
   clientId?: string
 }
@@ -12,16 +12,24 @@ type ClientHandle = {
 /** In-memory relay that broadcasts received operations to all other clients. */
 export class SyncServer {
   private opLog: SyncOp[] = []
-  private clients: ClientHandle[] = []
+  private clients: SyncServerClient[] = []
   onOp?: (op: SyncOp) => void
 
   /** Register a client transport. Returns a function to handle incoming messages. */
-  addClient(handle: ClientHandle): (msg: SyncMessage) => void {
+  addClient(handle: SyncServerClient): (msg: SyncMessage) => void {
     this.clients.push(handle)
     return (msg: SyncMessage) => this.handleMessage(msg, handle)
   }
 
-  private handleMessage(msg: SyncMessage, sender: ClientHandle): void {
+  /** Stop broadcasting to a previously registered client. */
+  removeClient(handle: SyncServerClient): boolean {
+    const index = this.clients.indexOf(handle)
+    if (index === -1) return false
+    this.clients.splice(index, 1)
+    return true
+  }
+
+  private handleMessage(msg: SyncMessage, sender: SyncServerClient): void {
     if (msg.type === 'delta') {
       for (const op of msg.ops) {
         this.opLog.push(op)

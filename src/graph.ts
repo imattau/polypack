@@ -580,6 +580,9 @@ export class PolyGraph {
     this.nodeToEdgeMap.clear()
     const allEdges = await this.persistence.getAllEdges()
     for (const e of allEdges) {
+      if (e.id !== edgeId(e.source, e.type, e.target)) {
+        throw new Error(`Invalid persisted edge ID: ${e.id}`)
+      }
       if (!this.edges.has(e.source)) this.edges.set(e.source, [])
       this.edges.get(e.source)!.push({ target: e.target, type: e.type, data: e.data ?? undefined })
       if (!this.nodeToEdgeMap.has(e.target)) this.nodeToEdgeMap.set(e.target, new Set())

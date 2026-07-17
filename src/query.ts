@@ -275,9 +275,10 @@ export class GraphQuery {
     if (this.opts.similarVector) {
       const { vector, threshold, topK } = this.opts.similarVector
       const scored = results
+        .filter((n): n is PolyNode & { vector: Float64Array } => n.vector !== undefined)
         .map(n => ({
           node: n,
-          score: n.vector ? cosineSimilarity(vector, n.vector) : 0,
+          score: cosineSimilarity(vector, n.vector),
         }))
         .filter(s => s.score >= threshold)
         .sort((a, b) => b.score - a.score)
@@ -295,7 +296,8 @@ export class GraphQuery {
   }
 
   count(): number {
-    if (this.opts.afterSteps && this.opts.afterSteps.length > 0) {
+    if (this.opts.afterSteps?.length || this.opts.similarVector ||
+        this.opts.offset !== undefined || this.opts.limit !== undefined) {
       return this.toArray().length
     }
     return this.getSourceNodes().filter(n => this.match(n)).length
@@ -323,8 +325,8 @@ export class GraphQuery {
   aggregate(field: string, op: AggregateOp): AggregateResult {
     const nodes = this.toArray()
     const values = nodes
-      .map(n => (n.data as Record<string, unknown>)[field] as number | undefined)
-      .filter((v): v is number => v !== undefined)
+      .map(n => (n.data as Record<string, unknown>)[field])
+      .filter((v): v is number => typeof v === 'number' && Number.isFinite(v))
     if (values.length === 0) return { value: 0, count: 0 }
     let value: number
     switch (op) {
@@ -344,10 +346,10 @@ export class GraphQuery {
 
     for (const n of nodes) {
       const key = String((n.data as Record<string, unknown>)[groupByField] ?? 'null')
-      const val = (n.data as Record<string, unknown>)[field] as number | undefined
-      if (val !== undefined) {
+      const val = (n.data as Record<string, unknown>)[field]
+      if (op === 'count' ? val !== undefined && val !== null : typeof val === 'number' && Number.isFinite(val)) {
         if (!groups.has(key)) groups.set(key, [])
-        groups.get(key)!.push(val)
+        groups.get(key)!.push(op === 'count' ? 1 : val as number)
       }
     }
 
@@ -439,10 +441,10 @@ export class GraphQuery {
           bestKey = g.key
         }
       }
-      const val = (n.data as Record<string, unknown>)[field] as number | undefined
-      if (val !== undefined) {
+      const val = (n.data as Record<string, unknown>)[field]
+      if (op === 'count' ? val !== undefined && val !== null : typeof val === 'number' && Number.isFinite(val)) {
         if (!clusters.has(bestKey)) clusters.set(bestKey, [])
-        clusters.get(bestKey)!.push(val)
+        clusters.get(bestKey)!.push(op === 'count' ? 1 : val as number)
       }
     }
 

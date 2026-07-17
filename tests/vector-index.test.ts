@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { VectorIndex, cosineSimilarity, euclideanSimilarity } from '../src/vector-index'
+import { edgeId } from '../src/utils'
 import type { DistanceFunction } from '../src/vector-index'
 
 describe('cosineSimilarity', () => {
@@ -182,5 +183,16 @@ describe('euclideanSimilarity', () => {
     const close = euclideanSimilarity([1, 0], [1.1, 0])
     const far = euclideanSimilarity([1, 0], [100, 0])
     expect(close).toBeGreaterThan(far)
+  })
+})
+
+describe('edgeId', () => {
+  it('allows delimiters in targets, which are parsed as the remaining suffix', () => {
+    expect(edgeId('source', 'REL', 'target::part')).toBe('source::REL::target::part')
+  })
+
+  it('rejects ambiguous delimiters in sources and types', () => {
+    expect(() => edgeId('source::part', 'REL', 'target')).toThrow(RangeError)
+    expect(() => edgeId('source', 'REL::TYPE', 'target')).toThrow(RangeError)
   })
 })

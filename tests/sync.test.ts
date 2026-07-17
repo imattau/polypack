@@ -74,6 +74,16 @@ describe('SyncAdapter', () => {
     expect(removeOps[0].payload.source).toBe('a')
   })
 
+  it('rejects edge records whose IDs cannot be reconstructed safely', async () => {
+    const adapter = new SyncAdapter(new MemoryAdapter(), 'c1')
+    await expect(adapter.putEdge({
+      id: 'wrong', source: 'a', target: 'b', type: 'R', data: null, createdAt: 1,
+    })).rejects.toThrow('Invalid edge ID')
+    await expect(adapter.putEdge({
+      id: 'a::part::R::b', source: 'a::part', target: 'b', type: 'R', data: null, createdAt: 1,
+    })).rejects.toThrow(RangeError)
+  })
+
   it('wraps inner adapter transparently', async () => {
     const inner = new MemoryAdapter()
     const adapter = new SyncAdapter(inner, 'c1')
@@ -85,6 +95,15 @@ describe('SyncAdapter', () => {
 })
 
 describe('SyncServer + SyncClient', () => {
+  it('can unregister a client handle', () => {
+    const server = new SyncServer()
+    const handle = { send: () => undefined, clientId: 'gone' }
+    server.addClient(handle)
+
+    expect(server.removeClient(handle)).toBe(true)
+    expect(server.removeClient(handle)).toBe(false)
+  })
+
   /** Wire a client to the server. The server broadcasts to all other clients'
    *  handleMessage directly (not through the transport). */
   function connect(

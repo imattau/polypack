@@ -1,9 +1,9 @@
 # API reference
 
 Polypack is ESM-only and requires Node.js 18 or newer. The browser adapter also
-requires IndexedDB. React is optional and only loaded by `polypack/react`.
+requires IndexedDB. React is optional and only loaded by `@0xx0lostcause0xx0/polypack/react`.
 
-## `polypack`
+## `@0xx0lostcause0xx0/polypack`
 
 ### `PolyGraph`
 
@@ -14,6 +14,8 @@ new PolyGraph(adapter?: PersistenceAdapter, hotCacheMax?: number)
 The main property-graph container. Without an adapter it uses `MemoryAdapter`.
 The default hot-node limit is 10,000. Edges remain indexed when nodes are
 evicted, and dirty evicted nodes are retained until persistence completes.
+Synchronous queries and mutations operate on currently loaded nodes; use
+`getNodeSafe(id)` to restore an evicted node before mutating it.
 
 Lifecycle:
 
@@ -70,12 +72,13 @@ Filter methods are chainable:
 - `join(edgeType, direction?, predicate?)` filters by connected nodes.
 - `traverse(edgeType, depth, direction?)` performs breadth-first traversal and
   includes the seed nodes.
-- `similarTo(vector, threshold?, topK?)` ranks nodes by cosine similarity.
+- `similarTo(vector, threshold?, topK?)` ranks vector-bearing nodes by cosine similarity.
 - `orderBy(field, direction?)`, `offset(n)`, and `limit(n)` shape results.
 
 Terminal methods:
 
 - `toArray()`, `first()`, `count()`, and `ids()` return matched nodes or IDs.
+  `count()` respects similarity, traversal, offset, and limit.
 - `pluck(...fields)` projects node data into records that also contain `id` and `type`.
 - `aggregate(field, op)` supports `sum`, `avg`, `min`, `max`, and `count`.
 - `groupAggregate(field, op, groupByField)` aggregates by a data field.
@@ -115,10 +118,11 @@ The root exports `PolyNode`, `PolyEdge`, `EdgeOwnership`, `GraphChangeEvent`,
 `SerializedNode`, `SerializedEdge`, `VectorQuery`, aggregate types,
 `DistanceFunction`, `IndexedDBConfig`, and `PersistenceAdapter`.
 
-`edgeId(source, type, target)` produces the persistence edge key.
+`edgeId(source, type, target)` produces the persistence edge key. Source IDs and
+edge types must not contain `::`; target IDs may contain it.
 `yieldToUI()` yields through a zero-delay timer.
 
-## `polypack/react`
+## `@0xx0lostcause0xx0/polypack/react`
 
 ```ts
 useGraphQuery(graph, queryFn, deps, delay?, nodeTypes?)
@@ -133,7 +137,7 @@ logged and set the result to `undefined`.
 The dependency list controls query closure refresh in the same way as other
 React hooks. React 18 and 19 are supported as an optional peer dependency.
 
-## `polypack/sync`
+## `@0xx0lostcause0xx0/polypack/sync`
 
 - `OpLog(clientId, existing?)` appends sequenced `SyncOp` values and exposes
   `since(seq)`, `all`, `latestSeq`, and `size`.
@@ -143,7 +147,8 @@ React hooks. React 18 and 19 are supported as an optional peer dependency.
   events, sends deltas, and applies remote operations with echo suppression.
   Use `flush()` for manual sends and `disconnect()` to unsubscribe and close.
 - `SyncServer` is an in-memory relay. `addClient(handle)` returns that client's
-  incoming-message handler; `ops` exposes the received log.
+  incoming-message handler, `removeClient(handle)` unregisters it, and `ops`
+  exposes the received log.
 - `SyncTransport` requires `send`, `onMessage`, and `close`.
 - `MemoryTransport.pair()` creates linked asynchronous in-process transports.
 

@@ -1,5 +1,6 @@
 import type { PersistenceAdapter } from '../persistence/adapter.js'
 import type { SerializedNode, SerializedEdge } from '../types.js'
+import { edgeId } from '../utils.js'
 import { OpLog } from './oplog.js'
 
 export type OpCallback = (op: import('./types').SyncOp) => void
@@ -21,6 +22,12 @@ export class SyncAdapter implements PersistenceAdapter {
   private record(kind: import('./types').SyncOp['kind'], payload: Record<string, unknown>) {
     const op = this.oplog.append(kind, payload)
     this.onOp?.(op)
+  }
+
+  private validateEdge(edge: SerializedEdge): void {
+    if (edge.id !== edgeId(edge.source, edge.type, edge.target)) {
+      throw new Error(`Invalid edge ID: ${edge.id}`)
+    }
   }
 
   async putNode(node: SerializedNode): Promise<void> {
@@ -60,11 +67,13 @@ export class SyncAdapter implements PersistenceAdapter {
   }
 
   async putEdge(edge: SerializedEdge): Promise<void> {
+    this.validateEdge(edge)
     await this.inner.putEdge(edge)
     this.record('addEdge', edge as unknown as Record<string, unknown>)
   }
 
   async bulkPutEdges(edges: SerializedEdge[]): Promise<void> {
+    for (const edge of edges) this.validateEdge(edge)
     await this.inner.bulkPutEdges(edges)
     for (const edge of edges) {
       this.record('addEdge', edge as unknown as Record<string, unknown>)
