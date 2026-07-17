@@ -20,6 +20,7 @@ React is an optional peer dependency and is only required when importing from `@
 - **Edge ownership** — `owned` (cascade delete), `shared` (orphan detection), `reference` (no-op)
 - **Reactive** — RxJS change events, batching, React hooks
 - **Pluggable persistence** — MemoryAdapter, IndexedDBAdapter, build your own
+- **Persisted queries** — asynchronous filtering and similarity across the full backing store
 - **Real-time sync** — OpLog + SyncAdapter + SyncServer/SyncClient with echo suppression
 
 ## Quick start

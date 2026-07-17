@@ -2,6 +2,7 @@ import { Subject } from 'rxjs'
 import type { PolyNode, EdgeOwnership, GraphChangeEvent, SerializedNode, SerializedEdge } from './types.js'
 import { VectorIndex } from './vector-index.js'
 import { GraphQuery } from './query.js'
+import { PersistedGraphQuery } from './persisted-query.js'
 import { edgeId, yieldToUI } from './utils.js'
 import type { PersistenceAdapter } from './persistence/adapter.js'
 import { MemoryAdapter } from './persistence/memory.js'
@@ -541,6 +542,11 @@ export class PolyGraph {
 
   query(): GraphQuery {
     return new GraphQuery(this.nodes, this.edges, this.nodeToEdgeMap)
+  }
+
+  /** Query all persisted nodes without loading them into the hot working set. */
+  queryPersisted(): PersistedGraphQuery {
+    return new PersistedGraphQuery(this.persistence)
   }
 
   // ── Hot Cache ──

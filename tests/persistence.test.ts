@@ -55,6 +55,26 @@ function runAdapterTests(label: string, create: () => PersistenceAdapter) {
         const ids = await adapter.allNodeIds()
         expect(ids.sort()).toEqual(['a', 'b'])
       })
+
+      it('queries nodes by type, attributes, ranges, and order', async () => {
+        await adapter.bulkPutNodes([
+          { id: 'a', type: 'book', data: { genre: 'sci-fi', price: 20 }, vector: null, insertedAt: 1, updatedAt: 1 },
+          { id: 'b', type: 'book', data: { genre: 'sci-fi', price: 10 }, vector: null, insertedAt: 2, updatedAt: 2 },
+          { id: 'c', type: 'book', data: { genre: 'fantasy', price: 15 }, vector: null, insertedAt: 3, updatedAt: 3 },
+          { id: 'd', type: 'user', data: { genre: 'sci-fi', price: 12 }, vector: null, insertedAt: 4, updatedAt: 4 },
+        ])
+        expect(adapter.queryNodes).toBeDefined()
+
+        const nodes = await adapter.queryNodes!({
+          nodeTypes: ['book'],
+          attributes: { genre: 'sci-fi' },
+          attributeRanges: { price: { above: 5, below: 25 } },
+          orderBy: { field: 'price', direction: 'asc' },
+        })
+
+        expect(nodes.map(node => node.id)).toEqual(['b', 'a'])
+        expect(await adapter.countNodes!({ nodeTypes: ['book'] })).toBe(3)
+      })
     })
 
     describe('edges', () => {

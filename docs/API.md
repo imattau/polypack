@@ -66,6 +66,12 @@ Reactivity and batching:
 
 `query()` creates a mutable `GraphQuery`.
 
+`queryPersisted()` creates a mutable `PersistedGraphQuery`. Its terminal methods
+are asynchronous and inspect the complete backing store without loading results
+into the hot working set. Results are detached node copies, and mutations must be
+flushed before they become visible. The initial persisted-query API supports
+node type, attribute and range filters, ordering, similarity, offset, and limit.
+
 ### `GraphQuery`
 
 Filter methods are chainable:
@@ -96,6 +102,16 @@ Terminal methods:
 Filters run before traversal. Similarity ranking runs after `orderBy`, so it becomes
 the final ordering before offset and limit.
 
+### `PersistedGraphQuery`
+
+Chainable filters are `where`, `whereAttribute`, `whereAttributeRange`,
+`whereNodeType`, `orderBy`, `similarTo`, `offset`, and `limit`. The asynchronous
+terminal methods are `toArray()`, `first()`, `count()`, and `ids()`.
+
+Adapters may implement `queryNodes(query)` and `countNodes(query)` for optimized
+storage-level execution. When absent, Polypack falls back to `allNodeIds()` and
+`getNodes()`, preserving compatibility with existing custom adapters.
+
 ### Vector search
 
 - `new VectorIndex(onChange?, distanceFn?)` creates an exact in-memory index.
@@ -111,7 +127,8 @@ functions throw `RangeError`. Zero vectors have cosine similarity `0`.
 
 - `MemoryAdapter` stores serialized records in memory.
 - `IndexedDBAdapter({ name?, version? })` persists browser data. Defaults to
-  database `polypack`, version `1`.
+  database `polypack`, version `2`. Its node-type index accelerates persisted
+  type queries; existing default databases are upgraded automatically.
 - `PersistenceAdapter` is the contract for custom storage. It contains node,
   edge, and vector single/bulk operations plus `clearAll()` and `close()`.
 

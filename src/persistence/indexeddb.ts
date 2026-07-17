@@ -1,5 +1,6 @@
 import type { SerializedNode, SerializedEdge } from '../types.js'
-import type { PersistenceAdapter } from './adapter.js'
+import type { PersistenceAdapter, PersistedNodeQuery } from './adapter.js'
+import { applyPersistedNodeQuery } from './query.js'
 
 /** IndexedDB database name and schema version. */
 export interface IndexedDBConfig {
@@ -7,15 +8,18 @@ export interface IndexedDBConfig {
   version: number
 }
 
-const DEFAULT_CONFIG: IndexedDBConfig = { name: 'polypack', version: 1 }
+const DEFAULT_CONFIG: IndexedDBConfig = { name: 'polypack', version: 2 }
 
 function openDB(config: IndexedDBConfig): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
     const req = indexedDB.open(config.name, config.version)
     req.onupgradeneeded = () => {
       const db = req.result
-      if (!db.objectStoreNames.contains('nodes')) {
-        db.createObjectStore('nodes', { keyPath: 'id' })
+      const nodeStore = !db.objectStoreNames.contains('nodes')
+        ? db.createObjectStore('nodes', { keyPath: 'id' })
+        : req.transaction!.objectStore('nodes')
+      if (!nodeStore.indexNames.contains('type')) {
+        nodeStore.createIndex('type', 'type', { unique: false })
       }
       if (!db.objectStoreNames.contains('edges')) {
         const store = db.createObjectStore('edges', { keyPath: 'id' })
@@ -143,6 +147,40 @@ export class IndexedDBAdapter implements PersistenceAdapter {
       }
       req.onerror = () => reject(req.error)
     })
+  }
+
+  async queryNodes(query: PersistedNodeQuery): Promise<SerializedNode[]> {
+    const database = await this.db()
+    const tx = database.transaction('nodes')
+    const store = tx.objectStore('nodes')
+    let candidates: SerializedNode[]
+
+    if (query.nodeTypes && query.nodeTypes.length === 0) {
+      candidates = []
+    } else if (query.nodeTypes && store.indexNames.contains('type')) {
+      const index = store.index('type')
+      const groups = await Promise.all(
+        query.nodeTypes.map(type => idbRequest<SerializedNode[]>(index.getAll(type))),
+      )
+      candidates = groups.flat()
+    } else {
+      candidates = await cursorAll<SerializedNode>(store)
+    }
+
+    return applyPersistedNodeQuery(candidates, query)
+  }
+
+  async countNodes(query: PersistedNodeQuery): Promise<number> {
+    const onlySingleType = query.nodeTypes?.length === 1 &&
+      !query.attributes && !query.attributeRanges
+    if (onlySingleType) {
+      const database = await this.db()
+      const store = database.transaction('nodes').objectStore('nodes')
+      if (store.indexNames.contains('type')) {
+        return idbRequest(store.index('type').count(query.nodeTypes![0]))
+      }
+    }
+    return (await this.queryNodes(query)).length
   }
 
   async putEdge(edge: SerializedEdge): Promise<void> {

@@ -1,5 +1,6 @@
 import type { SerializedNode, SerializedEdge } from '../types.js'
-import type { PersistenceAdapter } from './adapter.js'
+import type { PersistenceAdapter, PersistedNodeQuery } from './adapter.js'
+import { applyPersistedNodeQuery, matchesPersistedNode } from './query.js'
 
 /** Volatile persistence adapter for Node.js, tests, and temporary graphs. */
 export class MemoryAdapter implements PersistenceAdapter {
@@ -33,6 +34,18 @@ export class MemoryAdapter implements PersistenceAdapter {
 
   async allNodeIds(): Promise<string[]> {
     return [...this.nodes.keys()]
+  }
+
+  async queryNodes(query: PersistedNodeQuery): Promise<SerializedNode[]> {
+    return applyPersistedNodeQuery([...this.nodes.values()], query)
+  }
+
+  async countNodes(query: PersistedNodeQuery): Promise<number> {
+    let count = 0
+    for (const node of this.nodes.values()) {
+      if (matchesPersistedNode(node, query)) count++
+    }
+    return count
   }
 
   async putEdge(edge: SerializedEdge): Promise<void> {

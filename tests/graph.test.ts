@@ -386,6 +386,80 @@ describe('PolyGraph', () => {
       expect(await adapter.getNode('a')).toBeUndefined()
       expect(await adapter.getNode('b')).toBeUndefined()
     })
+
+    it('queries the complete persisted set without changing the loaded set', async () => {
+      const adapter = new MemoryAdapter()
+      const g = new PolyGraph(adapter, 1)
+      for (let i = 0; i < 12; i++) {
+        g.addNode({
+          id: `doc${i}`,
+          type: i === 11 ? 'other' : 'doc',
+          data: { group: i % 2 === 0 ? 'even' : 'odd', rank: i },
+          vector: new Float64Array([12 - i, i]),
+          insertedAt: i,
+          updatedAt: i,
+        })
+      }
+      await g.flush()
+      const loadedBefore = g.loadedSize
+
+      const results = await g.queryPersisted()
+        .whereNodeType('doc')
+        .where('group', 'even')
+        .whereAttributeRange('rank', { above: 1, below: 11 })
+        .orderBy('rank', 'desc')
+        .offset(1)
+        .limit(2)
+        .toArray()
+
+      expect(results.map(node => node.id)).toEqual(['doc8', 'doc6'])
+      expect(g.loadedSize).toBe(loadedBefore)
+      expect(g.hasLoadedNode('doc6')).toBe(false)
+    })
+
+    it('supports persisted similarity, count, first, and ids terminals', async () => {
+      const adapter = new MemoryAdapter()
+      await adapter.bulkPutNodes([
+        { id: 'a', type: 'doc', data: {}, vector: [1, 0], insertedAt: 1, updatedAt: 1 },
+        { id: 'b', type: 'doc', data: {}, vector: [0.9, 0.1], insertedAt: 2, updatedAt: 2 },
+        { id: 'c', type: 'doc', data: {}, vector: [0, 1], insertedAt: 3, updatedAt: 3 },
+        { id: 'no-vector', type: 'doc', data: {}, vector: null, insertedAt: 4, updatedAt: 4 },
+      ])
+      const g = new PolyGraph(adapter, 1)
+
+      expect(await g.queryPersisted().whereNodeType('doc').count()).toBe(4)
+      expect((await g.queryPersisted().whereNodeType('doc').similarTo([1, 0], 0.5).first())?.id).toBe('a')
+      expect(await g.queryPersisted().whereNodeType('doc').similarTo([1, 0], 0).limit(2).ids()).toEqual(['a', 'b'])
+      expect(g.loadedSize).toBe(0)
+    })
+
+    it('returns detached persisted results and excludes unflushed mutations', async () => {
+      const adapter = new MemoryAdapter()
+      await adapter.putNode({ id: 'stored', type: 'doc', data: { value: 1 }, vector: null, insertedAt: 1, updatedAt: 1 })
+      const g = new PolyGraph(adapter)
+      g.addNode({ id: 'pending', type: 'doc', data: {}, insertedAt: 2, updatedAt: 2 })
+
+      const result = (await g.queryPersisted().whereNodeType('doc').toArray())[0]
+      result.data.value = 99
+
+      expect(result.id).toBe('stored')
+      expect((await adapter.getNode('stored'))?.data.value).toBe(1)
+      expect(await g.queryPersisted().whereNodeType('doc').ids()).toEqual(['stored'])
+    })
+
+    it('falls back for custom adapters without query hooks', async () => {
+      const adapter = new MemoryAdapter()
+      await adapter.bulkPutNodes([
+        { id: 'a', type: 'doc', data: { rank: 2 }, vector: null, insertedAt: 1, updatedAt: 1 },
+        { id: 'b', type: 'other', data: { rank: 1 }, vector: null, insertedAt: 2, updatedAt: 2 },
+      ])
+      Object.defineProperty(adapter, 'queryNodes', { value: undefined })
+      Object.defineProperty(adapter, 'countNodes', { value: undefined })
+      const g = new PolyGraph(adapter)
+
+      expect(await g.queryPersisted().whereNodeType('doc').where('rank', 2).ids()).toEqual(['a'])
+      expect(await g.queryPersisted().whereNodeType('doc').count()).toBe(1)
+    })
   })
 
   describe('persistence with indexeddb adapter', () => {
