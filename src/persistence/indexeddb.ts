@@ -102,14 +102,10 @@ export class IndexedDBAdapter implements PersistenceAdapter {
   async getNodes(ids: string[]): Promise<SerializedNode[]> {
     if (ids.length === 0) return []
     const database = await this.db()
-    const results: SerializedNode[] = []
     const tx = database.transaction('nodes')
     const store = tx.objectStore('nodes')
-    for (const id of ids) {
-      const node = await idbRequest(store.get(id))
-      if (node) results.push(node)
-    }
-    return results
+    const results = await Promise.all(ids.map(id => idbRequest<SerializedNode | undefined>(store.get(id))))
+    return results.filter((node): node is SerializedNode => node !== undefined)
   }
 
   async deleteNode(id: string): Promise<void> {

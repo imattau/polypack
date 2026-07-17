@@ -99,6 +99,27 @@ describe('PolyGraph', () => {
       const node = await g.getNodeSafe('evicted')
       expect(node).toBeDefined()
       expect(node!.data.text).toBe('persisted')
+      expect(g.whereType('doc').map(n => n.id)).toContain('evicted')
+    })
+
+    it('replacing a node updates type and vector indexes', () => {
+      graph.addNode({ id: 'same', type: 'old', data: {}, vector: new Float64Array([1, 0]), insertedAt: 1, updatedAt: 1 })
+      graph.addNode({ id: 'same', type: 'new', data: {}, insertedAt: 2, updatedAt: 2 })
+
+      expect(graph.whereType('old')).toHaveLength(0)
+      expect(graph.whereType('new').map(n => n.id)).toEqual(['same'])
+      expect(graph.vectors.has('same')).toBe(false)
+    })
+
+    it('replacing a node without a vector deletes its persisted vector', async () => {
+      const adapter = new MemoryAdapter()
+      const g = new PolyGraph(adapter)
+      g.addNode({ id: 'same', type: 'old', data: {}, vector: new Float64Array([1, 0]), insertedAt: 1, updatedAt: 1 })
+      await g.flush()
+      g.addNode({ id: 'same', type: 'new', data: {}, insertedAt: 2, updatedAt: 2 })
+      await g.flush()
+
+      expect(await adapter.getAllVectors()).toHaveLength(0)
     })
   })
 
@@ -126,6 +147,21 @@ describe('PolyGraph', () => {
       graph.addEdge('z', 'REL', 'y')
       const sources = graph.getEdgeSources('y', 'REL')
       expect(sources.sort()).toEqual(['x', 'z'])
+    })
+
+    it('removing a target removes incoming edges from memory and persistence', async () => {
+      const adapter = new MemoryAdapter()
+      const g = new PolyGraph(adapter)
+      g.addNode({ id: 'src', type: 'node', data: {}, insertedAt: 1, updatedAt: 1 })
+      g.addNode({ id: 'target', type: 'node', data: {}, insertedAt: 2, updatedAt: 2 })
+      g.addEdge('src', 'REL', 'target')
+      await g.flush()
+
+      g.removeNode('target')
+      await g.flush()
+
+      expect(g.getEdges('src')).toHaveLength(0)
+      expect(await adapter.getAllEdges()).toHaveLength(0)
     })
 
     it('deduplicates edges', () => {
@@ -304,6 +340,68 @@ describe('PolyGraph', () => {
 
       const loaded = await adapter.getNode('d1')
       expect(loaded).toBeUndefined()
+    })
+
+    it('does not lose mutations made while a flush is in flight', async () => {
+      let release!: () => void
+      const gate = new Promise<void>(resolve => { release = resolve })
+      class SlowAdapter extends MemoryAdapter {
+        firstWrite = true
+        override async bulkPutNodes(nodes: Parameters<MemoryAdapter['bulkPutNodes']>[0]): Promise<void> {
+          if (this.firstWrite) {
+            this.firstWrite = false
+            await gate
+          }
+          await super.bulkPutNodes(nodes)
+        }
+      }
+      const adapter = new SlowAdapter()
+      const g = new PolyGraph(adapter)
+      g.addNode({ id: 'first', type: 't', data: {}, insertedAt: 1, updatedAt: 1 })
+      const flushing = g.flush()
+      g.addNode({ id: 'during', type: 't', data: {}, insertedAt: 2, updatedAt: 2 })
+      release()
+      await flushing
+
+      expect(await adapter.getNode('during')).toBeDefined()
+    })
+
+    it('flushes pending changes before dispose', async () => {
+      const adapter = new MemoryAdapter()
+      const g = new PolyGraph(adapter)
+      g.addNode({ id: 'pending', type: 't', data: {}, insertedAt: 1, updatedAt: 1 })
+      await g.dispose()
+      expect(await adapter.getNode('pending')).toBeDefined()
+    })
+
+    it('does not rewrite hydrated vectors', async () => {
+      class CountingAdapter extends MemoryAdapter {
+        vectorWrites = 0
+        override async bulkPutVectors(entries: Parameters<MemoryAdapter['bulkPutVectors']>[0]): Promise<void> {
+          this.vectorWrites += entries.length
+          await super.bulkPutVectors(entries)
+        }
+      }
+      const adapter = new CountingAdapter()
+      await adapter.putNode({ id: 'v', type: 't', data: {}, vector: [1, 0], insertedAt: 1, updatedAt: 1 })
+      await adapter.putVector('v', [1, 0])
+      const g = new PolyGraph(adapter)
+      await g.warm()
+      await g.flush()
+      expect(adapter.vectorWrites).toBe(0)
+      await g.dispose()
+    })
+
+    it('persists dirty nodes and vectors even when they are evicted before flush', async () => {
+      const adapter = new MemoryAdapter()
+      const g = new PolyGraph(adapter, 1)
+      for (let i = 0; i < 10; i++) {
+        g.addNode({ id: `n${i}`, type: 't', data: {}, vector: new Float64Array([i, 1]), insertedAt: i, updatedAt: i })
+      }
+      await g.flush()
+
+      expect(await adapter.allNodeIds()).toHaveLength(10)
+      expect(await adapter.getAllVectors()).toHaveLength(10)
     })
   })
 

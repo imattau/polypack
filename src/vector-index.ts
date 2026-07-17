@@ -1,11 +1,14 @@
 export type DistanceFunction = (a: ArrayLike<number>, b: ArrayLike<number>) => number
 
-function minLen(a: ArrayLike<number>, b: ArrayLike<number>): number {
-  return Math.min(a.length, b.length)
+function vectorLength(a: ArrayLike<number>, b: ArrayLike<number>): number {
+  if (a.length !== b.length) {
+    throw new RangeError(`Vector dimension mismatch: ${a.length} !== ${b.length}`)
+  }
+  return a.length
 }
 
 export function cosineSimilarity(a: ArrayLike<number>, b: ArrayLike<number>): number {
-  const len = minLen(a, b)
+  const len = vectorLength(a, b)
   let dot = 0
   let na = 0
   let nb = 0
@@ -19,7 +22,7 @@ export function cosineSimilarity(a: ArrayLike<number>, b: ArrayLike<number>): nu
 }
 
 export function euclideanSimilarity(a: ArrayLike<number>, b: ArrayLike<number>): number {
-  const len = minLen(a, b)
+  const len = vectorLength(a, b)
   let sum = 0
   for (let i = 0; i < len; i++) {
     const diff = a[i] - b[i]
@@ -41,6 +44,11 @@ export class VectorIndex {
   add(id: string, vector: number[]): void {
     this.vectors.set(id, vector)
     this.onChange?.(id)
+  }
+
+  /** Add an already-persisted vector without marking it dirty again. */
+  hydrate(id: string, vector: number[]): void {
+    this.vectors.set(id, vector)
   }
 
   addMany(entries: Array<{ id: string; vector: number[] }>): void {
@@ -65,14 +73,48 @@ export class VectorIndex {
     topK: number,
     threshold = 0
   ): Array<{ id: string; score: number }> {
-    const results: Array<{ id: string; score: number }> = []
+    if (topK <= 0) return []
+    const heap: Array<{ id: string; score: number; order: number }> = []
+    let order = 0
+
+    const isLess = (a: typeof heap[number], b: typeof heap[number]) =>
+      a.score < b.score || (a.score === b.score && a.order > b.order)
+    const siftUp = (index: number) => {
+      while (index > 0) {
+        const parent = (index - 1) >> 1
+        if (!isLess(heap[index], heap[parent])) break
+        ;[heap[index], heap[parent]] = [heap[parent], heap[index]]
+        index = parent
+      }
+    }
+    const siftDown = (index: number) => {
+      while (true) {
+        const left = index * 2 + 1
+        const right = left + 1
+        let smallest = index
+        if (left < heap.length && isLess(heap[left], heap[smallest])) smallest = left
+        if (right < heap.length && isLess(heap[right], heap[smallest])) smallest = right
+        if (smallest === index) break
+        ;[heap[index], heap[smallest]] = [heap[smallest], heap[index]]
+        index = smallest
+      }
+    }
+
     for (const [id, v] of this.vectors) {
       const score = this.distanceFn(vector, v)
       if (score < threshold) continue
-      results.push({ id, score })
+      const candidate = { id, score, order: order++ }
+      if (heap.length < topK) {
+        heap.push(candidate)
+        siftUp(heap.length - 1)
+      } else if (score > heap[0].score) {
+        heap[0] = candidate
+        siftDown(0)
+      }
     }
-    results.sort((a, b) => b.score - a.score)
-    return results.slice(0, topK)
+    return heap
+      .sort((a, b) => b.score - a.score || a.order - b.order)
+      .map(({ id, score }) => ({ id, score }))
   }
 
   clear(): void {

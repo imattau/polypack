@@ -157,26 +157,19 @@ describe('VectorIndex edge cases', () => {
 })
 
 describe('cosineSimilarity edge cases', () => {
-  it('handles vectors of different lengths (clamps to shorter)', () => {
-    const score = cosineSimilarity([1, 0, 0], [1, 0])
-    expect(score).toBeCloseTo(1) // only first 2 dims compared
+  it('rejects vectors of different lengths', () => {
+    expect(() => cosineSimilarity([1, 0, 0], [1, 0])).toThrow(RangeError)
   })
 
   it('handles both vectors all-zeros', () => {
     expect(cosineSimilarity([0, 0], [0, 0])).toBe(0)
   })
 
-  it('is not NaN for different lengths', () => {
-    const score = cosineSimilarity([1, 2, 3], [1])
-    expect(Number.isNaN(score)).toBe(false)
-  })
 })
 
 describe('euclideanSimilarity edge cases', () => {
-  it('handles vectors of different lengths', () => {
-    const score = euclideanSimilarity([3, 4], [3, 4, 5])
-    expect(Number.isNaN(score)).toBe(false)
-    expect(score).toBeCloseTo(1 / (1 + 0)) // first 2 dims match
+  it('rejects vectors of different lengths', () => {
+    expect(() => euclideanSimilarity([3, 4], [3, 4, 5])).toThrow(RangeError)
   })
 })
 

@@ -28,13 +28,16 @@ export class PolyGraph {
 
   protected hotCacheOrder = new Map<string, true>()
   protected _byType = new Map<string, Set<string>>()
+  protected evictedDirtyNodes = new Map<string, SerializedNode>()
 
   protected dirtyNodes = new Set<string>()
   protected dirtyEdges = new Set<string>()
   protected dirtyVectors = new Set<string>()
+  protected removedVectorIds = new Set<string>()
   protected removedEdgeIds = new Set<string>()
   protected removedNodeIds = new Set<string>()
   protected persistTimer: ReturnType<typeof setTimeout> | null = null
+  protected flushInFlight: Promise<void> | null = null
   protected evictionSkipCounter = 0
 
   protected batchDepth = 0
@@ -80,13 +83,50 @@ export class PolyGraph {
   protected schedulePersist(): void {
     if (this.persistTimer) clearTimeout(this.persistTimer)
     this.persistTimer = setTimeout(() => {
+      this.persistTimer = null
       this.flush().catch((err) => console.warn('[PolyGraph] Flush error:', err))
     }, 2000)
   }
 
   async flush(): Promise<void> {
+    if (this.flushInFlight) {
+      await this.flushInFlight
+      if (this.hasPendingPersistence()) await this.flush()
+      return
+    }
+    this.flushInFlight = this.flushPending()
+    try {
+      await this.flushInFlight
+    } finally {
+      this.flushInFlight = null
+    }
+    if (this.hasPendingPersistence()) await this.flush()
+    this.evictOldestIfOverCap()
+  }
+
+  protected hasPendingPersistence(): boolean {
+    return this.dirtyNodes.size > 0 || this.dirtyEdges.size > 0 ||
+      this.dirtyVectors.size > 0 || this.removedNodeIds.size > 0 ||
+      this.removedEdgeIds.size > 0 || this.removedVectorIds.size > 0
+  }
+
+  private async flushPending(): Promise<void> {
+    const dirtyNodeIds = [...this.dirtyNodes]
+    const dirtyEdgeIds = [...this.dirtyEdges]
+    const dirtyVectorIds = [...this.dirtyVectors]
+    const removedNodeIds = [...this.removedNodeIds]
+    const removedEdgeIds = [...this.removedEdgeIds]
+    const removedVectorIds = [...this.removedVectorIds]
+    const evictedSnapshots = new Map<string, SerializedNode>()
+    for (const id of dirtyNodeIds) this.dirtyNodes.delete(id)
+    for (const id of dirtyEdgeIds) this.dirtyEdges.delete(id)
+    for (const id of dirtyVectorIds) this.dirtyVectors.delete(id)
+    for (const id of removedNodeIds) this.removedNodeIds.delete(id)
+    for (const id of removedEdgeIds) this.removedEdgeIds.delete(id)
+    for (const id of removedVectorIds) this.removedVectorIds.delete(id)
+
     const nodesToSave: SerializedNode[] = []
-    for (const id of this.dirtyNodes) {
+    for (const id of dirtyNodeIds) {
       const node = this.nodes.get(id)
       if (node) {
         nodesToSave.push({
@@ -97,24 +137,18 @@ export class PolyGraph {
           insertedAt: node.insertedAt,
           updatedAt: node.updatedAt,
         })
+      } else {
+        const snapshot = this.evictedDirtyNodes.get(id)
+        if (snapshot) {
+          nodesToSave.push(snapshot)
+          evictedSnapshots.set(id, snapshot)
+          this.evictedDirtyNodes.delete(id)
+        }
       }
-    }
-
-    if (this.removedNodeIds.size > 0) {
-      const removed = [...this.removedNodeIds]
-      await this.persistence.bulkDeleteNodes(removed)
-      for (const id of removed) {
-        await this.persistence.deleteVector(id)
-      }
-      this.removedNodeIds.clear()
-    }
-
-    if (nodesToSave.length > 0) {
-      await this.persistence.bulkPutNodes(nodesToSave)
     }
 
     const dirtyEdgeList: SerializedEdge[] = []
-    for (const edgeIdStr of this.dirtyEdges) {
+    for (const edgeIdStr of dirtyEdgeIds) {
       const parts = edgeIdStr.split('::')
       if (parts.length < 3) continue
       const [source, type, ...rest] = parts
@@ -132,34 +166,52 @@ export class PolyGraph {
         })
       }
     }
-    await this.persistence.bulkPutEdges(dirtyEdgeList)
-    this.dirtyEdges.clear()
-
-    if (this.removedEdgeIds.size > 0) {
-      const removedEdges = [...this.removedEdgeIds]
-      await this.persistence.bulkDeleteEdges(removedEdges)
-      this.removedEdgeIds.clear()
-    }
-
     const dirtyVectorEntries: Array<{ id: string; vector: number[] }> = []
-    for (const id of this.dirtyVectors) {
-      const vector = this.vectors.get(id)
+    for (const id of dirtyVectorIds) {
+      const vector = this.vectors.get(id) ?? evictedSnapshots.get(id)?.vector ?? undefined
       if (vector) dirtyVectorEntries.push({ id, vector })
     }
-    await this.persistence.bulkPutVectors(dirtyVectorEntries)
-
-    this.dirtyNodes.clear()
-    this.dirtyVectors.clear()
+    try {
+      if (removedNodeIds.length > 0) {
+        await this.persistence.bulkDeleteNodes(removedNodeIds)
+        await Promise.all(removedNodeIds.map(id => this.persistence.deleteVector(id)))
+      }
+      await this.persistence.bulkPutNodes(nodesToSave)
+      await this.persistence.bulkPutEdges(dirtyEdgeList)
+      await this.persistence.bulkDeleteEdges(removedEdgeIds)
+      await Promise.all(removedVectorIds.map(id => this.persistence.deleteVector(id)))
+      await this.persistence.bulkPutVectors(dirtyVectorEntries)
+    } catch (error) {
+      for (const id of dirtyNodeIds) if (!this.removedNodeIds.has(id)) this.dirtyNodes.add(id)
+      for (const id of dirtyEdgeIds) if (!this.removedEdgeIds.has(id)) this.dirtyEdges.add(id)
+      for (const id of dirtyVectorIds) if (!this.removedNodeIds.has(id)) this.dirtyVectors.add(id)
+      for (const id of removedNodeIds) this.removedNodeIds.add(id)
+      for (const id of removedEdgeIds) this.removedEdgeIds.add(id)
+      for (const id of removedVectorIds) if (!this.vectors.has(id)) this.removedVectorIds.add(id)
+      for (const [id, snapshot] of evictedSnapshots) this.evictedDirtyNodes.set(id, snapshot)
+      throw error
+    }
   }
 
   // ── Node CRUD ──
 
   addNode(node: PolyNode): void {
+    const previous = this.nodes.get(node.id)
+    if (previous) {
+      this.unindexNode(node.id)
+    }
+    if (!node.vector) {
+      this.vectors.remove(node.id)
+      this.dirtyVectors.delete(node.id)
+      this.removedVectorIds.add(node.id)
+    }
+    this.removedNodeIds.delete(node.id)
     this.nodes.set(node.id, node)
     this.touchHotCache(node.id)
     this.markDirty(node.id)
     this.indexNode(node)
     if (node.vector) {
+      this.removedVectorIds.delete(node.id)
       this.vectors.add(node.id, [...node.vector])
     }
     this.emitChange({ type: 'node_added', nodeId: node.id, nodeType: node.type })
@@ -206,7 +258,7 @@ export class PolyGraph {
       this.touchHotCache(id)
       return node
     }
-    const serialized = await this.persistence.getNode(id)
+    const serialized = this.evictedDirtyNodes.get(id) ?? await this.persistence.getNode(id)
     if (!serialized) return undefined
     const restored: PolyNode = {
       id: serialized.id,
@@ -217,9 +269,11 @@ export class PolyGraph {
       updatedAt: serialized.updatedAt,
     }
     this.nodes.set(id, restored)
+    this.evictedDirtyNodes.delete(id)
+    this.indexNode(restored)
     this.touchHotCache(id)
     if (restored.vector) {
-      this.vectors.add(restored.id, [...restored.vector])
+      this.vectors.hydrate(restored.id, [...restored.vector])
     }
     return restored
   }
@@ -230,6 +284,7 @@ export class PolyGraph {
     Object.assign(node.data, data)
     if (vector !== undefined) {
       node.vector = vector
+      this.removedVectorIds.delete(id)
       this.vectors.add(id, [...vector])
       this.dirtyVectors.add(id)
     }
@@ -302,6 +357,7 @@ export class PolyGraph {
     this.nodes.delete(id)
     this.vectors.remove(id)
     this.dirtyVectors.delete(id)
+    this.removedVectorIds.delete(id)
 
     this.dirtyNodes.delete(id)
     this.removedNodeIds.add(id)
@@ -311,20 +367,39 @@ export class PolyGraph {
   }
 
   protected cleanupNodeEdges(id: string): void {
+    const incomingSources = [...(this.nodeToEdgeMap.get(id) ?? [])]
+    for (const source of incomingSources) {
+      const sourceEdges = this.edges.get(source)
+      if (!sourceEdges) continue
+      const removed = sourceEdges.filter(e => e.target === id)
+      for (const edge of removed) this.recordRemovedEdge(source, edge)
+      const remaining = sourceEdges.filter(e => e.target !== id)
+      if (remaining.length > 0) this.edges.set(source, remaining)
+      else this.edges.delete(source)
+    }
     const sourceEdges = this.edges.get(id)
     if (sourceEdges) {
       for (const e of sourceEdges) {
         this.nodeToEdgeMap.get(e.target)?.delete(id)
+        this.recordRemovedEdge(id, e)
       }
       this.edges.delete(id)
     }
     this.nodeToEdgeMap.delete(id)
   }
 
+  private recordRemovedEdge(source: string, edge: { target: string; type: string }): void {
+    const id = edgeId(source, edge.type, edge.target)
+    this.dirtyEdges.delete(id)
+    this.removedEdgeIds.add(id)
+    this.emitChange({ type: 'edge_removed', edgeType: edge.type, source, target: edge.target })
+  }
+
   // ── Edge CRUD ──
 
   addEdge(source: string, type: string, target: string, data?: Record<string, unknown>, ownership?: EdgeOwnership): void {
     const id = edgeId(source, type, target)
+    this.removedEdgeIds.delete(id)
     if (!this.edges.has(source)) this.edges.set(source, [])
     const edges = this.edges.get(source)!
     const existing = edges.find(e => e.type === type && e.target === target)
@@ -428,12 +503,21 @@ export class PolyGraph {
     while (this.hotCacheOrder.size > this.hotCacheMax) {
       const evict = this.hotCacheOrder.keys().next().value
       if (evict === undefined) break
+      const node = this.nodes.get(evict)
+      if (node && this.dirtyNodes.has(evict)) {
+        this.evictedDirtyNodes.set(evict, {
+          id: node.id,
+          type: node.type,
+          data: node.data,
+          vector: node.vector ? [...node.vector] : null,
+          insertedAt: node.insertedAt,
+          updatedAt: node.updatedAt,
+        })
+      }
       this.hotCacheOrder.delete(evict)
-      this.cleanupNodeEdges(evict)
       this.unindexNode(evict)
       this.nodes.delete(evict)
       this.vectors.remove(evict)
-      this.dirtyVectors.delete(evict)
     }
   }
 
@@ -520,7 +604,7 @@ export class PolyGraph {
 
     const allVectors = await this.persistence.getAllVectors()
     for (const { id, vector } of allVectors) {
-      this.vectors.add(id, vector)
+      this.vectors.hydrate(id, vector)
     }
 
     await yieldToUI()
@@ -548,17 +632,23 @@ export class PolyGraph {
   // ── Clear / Dispose ──
 
   clear(): void {
+    if (this.persistTimer) {
+      clearTimeout(this.persistTimer)
+      this.persistTimer = null
+    }
     this.nodes.clear()
     this.edges.clear()
     this.vectors.clear()
     this.hotCacheOrder.clear()
     this.nodeToEdgeMap.clear()
     this._byType.clear()
+    this.evictedDirtyNodes.clear()
     this.dirtyEdges.clear()
     this.dirtyVectors.clear()
     this.dirtyNodes.clear()
     this.removedNodeIds.clear()
     this.removedEdgeIds.clear()
+    this.removedVectorIds.clear()
   }
 
   async dispose(): Promise<void> {
@@ -566,6 +656,7 @@ export class PolyGraph {
       clearTimeout(this.persistTimer)
       this.persistTimer = null
     }
+    await this.flush()
     this.clear()
     await this.persistence.close()
   }
