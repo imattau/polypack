@@ -1,12 +1,12 @@
-export { PolyGraph } from './graph'
-export { VectorIndex, cosineSimilarity, euclideanSimilarity } from './vector-index'
-export type { DistanceFunction } from './vector-index'
-export { GraphQuery } from './query'
-export type { AggregateOp, AggregateResult, GroupedRow } from './query'
-export { MemoryAdapter } from './persistence/memory'
-export { IndexedDBAdapter } from './persistence/indexeddb'
-export type { PersistenceAdapter } from './persistence/adapter'
-export type { IndexedDBConfig } from './persistence/indexeddb'
+export { PolyGraph } from './graph.js'
+export { VectorIndex, cosineSimilarity, euclideanSimilarity } from './vector-index.js'
+export type { DistanceFunction } from './vector-index.js'
+export { GraphQuery } from './query.js'
+export type { AggregateOp, AggregateResult, GroupedRow } from './query.js'
+export { MemoryAdapter } from './persistence/memory.js'
+export { IndexedDBAdapter } from './persistence/indexeddb.js'
+export type { PersistenceAdapter } from './persistence/adapter.js'
+export type { IndexedDBConfig } from './persistence/indexeddb.js'
 export type {
   PolyNode,
   PolyEdge,
@@ -15,5 +15,5 @@ export type {
   SerializedNode,
   SerializedEdge,
   VectorQuery,
-} from './types'
-export { yieldToUI, edgeId } from './utils'
+} from './types.js'
+export { yieldToUI, edgeId } from './utils.js'

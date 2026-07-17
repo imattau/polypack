@@ -1,8 +1,25 @@
 {
   "name": "polypack",
-  "version": "0.1.0",
+  "version": "1.1.0",
   "description": "Generic property graph engine with vector similarity search — extracted from scrollstr's PolyGraph",
+  "keywords": [
+    "graph",
+    "property-graph",
+    "vector-search",
+    "similarity-search",
+    "indexeddb",
+    "rxjs"
+  ],
+  "homepage": "https://github.com/imattau/polypack#readme",
+  "bugs": {
+    "url": "https://github.com/imattau/polypack/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/imattau/polypack.git"
+  },
   "type": "module",
+  "sideEffects": false,
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
@@ -13,16 +30,34 @@
     "./react": {
       "types": "./dist/react.d.ts",
       "import": "./dist/react.js"
+    },
+    "./sync": {
+      "types": "./dist/sync/index.d.ts",
+      "import": "./dist/sync/index.js"
     }
   },
   "files": [
-    "dist"
+    "dist",
+    "docs/API.md",
+    "CHANGELOG.md",
+    "CONTRIBUTING.md",
+    "SECURITY.md"
   ],
   "scripts": {
     "build": "tsc",
+    "check": "npm test && npm run build && npm run check:exports",
+    "check:exports": "node --input-type=module --eval \"const core = await import('./dist/index.js'); const sync = await import('./dist/sync/index.js'); const react = await import('./dist/react.js'); if (!core.PolyGraph || !sync.SyncClient || !react.useGraphQuery) process.exit(1)\"",
+    "prepack": "npm run build",
+    "prepublishOnly": "npm test && npm run build",
     "test": "vitest run",
-"test:gc": "NODE_OPTIONS=\"--expose-gc\" vitest run tests/cache-growth.test.ts",
+    "test:gc": "NODE_OPTIONS=\"--expose-gc\" vitest run tests/cache-growth.test.ts",
     "test:watch": "vitest"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "dependencies": {
     "rxjs": "^7.8.2"

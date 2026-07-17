@@ -1,4 +1,4 @@
-import type { SyncMessage, SyncOp } from './types'
+import type { SyncMessage, SyncOp } from './types.js'
 
 type ClientHandle = {
   send: (msg: SyncMessage) => void
@@ -9,6 +9,7 @@ type ClientHandle = {
  * Simple relay server. Receives ops from clients, stores them in an
  * in-memory op log, and broadcasts to all other connected clients.
  */
+/** In-memory relay that broadcasts received operations to all other clients. */
 export class SyncServer {
   private opLog: SyncOp[] = []
   private clients: ClientHandle[] = []

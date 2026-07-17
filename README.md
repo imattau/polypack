@@ -2,13 +2,21 @@
 
 Generic property graph engine with vector similarity search, edge ownership semantics, relational queries, and real-time sync. Runs in browser (IndexedDB) and Node.js (MemoryAdapter).
 
+## Install
+
+```sh
+npm install polypack
+```
+
+React is an optional peer dependency and is only required when importing from `polypack/react`.
+
 ## Features
 
 - **Property graph** — typed nodes and edges with arbitrary data payloads
 - **LRU hot cache** — 10K node limit by default, spills to pluggable persistence
 - **Vector similarity** — cosine, euclidean, or pluggable distance functions
 - **Fluent query builder** — filter by type/attribute/edge/range, BFS traversal, vector similarity
-- **Relational extensions** — `pluck`, `aggregate`, `groupBy`, `join`, `groupByVector` (clustering)
+- **Relational extensions** — `pluck`, `aggregate`, `groupAggregate`, `join`, `groupByVector` (clustering)
 - **Edge ownership** — `owned` (cascade delete), `shared` (orphan detection), `reference` (no-op)
 - **Reactive** — RxJS change events, batching, React hooks
 - **Pluggable persistence** — MemoryAdapter, IndexedDBAdapter, build your own
@@ -64,6 +72,22 @@ graph.query()
 | `polypack` | Core: PolyGraph, VectorIndex, GraphQuery, persistence adapters |
 | `polypack/react` | React hooks: `useGraphQuery`, `useLiveQuery` |
 | `polypack/sync` | Sync layer: OpLog, SyncAdapter, SyncClient, SyncServer |
+
+See the complete [API reference](docs/API.md), including persistence, React,
+sync, lifecycle, ownership, and error contracts.
+
+## Requirements
+
+- Node.js 18 or newer when used in Node.js.
+- A browser with IndexedDB when using `IndexedDBAdapter`.
+- Equal vector dimensions for similarity operations; mismatches throw `RangeError`.
+
+Polypack is distributed as native ES modules.
+
+## Contributing and security
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development instructions. Please
+report vulnerabilities according to [SECURITY.md](SECURITY.md).
 
 ## License
 

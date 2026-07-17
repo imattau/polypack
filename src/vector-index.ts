@@ -1,3 +1,4 @@
+/** Returns a similarity score where larger values are better matches. */
 export type DistanceFunction = (a: ArrayLike<number>, b: ArrayLike<number>) => number
 
 function vectorLength(a: ArrayLike<number>, b: ArrayLike<number>): number {
@@ -7,6 +8,7 @@ function vectorLength(a: ArrayLike<number>, b: ArrayLike<number>): number {
   return a.length
 }
 
+/** Calculate cosine similarity. Throws when vector dimensions differ. */
 export function cosineSimilarity(a: ArrayLike<number>, b: ArrayLike<number>): number {
   const len = vectorLength(a, b)
   let dot = 0
@@ -21,6 +23,7 @@ export function cosineSimilarity(a: ArrayLike<number>, b: ArrayLike<number>): nu
   return denom === 0 ? 0 : dot / denom
 }
 
+/** Convert Euclidean distance to a 0–1 similarity. Throws on unequal dimensions. */
 export function euclideanSimilarity(a: ArrayLike<number>, b: ArrayLike<number>): number {
   const len = vectorLength(a, b)
   let sum = 0
@@ -31,6 +34,7 @@ export function euclideanSimilarity(a: ArrayLike<number>, b: ArrayLike<number>):
   return 1 / (1 + Math.sqrt(sum))
 }
 
+/** Exact in-memory vector index with O(n log k) top-k selection. */
 export class VectorIndex {
   private vectors = new Map<string, number[]>()
   private onChange?: (id: string) => void

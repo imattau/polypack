@@ -1,10 +1,10 @@
 import { Subject } from 'rxjs'
-import type { PolyNode, EdgeOwnership, GraphChangeEvent, SerializedNode, SerializedEdge } from './types'
-import { VectorIndex } from './vector-index'
-import { GraphQuery } from './query'
-import { edgeId, yieldToUI } from './utils'
-import type { PersistenceAdapter } from './persistence/adapter'
-import { MemoryAdapter } from './persistence/memory'
+import type { PolyNode, EdgeOwnership, GraphChangeEvent, SerializedNode, SerializedEdge } from './types.js'
+import { VectorIndex } from './vector-index.js'
+import { GraphQuery } from './query.js'
+import { edgeId, yieldToUI } from './utils.js'
+import type { PersistenceAdapter } from './persistence/adapter.js'
+import { MemoryAdapter } from './persistence/memory.js'
 
 type EdgeIndex = Map<string, Array<{ target: string; type: string; data?: Record<string, unknown> }>>
 
@@ -16,6 +16,14 @@ function getOwnership(data?: Record<string, unknown>): EdgeOwnership {
   return (data?.[OWNERSHIP_KEY] as EdgeOwnership) ?? 'reference'
 }
 
+/**
+ * In-memory property graph with vector search, reactive change events, a
+ * bounded node cache, and pluggable persistence.
+ *
+ * Call {@link warm} before querying existing persisted data and {@link dispose}
+ * during shutdown. Mutations are persisted after a two-second debounce or
+ * immediately with {@link flush}.
+ */
 export class PolyGraph {
   protected nodes = new Map<string, PolyNode>()
   protected edges: EdgeIndex = new Map()

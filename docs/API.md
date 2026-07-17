@@ -1,0 +1,153 @@
+# API reference
+
+Polypack is ESM-only and requires Node.js 18 or newer. The browser adapter also
+requires IndexedDB. React is optional and only loaded by `polypack/react`.
+
+## `polypack`
+
+### `PolyGraph`
+
+```ts
+new PolyGraph(adapter?: PersistenceAdapter, hotCacheMax?: number)
+```
+
+The main property-graph container. Without an adapter it uses `MemoryAdapter`.
+The default hot-node limit is 10,000. Edges remain indexed when nodes are
+evicted, and dirty evicted nodes are retained until persistence completes.
+
+Lifecycle:
+
+- `warm()` / `load()` loads persisted nodes, vectors, and edges. Call it before
+  querying an existing database.
+- `flush()` immediately persists queued mutations. Flushes are serialized.
+- `save()` writes the complete currently loaded graph without clearing dirty state.
+- `dispose()` flushes queued mutations, clears memory, then closes the adapter.
+- `clear()` only clears in-memory state; it does not delete adapter contents.
+- `prune(maxNodes)` removes the oldest loaded nodes and applies ownership rules.
+
+Nodes:
+
+- `addNode(node)` inserts or replaces a node. Replacement updates type/vector indexes.
+- `getNode(id)` returns a loaded node synchronously.
+- `getNodeSafe(id)` restores an evicted node from persistence when necessary.
+- `updateNode(id, data, vector?)` shallow-merges data and optionally replaces its vector.
+- `removeNode(id)` removes the node, all connected edges, and owned descendants.
+- `whereType(type)` returns loaded nodes of one type.
+- `size` is the number of currently loaded nodes, not total persisted nodes.
+
+Edges:
+
+- `addEdge(source, type, target, data?, ownership?)` adds one unique directed edge.
+- `getEdges(source, type?)` returns outgoing edge descriptors.
+- `getEdgeTargets(source, type)` and `getEdgeSources(target, type)` return IDs.
+- `removeEdges(source, type?, target?)` removes matching outgoing edges.
+
+Ownership is stored on the edge:
+
+- `reference` (default): removing the edge never removes its target.
+- `shared`: keeps the target, and invokes the protected `onOrphan` hook when it
+  loses its final incoming edge.
+- `owned`: removes the target when it loses its final owning source; cascading
+  is cycle-safe.
+
+Reactivity and batching:
+
+- `changes` is an RxJS `Subject<GraphChangeEvent>`.
+- `startBatch()` queues notifications until the matching `endBatch()`.
+- `endBatch()` throws if no batch is open.
+
+`query()` creates a mutable `GraphQuery`.
+
+### `GraphQuery`
+
+Filter methods are chainable:
+
+- `where(field, value)` / `whereAttribute(name, value)` use strict equality.
+- `whereAttributeRange(name, { above?, below? })` uses exclusive boundaries.
+- `whereNodeType(...types)` restricts node types.
+- `whereEdge(type, target?)` requires an outgoing edge.
+- `whereEdgeSource(source)` requires an incoming edge from that source.
+- `join(edgeType, direction?, predicate?)` filters by connected nodes.
+- `traverse(edgeType, depth, direction?)` performs breadth-first traversal and
+  includes the seed nodes.
+- `similarTo(vector, threshold?, topK?)` ranks nodes by cosine similarity.
+- `orderBy(field, direction?)`, `offset(n)`, and `limit(n)` shape results.
+
+Terminal methods:
+
+- `toArray()`, `first()`, `count()`, and `ids()` return matched nodes or IDs.
+- `pluck(...fields)` projects node data into records that also contain `id` and `type`.
+- `aggregate(field, op)` supports `sum`, `avg`, `min`, `max`, and `count`.
+- `groupAggregate(field, op, groupByField)` aggregates by a data field.
+- `having(groups, predicate)` filters aggregate rows.
+- `groupByVector(groups, field, op, threshold?)` assigns nodes to their nearest centroid.
+- `uniqueKeys(field)` returns distinct values across all currently loaded nodes.
+- `collect(edgeType, direction?, predicate?)` returns unique directly connected nodes.
+
+Filters run before traversal. Similarity ranking runs after `orderBy`, so it becomes
+the final ordering before offset and limit.
+
+### Vector search
+
+- `new VectorIndex(onChange?, distanceFn?)` creates an exact in-memory index.
+- `add`, `addMany`, `remove`, `removeMany`, `clear`, `has`, `get`, `entries`, and
+  `size` manage vectors.
+- `query(vector, topK, threshold?)` returns `{ id, score }[]`, highest first.
+- `cosineSimilarity(a, b)` and `euclideanSimilarity(a, b)` are built in.
+
+All compared vectors must have identical dimensions; otherwise similarity
+functions throw `RangeError`. Zero vectors have cosine similarity `0`.
+
+### Persistence
+
+- `MemoryAdapter` stores serialized records in memory.
+- `IndexedDBAdapter({ name?, version? })` persists browser data. Defaults to
+  database `polypack`, version `1`.
+- `PersistenceAdapter` is the contract for custom storage. It contains node,
+  edge, and vector single/bulk operations plus `clearAll()` and `close()`.
+
+Adapter methods should reject on storage errors. Bulk methods should be atomic
+where the backing store permits it.
+
+### Types and utilities
+
+The root exports `PolyNode`, `PolyEdge`, `EdgeOwnership`, `GraphChangeEvent`,
+`SerializedNode`, `SerializedEdge`, `VectorQuery`, aggregate types,
+`DistanceFunction`, `IndexedDBConfig`, and `PersistenceAdapter`.
+
+`edgeId(source, type, target)` produces the persistence edge key.
+`yieldToUI()` yields through a zero-delay timer.
+
+## `polypack/react`
+
+```ts
+useGraphQuery(graph, queryFn, deps, delay?, nodeTypes?)
+useLiveQuery(graph, querier, deps?, defaultResult?)
+```
+
+Both hooks execute immediately, subscribe to graph changes, and support sync or
+async queries. `useGraphQuery` defaults to a 200 ms debounce. When `nodeTypes`
+is supplied, events for other known node types are ignored. Query errors are
+logged and set the result to `undefined`.
+
+The dependency list controls query closure refresh in the same way as other
+React hooks. React 18 and 19 are supported as an optional peer dependency.
+
+## `polypack/sync`
+
+- `OpLog(clientId, existing?)` appends sequenced `SyncOp` values and exposes
+  `since(seq)`, `all`, `latestSeq`, and `size`.
+- `SyncAdapter(inner, clientId)` wraps persistence and records successful node
+  and edge writes in its `oplog`; set `onOp` to observe them.
+- `SyncClient({ graph, transport, clientId?, autoFlush? })` captures graph
+  events, sends deltas, and applies remote operations with echo suppression.
+  Use `flush()` for manual sends and `disconnect()` to unsubscribe and close.
+- `SyncServer` is an in-memory relay. `addClient(handle)` returns that client's
+  incoming-message handler; `ops` exposes the received log.
+- `SyncTransport` requires `send`, `onMessage`, and `close`.
+- `MemoryTransport.pair()` creates linked asynchronous in-process transports.
+
+The bundled sync layer is intentionally transport-agnostic and in-memory. It
+does not provide authentication, durable server storage, acknowledgements,
+retries, conflict resolution, or network reconnection; production transports
+must supply those guarantees.

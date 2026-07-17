@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
-import type { PolyGraph } from './graph'
+import type { PolyGraph } from './graph.js'
 
+/** Run a reactive graph query and optionally return a value before its first result. */
 export function useLiveQuery<T>(
   graph: PolyGraph,
   querier: () => Promise<T> | T,
@@ -11,6 +12,11 @@ export function useLiveQuery<T>(
   return result ?? defaultResult
 }
 
+/**
+ * Run a sync or async query immediately and again after graph mutations.
+ * Results and change events are debounced by `delay`; `nodeTypes` can suppress
+ * reruns for unrelated node changes.
+ */
 export function useGraphQuery<T>(
   graph: PolyGraph,
   queryFn: () => T | Promise<T>,

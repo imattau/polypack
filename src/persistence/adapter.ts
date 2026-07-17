@@ -1,5 +1,6 @@
-import type { SerializedNode, SerializedEdge } from '../types'
+import type { SerializedNode, SerializedEdge } from '../types.js'
 
+/** Storage contract used by {@link PolyGraph}. Implement all writes atomically where possible. */
 export interface PersistenceAdapter {
   putNode(node: SerializedNode): Promise<void>
   bulkPutNodes(nodes: SerializedNode[]): Promise<void>

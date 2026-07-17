@@ -1,6 +1,7 @@
-import type { SerializedNode, SerializedEdge } from '../types'
-import type { PersistenceAdapter } from './adapter'
+import type { SerializedNode, SerializedEdge } from '../types.js'
+import type { PersistenceAdapter } from './adapter.js'
 
+/** IndexedDB database name and schema version. */
 export interface IndexedDBConfig {
   name: string
   version: number
@@ -63,6 +64,7 @@ function cursorAll<T>(store: IDBObjectStore): Promise<T[]> {
   })
 }
 
+/** Browser persistence adapter backed by three IndexedDB object stores. */
 export class IndexedDBAdapter implements PersistenceAdapter {
   private dbPromise: Promise<IDBDatabase> | null = null
   private config: IndexedDBConfig

@@ -1,5 +1,6 @@
-import type { SyncMessage } from './types'
+import type { SyncMessage } from './types.js'
 
+/** Minimal bidirectional transport contract consumed by {@link SyncClient}. */
 export interface SyncTransport {
   send(msg: SyncMessage): void
   onMessage: ((msg: SyncMessage) => void) | null
@@ -7,6 +8,7 @@ export interface SyncTransport {
 }
 
 /** Bidirectional in-memory transport for testing / single-process use. */
+/** Asynchronous in-process transport useful for tests and local peers. */
 export class MemoryTransport implements SyncTransport {
   private peer: MemoryTransport | null = null
   onMessage: ((msg: SyncMessage) => void) | null = null

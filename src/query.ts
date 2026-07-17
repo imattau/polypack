@@ -1,5 +1,5 @@
-import type { PolyNode } from './types'
-import { cosineSimilarity } from './vector-index'
+import type { PolyNode } from './types.js'
+import { cosineSimilarity } from './vector-index.js'
 
 type EdgeIndex = Map<string, Array<{ target: string; type: string; data?: Record<string, unknown> }>>
 
@@ -22,6 +22,7 @@ export interface GroupedRow {
   count: number
 }
 
+/** Mutable fluent query builder created by {@link PolyGraph.query}. */
 export class GraphQuery {
   private opts: {
     nodeTypes?: string[]

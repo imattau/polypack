@@ -1,6 +1,6 @@
-import type { PersistenceAdapter } from '../persistence/adapter'
-import type { SerializedNode, SerializedEdge } from '../types'
-import { OpLog } from './oplog'
+import type { PersistenceAdapter } from '../persistence/adapter.js'
+import type { SerializedNode, SerializedEdge } from '../types.js'
+import { OpLog } from './oplog.js'
 
 export type OpCallback = (op: import('./types').SyncOp) => void
 

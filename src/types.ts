@@ -1,3 +1,4 @@
+/** A typed property-graph node. Timestamps are Unix milliseconds. */
 export interface PolyNode<TData extends Record<string, unknown> = Record<string, unknown>> {
   id: string
   type: string
@@ -7,8 +8,10 @@ export interface PolyNode<TData extends Record<string, unknown> = Record<string,
   updatedAt: number
 }
 
+/** Controls what happens to a target when its incoming edge is removed. */
 export type EdgeOwnership = 'owned' | 'shared' | 'reference'
 
+/** Serializable representation of a directed property-graph edge. */
 export interface PolyEdge<TData extends Record<string, unknown> = Record<string, unknown>> {
   id: string
   source: string
@@ -18,6 +21,7 @@ export interface PolyEdge<TData extends Record<string, unknown> = Record<string,
   createdAt: number
 }
 
+/** Mutation notification emitted through {@link PolyGraph.changes}. */
 export interface GraphChangeEvent {
   type: 'node_added' | 'node_updated' | 'node_removed' | 'edge_added' | 'edge_removed'
   nodeId?: string
@@ -28,6 +32,7 @@ export interface GraphChangeEvent {
   target?: string
 }
 
+/** Persistence-safe node representation using plain arrays for vectors. */
 export interface SerializedNode {
   id: string
   type: string
@@ -37,6 +42,7 @@ export interface SerializedNode {
   updatedAt: number
 }
 
+/** Persistence-safe edge representation. */
 export interface SerializedEdge {
   id: string
   source: string
@@ -46,6 +52,7 @@ export interface SerializedEdge {
   createdAt: number
 }
 
+/** Parameters for a nearest-neighbour vector search. */
 export interface VectorQuery {
   vector: number[]
   threshold?: number

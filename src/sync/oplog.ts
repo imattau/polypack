@@ -1,5 +1,6 @@
-import type { SyncOp } from './types'
+import type { SyncOp } from './types.js'
 
+/** Append-only, client-local sequence of graph mutations. */
 export class OpLog {
   private ops: SyncOp[] = []
   private nextSeq = 1

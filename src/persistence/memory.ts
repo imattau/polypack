@@ -1,6 +1,7 @@
-import type { SerializedNode, SerializedEdge } from '../types'
-import type { PersistenceAdapter } from './adapter'
+import type { SerializedNode, SerializedEdge } from '../types.js'
+import type { PersistenceAdapter } from './adapter.js'
 
+/** Volatile persistence adapter for Node.js, tests, and temporary graphs. */
 export class MemoryAdapter implements PersistenceAdapter {
   private nodes = new Map<string, SerializedNode>()
   private edges = new Map<string, SerializedEdge>()

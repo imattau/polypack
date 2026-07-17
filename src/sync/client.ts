@@ -1,10 +1,11 @@
 import { Subscription } from 'rxjs'
-import type { PolyGraph } from '../graph'
-import type { GraphChangeEvent } from '../types'
-import type { SyncTransport } from './transport'
-import type { SyncMessage, SyncOp } from './types'
-import { OpLog } from './oplog'
+import type { PolyGraph } from '../graph.js'
+import type { GraphChangeEvent } from '../types.js'
+import type { SyncTransport } from './transport.js'
+import type { SyncMessage, SyncOp } from './types.js'
+import { OpLog } from './oplog.js'
 
+/** Configuration for a graph synchronization client. */
 export interface SyncClientOptions {
   graph: PolyGraph
   transport: SyncTransport
@@ -28,6 +29,7 @@ const EDGE_OPS: Record<string, SyncOp['kind']> = {
  * Syncs a local PolyGraph with a remote server by subscribing to graph
  * change events and forwarding mutations through a transport.
  */
+/** Captures local graph changes and applies remote operations without echoing them. */
 export class SyncClient {
   private graph: PolyGraph
   private transport: SyncTransport
