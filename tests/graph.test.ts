@@ -290,6 +290,102 @@ describe('PolyGraph', () => {
       expect(g.size).toBe(2)
       expect(g.getEdgeTargets('a', 'REL')).toEqual(['b'])
     })
+
+    it('reports loaded and persisted node state explicitly', async () => {
+      const adapter = new MemoryAdapter()
+      const g = new PolyGraph(adapter, 1)
+      for (let i = 0; i < 12; i++) {
+        g.addNode({ id: `n${i}`, type: 't', data: {}, insertedAt: i, updatedAt: i })
+      }
+      await g.flush()
+
+      expect(g.loadedSize).toBe(1)
+      expect(g.size).toBe(g.loadedSize)
+      expect(g.hasLoadedNode('n0')).toBe(false)
+      expect(await g.persistedSize()).toBe(12)
+    })
+
+    it('updates an evicted node through updateNodeSafe', async () => {
+      const adapter = new MemoryAdapter()
+      const g = new PolyGraph(adapter, 1)
+      for (let i = 0; i < 12; i++) {
+        g.addNode({ id: `n${i}`, type: 't', data: { value: i }, insertedAt: i, updatedAt: i })
+      }
+      await g.flush()
+      expect(g.hasLoadedNode('n0')).toBe(false)
+
+      const updated = await g.updateNodeSafe('n0', { value: 99 }, new Float64Array([1, 0]))
+      await g.flush()
+
+      expect(updated?.data.value).toBe(99)
+      expect((await adapter.getNode('n0'))?.data.value).toBe(99)
+      expect((await adapter.getNode('n0'))?.vector).toEqual([1, 0])
+    })
+
+    it('removes an evicted node and its evicted owned descendant safely', async () => {
+      const adapter = new MemoryAdapter()
+      const g = new PolyGraph(adapter, 1)
+      g.addNode({ id: 'parent', type: 't', data: {}, insertedAt: 0, updatedAt: 0 })
+      g.addNode({ id: 'child', type: 't', data: {}, insertedAt: 1, updatedAt: 1 })
+      g.addEdge('parent', 'OWNS', 'child', undefined, 'owned')
+      for (let i = 0; i < 12; i++) {
+        g.addNode({ id: `filler${i}`, type: 't', data: {}, insertedAt: i + 2, updatedAt: i + 2 })
+      }
+      await g.flush()
+      expect(g.hasLoadedNode('parent')).toBe(false)
+      expect(g.hasLoadedNode('child')).toBe(false)
+
+      expect(await g.removeNodeSafe('parent')).toBe(true)
+      expect(await g.getNodeSafe('parent')).toBeUndefined()
+      await g.flush()
+
+      expect(await adapter.getNode('parent')).toBeUndefined()
+      expect(await adapter.getNode('child')).toBeUndefined()
+      expect(await adapter.getAllEdges()).toHaveLength(0)
+    })
+
+    it('safe removal preserves an owned target that has another owner', async () => {
+      const adapter = new MemoryAdapter()
+      const g = new PolyGraph(adapter, 1)
+      g.addNode({ id: 'owner-a', type: 't', data: {}, insertedAt: 0, updatedAt: 0 })
+      g.addNode({ id: 'owner-b', type: 't', data: {}, insertedAt: 1, updatedAt: 1 })
+      g.addNode({ id: 'shared-child', type: 't', data: {}, insertedAt: 2, updatedAt: 2 })
+      g.addEdge('owner-a', 'OWNS', 'shared-child', undefined, 'owned')
+      g.addEdge('owner-b', 'OWNS', 'shared-child', undefined, 'owned')
+      for (let i = 0; i < 10; i++) {
+        g.addNode({ id: `extra${i}`, type: 't', data: {}, insertedAt: i + 3, updatedAt: i + 3 })
+      }
+      await g.flush()
+
+      expect(await g.removeNodeSafe('owner-a')).toBe(true)
+      await g.flush()
+
+      expect(await adapter.getNode('owner-a')).toBeUndefined()
+      expect(await adapter.getNode('owner-b')).toBeDefined()
+      expect(await adapter.getNode('shared-child')).toBeDefined()
+      expect((await adapter.getAllEdges()).map(edge => edge.source)).toEqual(['owner-b'])
+    })
+
+    it('safe removal is cycle-safe and does not resurrect pending deletions', async () => {
+      const adapter = new MemoryAdapter()
+      const g = new PolyGraph(adapter, 1)
+      g.addNode({ id: 'a', type: 't', data: {}, insertedAt: 0, updatedAt: 0 })
+      g.addNode({ id: 'b', type: 't', data: {}, insertedAt: 1, updatedAt: 1 })
+      g.addEdge('a', 'OWNS', 'b', undefined, 'owned')
+      g.addEdge('b', 'OWNS', 'a', undefined, 'owned')
+      for (let i = 0; i < 10; i++) {
+        g.addNode({ id: `cycle-filler${i}`, type: 't', data: {}, insertedAt: i + 2, updatedAt: i + 2 })
+      }
+      await g.flush()
+
+      expect(await g.removeNodeSafe('a')).toBe(true)
+      expect(await g.getNodeSafe('a')).toBeUndefined()
+      expect(await g.getNodeSafe('b')).toBeUndefined()
+      await g.flush()
+
+      expect(await adapter.getNode('a')).toBeUndefined()
+      expect(await adapter.getNode('b')).toBeUndefined()
+    })
   })
 
   describe('persistence with indexeddb adapter', () => {

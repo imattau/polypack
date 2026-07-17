@@ -33,9 +33,15 @@ Nodes:
 - `getNode(id)` returns a loaded node synchronously.
 - `getNodeSafe(id)` restores an evicted node from persistence when necessary.
 - `updateNode(id, data, vector?)` shallow-merges data and optionally replaces its vector.
+- `updateNodeSafe(id, data, vector?)` restores an evicted node before updating it.
 - `removeNode(id)` removes the node, all connected edges, and owned descendants.
+- `removeNodeSafe(id)` restores and removes an evicted node, recursively restoring
+  owned descendants as required. Call `warm()` first for an existing database so
+  ownership edges are indexed.
 - `whereType(type)` returns loaded nodes of one type.
-- `size` is the number of currently loaded nodes, not total persisted nodes.
+- `size` and `loadedSize` are the number of currently loaded nodes, not total
+  persisted nodes. `hasLoadedNode(id)` checks membership in that working set.
+- `persistedSize()` asynchronously returns the adapter's current node count.
 
 Edges:
 

@@ -261,6 +261,7 @@ export class PolyGraph {
   }
 
   async getNodeSafe(id: string): Promise<PolyNode | undefined> {
+    if (this.removedNodeIds.has(id)) return undefined
     const node = this.nodes.get(id)
     if (node) {
       this.touchHotCache(id)
@@ -301,6 +302,17 @@ export class PolyGraph {
     this.markDirty(id)
     this.emitChange({ type: 'node_updated', nodeId: id, nodeType: node.type })
     return node
+  }
+
+  /** Restore an evicted node when necessary, then update it. */
+  async updateNodeSafe(
+    id: string,
+    data: Partial<Record<string, unknown>>,
+    vector?: Float64Array,
+  ): Promise<PolyNode | undefined> {
+    const node = await this.getNodeSafe(id)
+    if (!node) return undefined
+    return this.updateNode(id, data, vector)
   }
 
   /** Returns true if `target` has at least one incoming 'owned' edge from a
@@ -372,6 +384,40 @@ export class PolyGraph {
     this.schedulePersist()
     this.hotCacheOrder.delete(id)
     this.emitChange({ type: 'node_removed', nodeId: id, nodeType: node.type })
+  }
+
+  /**
+   * Restore and remove a node even when it has been evicted. Owned descendants
+   * are restored and removed recursively; another owning source keeps a target
+   * alive. Existing persisted graphs must be warmed first so edge ownership is
+   * available in the in-memory edge index.
+   */
+  async removeNodeSafe(id: string): Promise<boolean> {
+    return this.removeNodeSafeRecursive(id, new Set<string>())
+  }
+
+  private async removeNodeSafeRecursive(id: string, visited: Set<string>): Promise<boolean> {
+    if (visited.has(id)) return false
+    visited.add(id)
+
+    const node = await this.getNodeSafe(id)
+    if (!node) return false
+
+    const outgoing = [...(this.edges.get(id) ?? [])]
+    for (const edge of outgoing) {
+      if (getOwnership(edge.data) === 'owned' && !this.hasOtherOwnedSource(edge.target, id)) {
+        await this.removeNodeSafeRecursive(edge.target, visited)
+      }
+    }
+
+    if (this.removedNodeIds.has(id)) return true
+
+    // Recursive restoration can evict this node again when the working set is
+    // very small, so restore it once more before using the synchronous remover.
+    if (!this.nodes.has(id)) await this.getNodeSafe(id)
+    if (!this.nodes.has(id)) return false
+    this.removeNode(id)
+    return true
   }
 
   protected cleanupNodeEdges(id: string): void {
@@ -687,5 +733,20 @@ export class PolyGraph {
 
   get size(): number {
     return this.nodes.size
+  }
+
+  /** Number of nodes in the loaded working set. */
+  get loadedSize(): number {
+    return this.nodes.size
+  }
+
+  /** Whether a node is currently present in the loaded working set. */
+  hasLoadedNode(id: string): boolean {
+    return this.nodes.has(id)
+  }
+
+  /** Number of nodes currently stored by the persistence adapter. */
+  async persistedSize(): Promise<number> {
+    return (await this.persistence.allNodeIds()).length
   }
 }
