@@ -1,0 +1,44 @@
+import type { SyncOp } from './types'
+
+export class OpLog {
+  private ops: SyncOp[] = []
+  private nextSeq = 1
+  readonly clientId: string
+
+  constructor(clientId: string, existing?: SyncOp[]) {
+    this.clientId = clientId
+    if (existing) {
+      this.ops = [...existing]
+      this.nextSeq = existing.length > 0 ? Math.max(...existing.map(o => o.seq)) + 1 : 1
+    }
+  }
+
+  append(kind: SyncOp['kind'], payload: Record<string, unknown>): SyncOp {
+    const op: SyncOp = {
+      seq: this.nextSeq++,
+      clientId: this.clientId,
+      timestamp: Date.now(),
+      kind,
+      payload,
+    }
+    this.ops.push(op)
+    return op
+  }
+
+  /** All ops since a given sequence number. */
+  since(seq: number): SyncOp[] {
+    return this.ops.filter(o => o.seq > seq)
+  }
+
+  get all(): readonly SyncOp[] {
+    return this.ops
+  }
+
+  get latestSeq(): number {
+    return this.nextSeq - 1
+  }
+
+  get size(): number {
+    return this.ops.length
+  }
+}

@@ -1,0 +1,126 @@
+import { describe, it, expect, beforeEach } from 'vitest'
+import { MemoryAdapter } from '../src/persistence/memory'
+import { IndexedDBAdapter } from '../src/persistence/indexeddb'
+import type { PersistenceAdapter } from '../src/persistence/adapter'
+import type { SerializedNode, SerializedEdge } from '../src/types'
+
+let counter = 0
+
+function runAdapterTests(label: string, create: () => PersistenceAdapter) {
+  describe(label, () => {
+    let adapter: PersistenceAdapter
+
+    beforeEach(() => {
+      adapter = create()
+    })
+
+    describe('nodes', () => {
+      it('putNode and getNode', async () => {
+        const node: SerializedNode = { id: 'n1', type: 'doc', data: { x: 1 }, vector: null, insertedAt: 10, updatedAt: 10 }
+        await adapter.putNode(node)
+        const got = await adapter.getNode('n1')
+        expect(got).toBeDefined()
+        expect(got!.data).toEqual({ x: 1 })
+      })
+
+      it('bulkPutNodes and getNodes', async () => {
+        await adapter.bulkPutNodes([
+          { id: 'a', type: 't', data: {}, vector: null, insertedAt: 1, updatedAt: 1 },
+          { id: 'b', type: 't', data: {}, vector: null, insertedAt: 2, updatedAt: 2 },
+        ])
+        const nodes = await adapter.getNodes(['a', 'b'])
+        expect(nodes).toHaveLength(2)
+      })
+
+      it('deleteNode', async () => {
+        await adapter.putNode({ id: 'x', type: 't', data: {}, vector: null, insertedAt: 1, updatedAt: 1 })
+        await adapter.deleteNode('x')
+        expect(await adapter.getNode('x')).toBeUndefined()
+      })
+
+      it('bulkDeleteNodes', async () => {
+        await adapter.bulkPutNodes([
+          { id: 'a', type: 't', data: {}, vector: null, insertedAt: 1, updatedAt: 1 },
+          { id: 'b', type: 't', data: {}, vector: null, insertedAt: 2, updatedAt: 2 },
+        ])
+        await adapter.bulkDeleteNodes(['a', 'b'])
+        expect(await adapter.allNodeIds()).toHaveLength(0)
+      })
+
+      it('allNodeIds returns all keys', async () => {
+        await adapter.bulkPutNodes([
+          { id: 'a', type: 't', data: {}, vector: null, insertedAt: 1, updatedAt: 1 },
+          { id: 'b', type: 't', data: {}, vector: null, insertedAt: 2, updatedAt: 2 },
+        ])
+        const ids = await adapter.allNodeIds()
+        expect(ids.sort()).toEqual(['a', 'b'])
+      })
+    })
+
+    describe('edges', () => {
+      it('putEdge and getAllEdges', async () => {
+        const edge: SerializedEdge = { id: 'a::REL::b', source: 'a', target: 'b', type: 'REL', data: null, createdAt: 100 }
+        await adapter.putEdge(edge)
+        const all = await adapter.getAllEdges()
+        expect(all).toHaveLength(1)
+        expect(all[0].source).toBe('a')
+      })
+
+      it('bulkPutEdges', async () => {
+        await adapter.bulkPutEdges([
+          { id: 'a::R::b', source: 'a', target: 'b', type: 'R', data: null, createdAt: 1 },
+          { id: 'b::R::c', source: 'b', target: 'c', type: 'R', data: null, createdAt: 2 },
+        ])
+        expect(await adapter.getAllEdges()).toHaveLength(2)
+      })
+
+      it('deleteEdge', async () => {
+        await adapter.putEdge({ id: 'a::R::b', source: 'a', target: 'b', type: 'R', data: null, createdAt: 1 })
+        await adapter.deleteEdge('a::R::b')
+        expect(await adapter.getAllEdges()).toHaveLength(0)
+      })
+    })
+
+    describe('vectors', () => {
+      it('putVector and getAllVectors', async () => {
+        await adapter.putVector('v1', [1, 2, 3])
+        const all = await adapter.getAllVectors()
+        expect(all).toHaveLength(1)
+        expect(all[0].vector).toEqual([1, 2, 3])
+      })
+
+      it('bulkPutVectors', async () => {
+        await adapter.bulkPutVectors([
+          { id: 'a', vector: [1, 0] },
+          { id: 'b', vector: [0, 1] },
+        ])
+        expect(await adapter.getAllVectors()).toHaveLength(2)
+      })
+
+      it('deleteVector', async () => {
+        await adapter.putVector('v1', [1, 2, 3])
+        await adapter.deleteVector('v1')
+        expect(await adapter.getAllVectors()).toHaveLength(0)
+      })
+    })
+
+    describe('lifecycle', () => {
+      it('clearAll removes everything', async () => {
+        await adapter.putNode({ id: 'n', type: 't', data: {}, vector: null, insertedAt: 1, updatedAt: 1 })
+        await adapter.putEdge({ id: 'e', source: 'a', target: 'b', type: 'R', data: null, createdAt: 1 })
+        await adapter.putVector('v', [1, 2, 3])
+        await adapter.clearAll()
+        expect(await adapter.allNodeIds()).toHaveLength(0)
+        expect(await adapter.getAllEdges()).toHaveLength(0)
+        expect(await adapter.getAllVectors()).toHaveLength(0)
+      })
+
+      it('close does not throw', async () => {
+        await adapter.close()
+      })
+    })
+  })
+}
+
+runAdapterTests('MemoryAdapter', () => new MemoryAdapter())
+runAdapterTests('IndexedDBAdapter', () => new IndexedDBAdapter({ name: 'test-db-' + (++counter) + '-' + Date.now(), version: 1 }))
