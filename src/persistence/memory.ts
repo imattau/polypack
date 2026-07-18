@@ -1,5 +1,5 @@
 import type { SerializedNode, SerializedEdge } from '../types.js'
-import type { PersistenceAdapter, PersistedNodeQuery } from './adapter.js'
+import type { PersistenceAdapter, PersistenceChanges, PersistedNodeQuery } from './adapter.js'
 import { applyPersistedCountPagination, applyPersistedNodeQuery, matchesPersistedNode } from './query.js'
 
 /** Volatile persistence adapter for Node.js, tests, and temporary graphs. */
@@ -7,6 +7,21 @@ export class MemoryAdapter implements PersistenceAdapter {
   private nodes = new Map<string, SerializedNode>()
   private edges = new Map<string, SerializedEdge>()
   private vectors = new Map<string, number[]>()
+
+  async applyChanges(changes: PersistenceChanges): Promise<void> {
+    const nodes = new Map(this.nodes)
+    const edges = new Map(this.edges)
+    const vectors = new Map(this.vectors)
+    for (const id of changes.deleteNodeIds) nodes.delete(id)
+    for (const id of changes.deleteEdgeIds) edges.delete(id)
+    for (const id of changes.deleteVectorIds) vectors.delete(id)
+    for (const node of changes.putNodes) nodes.set(node.id, node)
+    for (const edge of changes.putEdges) edges.set(edge.id, edge)
+    for (const entry of changes.putVectors) vectors.set(entry.id, entry.vector)
+    this.nodes = nodes
+    this.edges = edges
+    this.vectors = vectors
+  }
 
   async putNode(node: SerializedNode): Promise<void> {
     this.nodes.set(node.id, node)

@@ -1,4 +1,4 @@
-import type { PersistenceAdapter, PersistedNodeQuery } from '../persistence/adapter.js'
+import type { PersistenceAdapter, PersistenceChanges, PersistedNodeQuery } from '../persistence/adapter.js'
 import { applyPersistedNodeQuery } from '../persistence/query.js'
 import type { SerializedNode, SerializedEdge } from '../types.js'
 import { edgeId } from '../utils.js'
@@ -28,6 +28,31 @@ export class SyncAdapter implements PersistenceAdapter {
   private validateEdge(edge: SerializedEdge): void {
     if (edge.id !== edgeId(edge.source, edge.type, edge.target)) {
       throw new Error(`Invalid edge ID: ${edge.id}`)
+    }
+  }
+
+  async applyChanges(changes: PersistenceChanges): Promise<void> {
+    for (const edge of changes.putEdges) this.validateEdge(edge)
+    if (this.inner.applyChanges) {
+      await this.inner.applyChanges(changes)
+    } else {
+      await this.inner.bulkDeleteNodes(changes.deleteNodeIds)
+      await this.inner.bulkDeleteEdges(changes.deleteEdgeIds)
+      await Promise.all(changes.deleteVectorIds.map(id => this.inner.deleteVector(id)))
+      await this.inner.bulkPutNodes(changes.putNodes)
+      await this.inner.bulkPutEdges(changes.putEdges)
+      await this.inner.bulkPutVectors(changes.putVectors)
+    }
+    for (const id of changes.deleteNodeIds) this.record('removeNode', { id })
+    for (const id of changes.deleteEdgeIds) {
+      const [source, type, ...rest] = id.split('::')
+      this.record('removeEdges', { source, type: type ?? '', target: rest.join('::') })
+    }
+    for (const node of changes.putNodes) {
+      this.record('addNode', node as unknown as Record<string, unknown>)
+    }
+    for (const edge of changes.putEdges) {
+      this.record('addEdge', edge as unknown as Record<string, unknown>)
     }
   }
 

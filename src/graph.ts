@@ -4,7 +4,7 @@ import { VectorIndex } from './vector-index.js'
 import { GraphQuery } from './query.js'
 import { PersistedGraphQuery } from './persisted-query.js'
 import { assertFiniteVector, cloneData, clonePolyNode, edgeId, yieldToUI } from './utils.js'
-import type { PersistenceAdapter } from './persistence/adapter.js'
+import type { PersistenceAdapter, PersistenceChanges } from './persistence/adapter.js'
 import { MemoryAdapter } from './persistence/memory.js'
 
 type EdgeIndex = Map<string, Array<{ target: string; type: string; data?: Record<string, unknown> }>>
@@ -181,15 +181,27 @@ export class PolyGraph {
       if (vector) dirtyVectorEntries.push({ id, vector })
     }
     try {
-      if (removedNodeIds.length > 0) {
-        await this.persistence.bulkDeleteNodes(removedNodeIds)
-        await Promise.all(removedNodeIds.map(id => this.persistence.deleteVector(id)))
+      const changes: PersistenceChanges = {
+        putNodes: nodesToSave,
+        deleteNodeIds: removedNodeIds,
+        putEdges: dirtyEdgeList,
+        deleteEdgeIds: removedEdgeIds,
+        putVectors: dirtyVectorEntries,
+        deleteVectorIds: [...new Set([...removedNodeIds, ...removedVectorIds])],
       }
-      await this.persistence.bulkPutNodes(nodesToSave)
-      await this.persistence.bulkPutEdges(dirtyEdgeList)
-      await this.persistence.bulkDeleteEdges(removedEdgeIds)
-      await Promise.all(removedVectorIds.map(id => this.persistence.deleteVector(id)))
-      await this.persistence.bulkPutVectors(dirtyVectorEntries)
+      if (this.persistence.applyChanges) {
+        await this.persistence.applyChanges(changes)
+      } else {
+        if (removedNodeIds.length > 0) {
+          await this.persistence.bulkDeleteNodes(removedNodeIds)
+          await Promise.all(removedNodeIds.map(id => this.persistence.deleteVector(id)))
+        }
+        await this.persistence.bulkPutNodes(nodesToSave)
+        await this.persistence.bulkPutEdges(dirtyEdgeList)
+        await this.persistence.bulkDeleteEdges(removedEdgeIds)
+        await Promise.all(removedVectorIds.map(id => this.persistence.deleteVector(id)))
+        await this.persistence.bulkPutVectors(dirtyVectorEntries)
+      }
     } catch (error) {
       for (const id of dirtyNodeIds) if (!this.removedNodeIds.has(id)) this.dirtyNodes.add(id)
       for (const id of dirtyEdgeIds) if (!this.removedEdgeIds.has(id)) this.dirtyEdges.add(id)

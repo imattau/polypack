@@ -79,6 +79,35 @@ function runAdapterTests(label: string, create: () => PersistenceAdapter) {
       })
     })
 
+    describe('atomic changes', () => {
+      it('applies mixed node, edge, and vector changes together', async () => {
+        expect(adapter.applyChanges).toBeDefined()
+        await adapter.applyChanges!({
+          putNodes: [
+            { id: 'a', type: 't', data: {}, vector: [1, 0], insertedAt: 1, updatedAt: 1 },
+            { id: 'b', type: 't', data: {}, vector: null, insertedAt: 2, updatedAt: 2 },
+          ],
+          deleteNodeIds: [],
+          putEdges: [{ id: 'a::REL::b', source: 'a', target: 'b', type: 'REL', data: null, createdAt: 1 }],
+          deleteEdgeIds: [],
+          putVectors: [{ id: 'a', vector: [1, 0] }],
+          deleteVectorIds: [],
+        })
+
+        expect(await adapter.allNodeIds()).toEqual(expect.arrayContaining(['a', 'b']))
+        expect(await adapter.getAllEdges()).toHaveLength(1)
+        expect(await adapter.getAllVectors()).toEqual([{ id: 'a', vector: [1, 0] }])
+
+        await adapter.applyChanges!({
+          putNodes: [], deleteNodeIds: ['a'], putEdges: [],
+          deleteEdgeIds: ['a::REL::b'], putVectors: [], deleteVectorIds: ['a'],
+        })
+        expect(await adapter.getNode('a')).toBeUndefined()
+        expect(await adapter.getAllEdges()).toHaveLength(0)
+        expect(await adapter.getAllVectors()).toHaveLength(0)
+      })
+    })
+
     describe('edges', () => {
       it('putEdge and getAllEdges', async () => {
         const edge: SerializedEdge = { id: 'a::REL::b', source: 'a', target: 'b', type: 'REL', data: null, createdAt: 100 }
@@ -161,6 +190,22 @@ runAdapterTests('MemoryAdapter', () => new MemoryAdapter())
 runAdapterTests('IndexedDBAdapter', () => new IndexedDBAdapter({ name: 'test-db-' + (++counter) + '-' + Date.now(), version: 1 }))
 
 describe('IndexedDBAdapter schema and configured indexes', () => {
+  it('aborts every store when an atomic change cannot be cloned', async () => {
+    const adapter = new IndexedDBAdapter({ name: `atomic-db-${++counter}-${Date.now()}`, version: 1 })
+    await expect(adapter.applyChanges({
+      putNodes: [{ id: 'should-rollback', type: 't', data: {}, vector: null, insertedAt: 1, updatedAt: 1 }],
+      deleteNodeIds: [],
+      putEdges: [{
+        id: 'a::R::b', source: 'a', target: 'b', type: 'R',
+        data: { invalid: (() => undefined) as unknown }, createdAt: 1,
+      }],
+      deleteEdgeIds: [], putVectors: [], deleteVectorIds: [],
+    })).rejects.toBeDefined()
+    expect(await adapter.getNode('should-rollback')).toBeUndefined()
+    expect(await adapter.getAllEdges()).toHaveLength(0)
+    await adapter.close()
+  })
+
   it('upgrades a version-1 database and uses a configured data index', async () => {
     const name = `migration-db-${++counter}-${Date.now()}`
     const version1 = new IndexedDBAdapter({ name, version: 1 })

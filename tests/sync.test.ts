@@ -42,6 +42,30 @@ describe('OpLog', () => {
 })
 
 describe('SyncAdapter', () => {
+  it('records an atomic persistence batch only after it commits', async () => {
+    class RejectOnceAdapter extends MemoryAdapter {
+      reject = true
+      override async applyChanges(changes: Parameters<MemoryAdapter['applyChanges']>[0]): Promise<void> {
+        if (this.reject) {
+          this.reject = false
+          throw new Error('commit failed')
+        }
+        await super.applyChanges(changes)
+      }
+    }
+    const inner = new RejectOnceAdapter()
+    const adapter = new SyncAdapter(inner, 'batch-client')
+    const changes = {
+      putNodes: [{ id: 'a', type: 't', data: {}, vector: null, insertedAt: 1, updatedAt: 1 }],
+      deleteNodeIds: [], putEdges: [], deleteEdgeIds: [], putVectors: [], deleteVectorIds: [],
+    }
+
+    await expect(adapter.applyChanges(changes)).rejects.toThrow('commit failed')
+    expect(adapter.oplog.size).toBe(0)
+    await adapter.applyChanges(changes)
+    expect(adapter.oplog.all.map(op => op.kind)).toEqual(['addNode'])
+  })
+
   it('records node mutations in the op log', async () => {
     const inner = new MemoryAdapter()
     const adapter = new SyncAdapter(inner, 'client-1')

@@ -159,9 +159,15 @@ vectors are copied, and `get()`/`entries()` return detached arrays.
   increment its configured schema `version` so IndexedDB runs the upgrade.
 - `PersistenceAdapter` is the contract for custom storage. It contains node,
   edge, and vector single/bulk operations plus `clearAll()` and `close()`.
+- `PersistenceChanges` describes one logical node/edge/vector commit. Adapters
+  may implement `applyChanges(changes)` to commit it atomically; `PolyGraph`
+  prefers this hook and restores the complete dirty batch when it rejects.
 
 Adapter methods should reject on storage errors. Bulk methods should be atomic
-where the backing store permits it.
+where the backing store permits it. `MemoryAdapter` applies changes through
+copy-on-commit maps, while `IndexedDBAdapter` uses one read-write transaction
+across all three stores. Existing custom adapters without `applyChanges` remain
+compatible but cannot guarantee cross-store atomicity through the fallback path.
 
 ### Types and utilities
 

@@ -586,6 +586,32 @@ describe('PolyGraph', () => {
   })
 
   describe('flush mechanism', () => {
+    it('retries a failed atomic mixed-store commit without partial persistence', async () => {
+      class FailOnceAdapter extends MemoryAdapter {
+        attempts = 0
+        override async applyChanges(changes: Parameters<MemoryAdapter['applyChanges']>[0]): Promise<void> {
+          this.attempts++
+          if (this.attempts === 1) throw new Error('simulated atomic failure')
+          await super.applyChanges(changes)
+        }
+      }
+      const adapter = new FailOnceAdapter()
+      const g = new PolyGraph(adapter)
+      g.addNode({ id: 'a', type: 't', data: {}, vector: new Float64Array([1, 0]), insertedAt: 1, updatedAt: 1 })
+      g.addNode({ id: 'b', type: 't', data: {}, insertedAt: 2, updatedAt: 2 })
+      g.addEdge('a', 'REL', 'b')
+
+      await expect(g.flush()).rejects.toThrow('simulated atomic failure')
+      expect(await adapter.allNodeIds()).toHaveLength(0)
+      expect(await adapter.getAllEdges()).toHaveLength(0)
+      expect(await adapter.getAllVectors()).toHaveLength(0)
+
+      await g.flush()
+      expect(await adapter.allNodeIds()).toEqual(expect.arrayContaining(['a', 'b']))
+      expect(await adapter.getAllEdges()).toHaveLength(1)
+      expect(await adapter.getAllVectors()).toHaveLength(1)
+    })
+
     it('persists dirty nodes to adapter on flush', async () => {
       const adapter = new MemoryAdapter()
       const g = new PolyGraph(adapter)

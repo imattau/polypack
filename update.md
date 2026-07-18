@@ -33,10 +33,10 @@
 
 ## 4. Improve persistence consistency
 
-- Define atomic node, edge, and vector transaction expectations.
-- Test partial adapter failures across mixed operations.
+- [x] Define an optional atomic node, edge, and vector transaction contract.
+- [x] Test mixed-store failures, rollback, dirty-state restoration, and retry.
 - [x] Add IndexedDB schema migration tests from version 1 to version 2.
-- Prefer adapter-native persisted counts over `allNodeIds()` fallbacks.
+- [x] Prefer adapter-native persisted counts over `allNodeIds()` fallbacks.
 
 ## 5. Expand React verification
 

@@ -1,5 +1,5 @@
 import type { SerializedNode, SerializedEdge } from '../types.js'
-import type { PersistenceAdapter, PersistedNodeQuery } from './adapter.js'
+import type { PersistenceAdapter, PersistenceChanges, PersistedNodeQuery } from './adapter.js'
 import { applyPersistedCountPagination, applyPersistedNodeQuery, matchesPersistedNode } from './query.js'
 
 /** IndexedDB database name and schema version. */
@@ -140,6 +140,26 @@ export class IndexedDBAdapter implements PersistenceAdapter {
 
   constructor(config?: Partial<IndexedDBConfig>) {
     this.config = { ...DEFAULT_CONFIG, ...config, nodeIndexes: config?.nodeIndexes ?? [] }
+  }
+
+  async applyChanges(changes: PersistenceChanges): Promise<void> {
+    const database = await this.db()
+    const tx = database.transaction(['nodes', 'edges', 'vectors'], 'readwrite')
+    const nodes = tx.objectStore('nodes')
+    const edges = tx.objectStore('edges')
+    const vectors = tx.objectStore('vectors')
+    try {
+      for (const id of changes.deleteNodeIds) nodes.delete(id)
+      for (const id of changes.deleteEdgeIds) edges.delete(id)
+      for (const id of changes.deleteVectorIds) vectors.delete(id)
+      for (const node of changes.putNodes) nodes.put(node)
+      for (const edge of changes.putEdges) edges.put(edge)
+      for (const entry of changes.putVectors) vectors.put(entry)
+    } catch (error) {
+      tx.abort()
+      throw error
+    }
+    await idbTransaction(tx)
   }
 
   private async db(): Promise<IDBDatabase> {
