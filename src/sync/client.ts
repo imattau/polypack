@@ -12,6 +12,8 @@ export interface SyncClientOptions {
   clientId?: string
   /** Automatically flush on every mutation (default: true). Set false for manual batching. */
   autoFlush?: boolean
+  /** Retry interval for unacknowledged operations in milliseconds. Set 0 to disable. */
+  retryMs?: number
 }
 
 const NODE_OPS: Record<string, SyncOp['kind']> = {
@@ -32,11 +34,13 @@ const EDGE_OPS: Record<string, SyncOp['kind']> = {
 /** Captures local graph changes and applies remote operations without echoing them. */
 export class SyncClient {
   private graph: PolyGraph
-  private transport: SyncTransport
+  private transport!: SyncTransport
   readonly oplog: OpLog
-  private lastSentSeq = 0
+  private lastAckedSeq = 0
   private subscription: Subscription
   private autoFlush: boolean
+  private retryMs: number
+  private retryTimer: ReturnType<typeof setTimeout> | null = null
   private applyingRemote = false
 
   constructor(options: SyncClientOptions) {
@@ -44,11 +48,18 @@ export class SyncClient {
     this.transport = options.transport
     this.oplog = new OpLog(options.clientId ?? `client-${Date.now()}`)
     this.autoFlush = options.autoFlush ?? true
+    this.retryMs = options.retryMs ?? 1000
+    this.bindTransport(options.transport)
 
     this.subscription = this.graph.changes.subscribe((event) => {
       if (this.applyingRemote) return
       this.handleLocalChange(event)
     })
+  }
+
+  private bindTransport(transport: SyncTransport): void {
+    this.transport = transport
+    this.transport.onMessage = (msg) => this.handleMessage(msg)
   }
 
   private handleLocalChange(event: GraphChangeEvent): void {
@@ -158,25 +169,56 @@ export class SyncClient {
 
   /** Send pending local ops through the transport. */
   flush(): void {
-    const ops = this.oplog.since(this.lastSentSeq)
+    const ops = this.oplog.since(this.lastAckedSeq)
     if (ops.length === 0) return
-    this.lastSentSeq = this.oplog.latestSeq
     this.transport.send({
       type: 'delta',
       clientId: this.oplog.clientId,
-      fromSeq: 0,
+      fromSeq: this.lastAckedSeq,
       ops,
     })
+    this.scheduleRetry()
+  }
+
+  private scheduleRetry(): void {
+    if (this.retryTimer) clearTimeout(this.retryTimer)
+    this.retryTimer = null
+    if (this.retryMs <= 0 || this.oplog.since(this.lastAckedSeq).length === 0) return
+    this.retryTimer = setTimeout(() => {
+      this.retryTimer = null
+      this.flush()
+    }, this.retryMs)
   }
 
   /** Handle an incoming message from the transport. */
   handleMessage(msg: SyncMessage): void {
+    if (msg.type === 'ack' && msg.clientId === this.oplog.clientId) {
+      this.lastAckedSeq = Math.max(this.lastAckedSeq, Math.min(msg.fromSeq, this.oplog.latestSeq))
+      this.scheduleRetry()
+      return
+    }
     if (msg.type === 'delta' || msg.type === 'snapshot') {
       this.applyRemote(msg.ops)
     }
   }
 
+  /** Operations retained until the server acknowledges their sequence. */
+  get pendingOps(): readonly SyncOp[] {
+    return this.oplog.since(this.lastAckedSeq)
+  }
+
+  /** Replace a disconnected transport and immediately resend pending operations. */
+  reconnect(transport: SyncTransport): void {
+    if (this.retryTimer) clearTimeout(this.retryTimer)
+    this.retryTimer = null
+    this.transport.close()
+    this.bindTransport(transport)
+    this.flush()
+  }
+
   disconnect(): void {
+    if (this.retryTimer) clearTimeout(this.retryTimer)
+    this.retryTimer = null
     this.subscription.unsubscribe()
     this.transport.close()
   }

@@ -12,6 +12,7 @@ export type SyncServerClient = {
 /** In-memory relay that broadcasts received operations to all other clients. */
 export class SyncServer {
   private opLog: SyncOp[] = []
+  private seenOps = new Set<string>()
   private clients: SyncServerClient[] = []
   onOp?: (op: SyncOp) => void
 
@@ -31,18 +32,30 @@ export class SyncServer {
 
   private handleMessage(msg: SyncMessage, sender: SyncServerClient): void {
     if (msg.type === 'delta') {
+      const accepted: SyncOp[] = []
       for (const op of msg.ops) {
+        const key = `${op.clientId}:${op.seq}`
+        if (this.seenOps.has(key)) continue
+        this.seenOps.add(key)
         this.opLog.push(op)
+        accepted.push(op)
         this.onOp?.(op)
       }
+      const acknowledgedSeq = msg.ops.reduce((max, op) => Math.max(max, op.seq), msg.fromSeq)
+      sender.send({
+        type: 'ack',
+        clientId: msg.clientId,
+        fromSeq: acknowledgedSeq,
+        ops: [],
+      })
       // Broadcast to all OTHER clients
-      for (const client of this.clients) {
+      for (const client of accepted.length === 0 ? [] : this.clients) {
         if (client === sender) continue
         client.send({
           type: 'delta',
           clientId: 'server',
           fromSeq: 0,
-          ops: msg.ops,
+          ops: accepted,
         })
       }
     }

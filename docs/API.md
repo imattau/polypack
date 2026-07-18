@@ -180,16 +180,21 @@ React hooks. React 18 and 19 are supported as an optional peer dependency.
   `since(seq)`, `all`, `latestSeq`, and `size`.
 - `SyncAdapter(inner, clientId)` wraps persistence and records successful node
   and edge writes in its `oplog`; set `onOp` to observe them.
-- `SyncClient({ graph, transport, clientId?, autoFlush? })` captures graph
-  events, sends deltas, and applies remote operations with echo suppression.
-  Use `flush()` for manual sends and `disconnect()` to unsubscribe and close.
+- `SyncClient({ graph, transport, clientId?, autoFlush?, retryMs? })` captures
+  graph events, retains operations until acknowledged, retries unacknowledged
+  deltas, and applies remote operations with echo suppression. `retryMs` defaults
+  to 1,000 ms and `0` disables automatic retry. Use `flush()` for manual sends,
+  inspect `pendingOps`, call `reconnect(transport)` to replace a transport and
+  resend pending work, and use `disconnect()` to unsubscribe and close.
 - `SyncServer` is an in-memory relay. `addClient(handle)` returns that client's
   incoming-message handler, `removeClient(handle)` unregisters it, and `ops`
-  exposes the received log.
+  exposes the received log. The server deduplicates operations by client and
+  sequence and acknowledges both first-time and repeated delivery.
 - `SyncTransport` requires `send`, `onMessage`, and `close`.
 - `MemoryTransport.pair()` creates linked asynchronous in-process transports.
 
 The bundled sync layer is intentionally transport-agnostic and in-memory. It
-does not provide authentication, durable server storage, acknowledgements,
-retries, conflict resolution, or network reconnection; production transports
-must supply those guarantees.
+does not provide authentication, durable server storage, snapshot recovery, or
+conflict resolution. Applications must detect transport failure and supply a
+replacement transport to `reconnect()`; production deployments must also
+supply the remaining durability and security guarantees.

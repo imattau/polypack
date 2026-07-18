@@ -7,7 +7,7 @@ export interface SyncOp {
   payload: Record<string, unknown>
 }
 
-/** Transport envelope for deltas, snapshots, acknowledgements, and requests. */
+/** Transport envelope. For acknowledgements, `fromSeq` is the accepted sequence. */
 export interface SyncMessage {
   type: 'delta' | 'snapshot' | 'ack' | 'request-snapshot'
   clientId: string

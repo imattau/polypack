@@ -7,6 +7,7 @@ import { SyncServer } from '../src/sync/server'
 import { SyncClient } from '../src/sync/client'
 import { MemoryTransport } from '../src/sync/transport'
 import type { SyncMessage } from '../src/sync/types'
+import type { SyncTransport } from '../src/sync/transport'
 
 describe('OpLog', () => {
   it('appends ops with increasing sequence numbers', () => {
@@ -102,6 +103,83 @@ describe('SyncServer + SyncClient', () => {
 
     expect(server.removeClient(handle)).toBe(true)
     expect(server.removeClient(handle)).toBe(false)
+  })
+
+  it('acknowledges operations and clears the client pending set', async () => {
+    const server = new SyncServer()
+    const graph = new PolyGraph()
+    const { client, cleanup } = connect(graph, 'ack-client', server, false)
+
+    graph.addNode({ id: 'x', type: 't', data: {}, insertedAt: 1, updatedAt: 1 })
+    expect(client.pendingOps).toHaveLength(1)
+    client.flush()
+    await new Promise(resolve => setTimeout(resolve, 20))
+
+    expect(client.pendingOps).toHaveLength(0)
+    cleanup()
+  })
+
+  it('deduplicates retried operations while acknowledging every delivery', () => {
+    const server = new SyncServer()
+    const acknowledgements: SyncMessage[] = []
+    const broadcasts: SyncMessage[] = []
+    const sender = { send: (msg: SyncMessage) => acknowledgements.push(msg), clientId: 'sender' }
+    const receive = server.addClient(sender)
+    server.addClient({ send: (msg) => broadcasts.push(msg), clientId: 'receiver' })
+    const op = { seq: 1, clientId: 'sender', timestamp: 1, kind: 'addNode' as const, payload: { id: 'x' } }
+    const delta: SyncMessage = { type: 'delta', clientId: 'sender', fromSeq: 0, ops: [op] }
+
+    receive(delta)
+    receive(delta)
+
+    expect(server.ops).toHaveLength(1)
+    expect(broadcasts).toHaveLength(1)
+    expect(acknowledgements).toHaveLength(2)
+    expect(acknowledgements[1]).toMatchObject({ type: 'ack', clientId: 'sender', fromSeq: 1 })
+  })
+
+  it('retries an unacknowledged operation until an acknowledgement arrives', async () => {
+    const graph = new PolyGraph()
+    let sends = 0
+    const transport: SyncTransport = {
+      onMessage: null,
+      close: () => undefined,
+      send: (msg) => {
+        sends++
+        if (sends === 2) {
+          setTimeout(() => transport.onMessage?.({
+            type: 'ack', clientId: msg.clientId, fromSeq: msg.ops[0].seq, ops: [],
+          }), 0)
+        }
+      },
+    }
+    const client = new SyncClient({ graph, transport, clientId: 'retry-client', retryMs: 5 })
+
+    graph.addNode({ id: 'retry', type: 't', data: {}, insertedAt: 1, updatedAt: 1 })
+    await new Promise(resolve => setTimeout(resolve, 30))
+
+    expect(sends).toBe(2)
+    expect(client.pendingOps).toHaveLength(0)
+    client.disconnect()
+  })
+
+  it('resends pending operations after reconnecting with a new transport', () => {
+    const graph = new PolyGraph()
+    const firstMessages: SyncMessage[] = []
+    const secondMessages: SyncMessage[] = []
+    const first: SyncTransport = { onMessage: null, close: () => undefined, send: msg => firstMessages.push(msg) }
+    const second: SyncTransport = { onMessage: null, close: () => undefined, send: msg => secondMessages.push(msg) }
+    const client = new SyncClient({ graph, transport: first, clientId: 'reconnect-client', autoFlush: false, retryMs: 0 })
+
+    graph.addNode({ id: 'pending', type: 't', data: {}, insertedAt: 1, updatedAt: 1 })
+    client.flush()
+    client.reconnect(second)
+
+    expect(firstMessages).toHaveLength(1)
+    expect(secondMessages).toHaveLength(1)
+    second.onMessage?.({ type: 'ack', clientId: 'reconnect-client', fromSeq: 1, ops: [] })
+    expect(client.pendingOps).toHaveLength(0)
+    client.disconnect()
   })
 
   /** Wire a client to the server. The server broadcasts to all other clients'

@@ -13,9 +13,9 @@
 
 ## 2. Build reliable synchronization
 
-- Add acknowledgements and retain unacknowledged operations.
-- Add retry and reconnection behavior.
-- Deduplicate operations on the server.
+- [x] Add acknowledgements and retain unacknowledged operations.
+- [x] Add retry and explicit transport reconnection behavior.
+- [x] Deduplicate operations on the server.
 - Recover through snapshots or deltas after reconnect.
 - Define an explicit conflict-resolution policy.
 - Add durable server operation storage.

@@ -21,7 +21,7 @@ React is an optional peer dependency and is only required when importing from `@
 - **Reactive** — RxJS change events, batching, React hooks
 - **Pluggable persistence** — MemoryAdapter, IndexedDBAdapter, build your own
 - **Persisted queries** — asynchronous filtering and similarity across the full backing store
-- **Real-time sync** — OpLog + SyncAdapter + SyncServer/SyncClient with echo suppression
+- **Real-time sync** — acknowledgements, retry, deduplication, reconnect, and echo suppression
 
 ## Quick start
 
