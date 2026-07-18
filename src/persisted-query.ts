@@ -2,12 +2,13 @@ import type { PolyNode, SerializedEdge, SerializedNode } from './types.js'
 import type { PersistenceAdapter, PersistedNodeQuery } from './persistence/adapter.js'
 import { applyPersistedNodeQuery } from './persistence/query.js'
 import { cosineSimilarity } from './vector-index.js'
+import { assertFiniteVector, assertNonNegativeInteger, cloneData } from './utils.js'
 
 function restoreNode(node: SerializedNode): PolyNode {
   return {
     id: node.id,
     type: node.type,
-    data: { ...node.data },
+    data: cloneData(node.data),
     vector: node.vector ? new Float64Array(node.vector) : undefined,
     insertedAt: node.insertedAt,
     updatedAt: node.updatedAt,
@@ -49,6 +50,8 @@ export class PersistedGraphQuery {
   }
 
   whereAttributeRange(name: string, range: { above?: number; below?: number }): this {
+    if (range.above !== undefined && !Number.isFinite(range.above)) throw new RangeError('Range above must be finite')
+    if (range.below !== undefined && !Number.isFinite(range.below)) throw new RangeError('Range below must be finite')
     this.query.attributeRanges = { ...this.query.attributeRanges, [name]: range }
     return this
   }
@@ -59,12 +62,14 @@ export class PersistedGraphQuery {
   }
 
   whereEdge(type: string, target?: string): this {
+    if (!type) throw new TypeError('Edge type must not be empty')
     this.edgeType = type
     this.edgeTarget = target
     return this
   }
 
   whereEdgeSource(source: string): this {
+    if (!source) throw new TypeError('Edge source must not be empty')
     this.edgeSource = source
     return this
   }
@@ -74,11 +79,14 @@ export class PersistedGraphQuery {
     direction: 'out' | 'in' = 'out',
     predicate?: (connectedNode: PolyNode) => boolean,
   ): this {
+    if (!edgeType) throw new TypeError('Edge type must not be empty')
     this.joins.push({ edgeType, direction, predicate })
     return this
   }
 
   traverse(edgeType: string, depth: number, direction: 'out' | 'in' = 'out'): this {
+    if (!edgeType) throw new TypeError('Edge type must not be empty')
+    assertNonNegativeInteger(depth, 'depth')
     this.traversals.push({ edgeType, depth, direction })
     return this
   }
@@ -89,16 +97,21 @@ export class PersistedGraphQuery {
   }
 
   offset(n: number): this {
+    assertNonNegativeInteger(n, 'offset')
     this.resultOffset = n
     return this
   }
 
   limit(n: number): this {
+    assertNonNegativeInteger(n, 'limit')
     this.resultLimit = n
     return this
   }
 
   similarTo(vector: number[], threshold = 0, topK?: number): this {
+    assertFiniteVector(vector, 'query vector')
+    if (!Number.isFinite(threshold)) throw new RangeError('threshold must be finite')
+    if (topK !== undefined) assertNonNegativeInteger(topK, 'topK')
     this.similarVector = { vector, threshold, topK }
     return this
   }

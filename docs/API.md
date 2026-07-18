@@ -29,16 +29,19 @@ Lifecycle:
 
 Nodes:
 
-- `addNode(node)` inserts or replaces a node. Replacement updates type/vector indexes.
-- `getNode(id)` returns a loaded node synchronously.
+- `addNode(node)` inserts or replaces a node. Replacement updates type/vector
+  indexes. Node data and vectors are structured-cloned on entry.
+- `getNode(id)` returns a detached snapshot of a loaded node synchronously.
 - `getNodeSafe(id)` restores an evicted node from persistence when necessary.
 - `updateNode(id, data, vector?)` shallow-merges data and optionally replaces its vector.
 - `updateNodeSafe(id, data, vector?)` restores an evicted node before updating it.
+- `removeNodeVector(id)` and `removeNodeVectorSafe(id)` explicitly clear a
+  loaded or potentially evicted node's vector while retaining the node.
 - `removeNode(id)` removes the node, all connected edges, and owned descendants.
 - `removeNodeSafe(id)` restores and removes an evicted node, recursively restoring
   owned descendants as required. Call `warm()` first for an existing database so
   ownership edges are indexed.
-- `whereType(type)` returns loaded nodes of one type.
+- `whereType(type)` returns detached snapshots of loaded nodes of one type.
 - `size` and `loadedSize` are the number of currently loaded nodes, not total
   persisted nodes. `hasLoadedNode(id)` checks membership in that working set.
 - `persistedSize()` asynchronously returns the adapter's current node count.
@@ -46,7 +49,7 @@ Nodes:
 Edges:
 
 - `addEdge(source, type, target, data?, ownership?)` adds one unique directed edge.
-- `getEdges(source, type?)` returns outgoing edge descriptors.
+- `getEdges(source, type?)` returns detached outgoing edge descriptors.
 - `getEdgeTargets(source, type)` and `getEdgeSources(target, type)` return IDs.
 - `removeEdges(source, type?, target?)` removes matching outgoing edges.
 
@@ -65,6 +68,11 @@ Reactivity and batching:
 - `endBatch()` throws if no batch is open.
 
 `query()` creates a mutable `GraphQuery`.
+
+Public graph reads, query results, join/collection predicate values, edge data,
+and vector-index reads are detached copies. Mutate graph state through graph or
+vector-index methods so persistence tracking and reactive notifications remain
+correct. Data values must be compatible with the platform's `structuredClone`.
 
 `queryPersisted()` creates a mutable `PersistedGraphQuery`. Its terminal methods
 are asynchronous and inspect the complete backing store without loading results
@@ -87,6 +95,11 @@ Filter methods are chainable:
   includes the seed nodes.
 - `similarTo(vector, threshold?, topK?)` ranks vector-bearing nodes by cosine similarity.
 - `orderBy(field, direction?)`, `offset(n)`, and `limit(n)` shape results.
+
+Limits, offsets, traversal depths, and top-K values must be non-negative
+integers. Timestamps must be finite and non-negative; vectors and numeric range
+boundaries must contain finite numbers. Node IDs/types and edge endpoints/types
+must not be empty.
 
 Terminal methods:
 
@@ -130,7 +143,8 @@ that filtering, traversal, and ranking occur before the page is selected.
 - `cosineSimilarity(a, b)` and `euclideanSimilarity(a, b)` are built in.
 
 All compared vectors must have identical dimensions; otherwise similarity
-functions throw `RangeError`. Zero vectors have cosine similarity `0`.
+functions throw `RangeError`. Zero vectors have cosine similarity `0`. Added
+vectors are copied, and `get()`/`entries()` return detached arrays.
 
 ### Persistence
 

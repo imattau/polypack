@@ -46,18 +46,24 @@ export class VectorIndex {
   }
 
   add(id: string, vector: number[]): void {
-    this.vectors.set(id, vector)
+    if (!id) throw new TypeError('Vector id must not be empty')
+    assertFiniteVector(vector)
+    this.vectors.set(id, [...vector])
     this.onChange?.(id)
   }
 
   /** Add an already-persisted vector without marking it dirty again. */
   hydrate(id: string, vector: number[]): void {
-    this.vectors.set(id, vector)
+    if (!id) throw new TypeError('Vector id must not be empty')
+    assertFiniteVector(vector)
+    this.vectors.set(id, [...vector])
   }
 
   addMany(entries: Array<{ id: string; vector: number[] }>): void {
     for (const { id, vector } of entries) {
-      this.vectors.set(id, vector)
+      if (!id) throw new TypeError('Vector id must not be empty')
+      assertFiniteVector(vector)
+      this.vectors.set(id, [...vector])
       this.onChange?.(id)
     }
   }
@@ -77,7 +83,10 @@ export class VectorIndex {
     topK: number,
     threshold = 0
   ): Array<{ id: string; score: number }> {
-    if (topK <= 0) return []
+    assertFiniteVector(vector, 'query vector')
+    assertNonNegativeInteger(topK, 'topK')
+    if (!Number.isFinite(threshold)) throw new RangeError('threshold must be finite')
+    if (topK === 0) return []
     const heap: Array<{ id: string; score: number; order: number }> = []
     let order = 0
 
@@ -129,8 +138,8 @@ export class VectorIndex {
     return this.vectors.size
   }
 
-  entries(): IterableIterator<[string, number[]]> {
-    return this.vectors.entries()
+  *entries(): IterableIterator<[string, number[]]> {
+    for (const [id, vector] of this.vectors) yield [id, [...vector]]
   }
 
   has(id: string): boolean {
@@ -138,6 +147,8 @@ export class VectorIndex {
   }
 
   get(id: string): number[] | undefined {
-    return this.vectors.get(id)
+    const vector = this.vectors.get(id)
+    return vector ? [...vector] : undefined
   }
 }
+import { assertFiniteVector, assertNonNegativeInteger } from './utils.js'

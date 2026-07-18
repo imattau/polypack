@@ -143,6 +143,30 @@ describe('VectorIndex edge cases', () => {
     expect(entries).toHaveLength(2)
   })
 
+  it('owns inserted vectors and returns detached vectors', () => {
+    const idx = new VectorIndex()
+    const input = [1, 0]
+    idx.add('a', input)
+    input[0] = 0
+    const read = idx.get('a')!
+    read[0] = 0
+    const entry = [...idx.entries()][0][1]
+    entry[0] = 0
+
+    expect(idx.get('a')).toEqual([1, 0])
+  })
+
+  it('validates IDs, vector values, and query parameters', () => {
+    const idx = new VectorIndex()
+    expect(() => idx.add('', [1])).toThrow(TypeError)
+    expect(() => idx.add('bad', [Number.NaN])).toThrow(RangeError)
+    expect(() => idx.query([Number.POSITIVE_INFINITY], 1)).toThrow(RangeError)
+    expect(() => idx.query([1], -1)).toThrow(RangeError)
+    expect(() => idx.query([1], 1.5)).toThrow(RangeError)
+    expect(() => idx.query([1], 1, Number.NaN)).toThrow(RangeError)
+    expect(idx.query([1], 0)).toEqual([])
+  })
+
   it('addMany with empty array is a no-op', () => {
     const idx = new VectorIndex()
     idx.addMany([])

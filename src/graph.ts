@@ -3,7 +3,7 @@ import type { PolyNode, EdgeOwnership, GraphChangeEvent, SerializedNode, Seriali
 import { VectorIndex } from './vector-index.js'
 import { GraphQuery } from './query.js'
 import { PersistedGraphQuery } from './persisted-query.js'
-import { edgeId, yieldToUI } from './utils.js'
+import { assertFiniteVector, cloneData, clonePolyNode, edgeId, yieldToUI } from './utils.js'
 import type { PersistenceAdapter } from './persistence/adapter.js'
 import { MemoryAdapter } from './persistence/memory.js'
 
@@ -141,7 +141,7 @@ export class PolyGraph {
         nodesToSave.push({
           id: node.id,
           type: node.type,
-          data: node.data,
+          data: cloneData(node.data),
           vector: node.vector ? [...node.vector] : null,
           insertedAt: node.insertedAt,
           updatedAt: node.updatedAt,
@@ -170,7 +170,7 @@ export class PolyGraph {
           source,
           target: edge.target,
           type: edge.type,
-          data: edge.data ?? null,
+          data: edge.data ? cloneData(edge.data) : null,
           createdAt: Date.now(),
         })
       }
@@ -205,25 +205,33 @@ export class PolyGraph {
   // ── Node CRUD ──
 
   addNode(node: PolyNode): void {
-    const previous = this.nodes.get(node.id)
+    if (!node.id) throw new TypeError('Node id must not be empty')
+    if (!node.type) throw new TypeError('Node type must not be empty')
+    if (!Number.isFinite(node.insertedAt) || node.insertedAt < 0 ||
+        !Number.isFinite(node.updatedAt) || node.updatedAt < 0) {
+      throw new RangeError('Node timestamps must be finite non-negative numbers')
+    }
+    if (node.vector) assertFiniteVector(node.vector)
+    const stored = clonePolyNode(node)
+    const previous = this.nodes.get(stored.id)
     if (previous) {
-      this.unindexNode(node.id)
+      this.unindexNode(stored.id)
     }
-    if (!node.vector) {
-      this.vectors.remove(node.id)
-      this.dirtyVectors.delete(node.id)
-      this.removedVectorIds.add(node.id)
+    if (!stored.vector) {
+      this.vectors.remove(stored.id)
+      this.dirtyVectors.delete(stored.id)
+      this.removedVectorIds.add(stored.id)
     }
-    this.removedNodeIds.delete(node.id)
-    this.nodes.set(node.id, node)
-    this.touchHotCache(node.id)
-    this.markDirty(node.id)
-    this.indexNode(node)
-    if (node.vector) {
-      this.removedVectorIds.delete(node.id)
-      this.vectors.add(node.id, [...node.vector])
+    this.removedNodeIds.delete(stored.id)
+    this.nodes.set(stored.id, stored)
+    this.touchHotCache(stored.id)
+    this.markDirty(stored.id)
+    this.indexNode(stored)
+    if (stored.vector) {
+      this.removedVectorIds.delete(stored.id)
+      this.vectors.add(stored.id, [...stored.vector])
     }
-    this.emitChange({ type: 'node_added', nodeId: node.id, nodeType: node.type })
+    this.emitChange({ type: 'node_added', nodeId: stored.id, nodeType: stored.type })
   }
 
   protected indexNode(node: PolyNode): void {
@@ -256,7 +264,7 @@ export class PolyGraph {
     const node = this.nodes.get(id)
     if (node) {
       this.touchHotCache(id)
-      return node
+      return clonePolyNode(node)
     }
     return undefined
   }
@@ -266,14 +274,14 @@ export class PolyGraph {
     const node = this.nodes.get(id)
     if (node) {
       this.touchHotCache(id)
-      return node
+      return clonePolyNode(node)
     }
     const serialized = this.evictedDirtyNodes.get(id) ?? await this.persistence.getNode(id)
     if (!serialized) return undefined
     const restored: PolyNode = {
       id: serialized.id,
       type: serialized.type,
-      data: serialized.data,
+      data: cloneData(serialized.data),
       vector: serialized.vector ? new Float64Array(serialized.vector) : undefined,
       insertedAt: serialized.insertedAt,
       updatedAt: serialized.updatedAt,
@@ -285,15 +293,16 @@ export class PolyGraph {
     if (restored.vector) {
       this.vectors.hydrate(restored.id, [...restored.vector])
     }
-    return restored
+    return clonePolyNode(restored)
   }
 
   updateNode(id: string, data: Partial<Record<string, unknown>>, vector?: Float64Array): PolyNode | undefined {
     const node = this.nodes.get(id)
     if (!node) return undefined
-    Object.assign(node.data, data)
+    Object.assign(node.data, cloneData(data))
     if (vector !== undefined) {
-      node.vector = vector
+      assertFiniteVector(vector)
+      node.vector = new Float64Array(vector)
       this.removedVectorIds.delete(id)
       this.vectors.add(id, [...vector])
       this.dirtyVectors.add(id)
@@ -302,7 +311,28 @@ export class PolyGraph {
     this.touchHotCache(id)
     this.markDirty(id)
     this.emitChange({ type: 'node_updated', nodeId: id, nodeType: node.type })
-    return node
+    return clonePolyNode(node)
+  }
+
+  /** Remove a node's vector while keeping the node and its data. */
+  removeNodeVector(id: string): PolyNode | undefined {
+    const node = this.nodes.get(id)
+    if (!node) return undefined
+    node.vector = undefined
+    this.vectors.remove(id)
+    this.dirtyVectors.delete(id)
+    this.removedVectorIds.add(id)
+    node.updatedAt = Date.now()
+    this.touchHotCache(id)
+    this.markDirty(id)
+    this.emitChange({ type: 'node_updated', nodeId: id, nodeType: node.type })
+    return clonePolyNode(node)
+  }
+
+  /** Restore an evicted node when necessary, then remove its vector. */
+  async removeNodeVectorSafe(id: string): Promise<PolyNode | undefined> {
+    if (!await this.getNodeSafe(id)) return undefined
+    return this.removeNodeVector(id)
   }
 
   /** Restore an evicted node when necessary, then update it. */
@@ -453,6 +483,7 @@ export class PolyGraph {
   // ── Edge CRUD ──
 
   addEdge(source: string, type: string, target: string, data?: Record<string, unknown>, ownership?: EdgeOwnership): void {
+    if (!source || !type || !target) throw new TypeError('Edge source, type, and target must not be empty')
     const id = edgeId(source, type, target)
     this.removedEdgeIds.delete(id)
     if (!this.edges.has(source)) this.edges.set(source, [])
@@ -460,7 +491,8 @@ export class PolyGraph {
     const existing = edges.find(e => e.type === type && e.target === target)
     if (existing) return
 
-    const fullData = ownership !== undefined ? { ...data, [OWNERSHIP_KEY]: ownership } : (data ?? undefined)
+    const inputData = data === undefined ? undefined : cloneData(data)
+    const fullData = ownership !== undefined ? { ...inputData, [OWNERSHIP_KEY]: ownership } : inputData
 
     edges.push({ target, type, data: fullData })
     if (!this.nodeToEdgeMap.has(target)) this.nodeToEdgeMap.set(target, new Set())
@@ -478,8 +510,8 @@ export class PolyGraph {
   getEdges(source: string, type?: string): Array<{ target: string; type: string; data?: Record<string, unknown> }> {
     const edges = this.edges.get(source)
     if (!edges) return []
-    if (type) return edges.filter(e => e.type === type)
-    return [...edges]
+    const selected = type ? edges.filter(e => e.type === type) : edges
+    return selected.map(edge => ({ ...edge, data: edge.data ? cloneData(edge.data) : undefined }))
   }
 
   getEdgeTargets(source: string, type: string): string[] {
@@ -568,7 +600,7 @@ export class PolyGraph {
         this.evictedDirtyNodes.set(evict, {
           id: node.id,
           type: node.type,
-          data: node.data,
+          data: cloneData(node.data),
           vector: node.vector ? [...node.vector] : null,
           insertedAt: node.insertedAt,
           updatedAt: node.updatedAt,
@@ -592,7 +624,7 @@ export class PolyGraph {
       nodes.push({
         id: node.id,
         type: node.type,
-        data: node.data,
+        data: cloneData(node.data),
         vector: node.vector ? [...node.vector] : null,
         insertedAt: node.insertedAt,
         updatedAt: node.updatedAt,
@@ -606,7 +638,7 @@ export class PolyGraph {
           source,
           target: e.target,
           type: e.type,
-          data: e.data ?? null,
+          data: e.data ? cloneData(e.data) : null,
           createdAt: Date.now(),
         })
       }
@@ -636,7 +668,11 @@ export class PolyGraph {
         throw new Error(`Invalid persisted edge ID: ${e.id}`)
       }
       if (!this.edges.has(e.source)) this.edges.set(e.source, [])
-      this.edges.get(e.source)!.push({ target: e.target, type: e.type, data: e.data ?? undefined })
+      this.edges.get(e.source)!.push({
+        target: e.target,
+        type: e.type,
+        data: e.data ? cloneData(e.data) : undefined,
+      })
       if (!this.nodeToEdgeMap.has(e.target)) this.nodeToEdgeMap.set(e.target, new Set())
       this.nodeToEdgeMap.get(e.target)!.add(e.source)
     }
@@ -652,7 +688,7 @@ export class PolyGraph {
         this.nodes.set(sn.id, {
           id: sn.id,
           type: sn.type,
-          data: sn.data,
+          data: cloneData(sn.data),
           vector: sn.vector ? new Float64Array(sn.vector) : undefined,
           insertedAt: sn.insertedAt,
           updatedAt: sn.updatedAt,
@@ -732,7 +768,7 @@ export class PolyGraph {
     const results: PolyNode[] = []
     for (const id of ids) {
       const node = this.nodes.get(id)
-      if (node) results.push(node)
+      if (node) results.push(clonePolyNode(node))
     }
     return results
   }

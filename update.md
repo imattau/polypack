@@ -24,11 +24,12 @@
 
 ## 3. Harden mutation boundaries
 
-- Prevent callers from silently mutating internal node and data references.
-- Add explicit vector removal support.
-- Validate IDs, timestamps, vectors, pagination values, and traversal depth.
-- Decide whether mutations clone input or take ownership.
-- Consider readonly node views.
+- [x] Prevent callers from silently mutating internal node, edge, data, and
+  vector references by returning detached snapshots.
+- [x] Add explicit vector removal support.
+- [x] Validate IDs, timestamps, vectors, pagination values, and traversal depth.
+- [x] Structured-clone mutation inputs so the graph owns its internal state.
+- [x] Use detached mutable snapshots instead of readonly live node views.
 
 ## 4. Improve persistence consistency
 

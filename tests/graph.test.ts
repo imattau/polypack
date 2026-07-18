@@ -51,6 +51,32 @@ describe('PolyGraph', () => {
       expect(graph.getNode('n1')!.data.name).toBe('Bob')
     })
 
+    it('owns node inputs and returns detached read snapshots', () => {
+      const data = { profile: { name: 'Alice' } }
+      const vector = new Float64Array([1, 0])
+      graph.addNode({ id: 'owned', type: 'user', data, vector, insertedAt: 1, updatedAt: 1 })
+
+      data.profile.name = 'changed-input'
+      vector[0] = 0
+      const read = graph.getNode('owned')!
+      read.data.profile = { name: 'changed-read' }
+      read.vector![0] = 0
+      const queried = graph.query().whereNodeType('user').first()!
+      queried.data.profile = { name: 'changed-query' }
+
+      expect((graph.getNode('owned')!.data.profile as { name: string }).name).toBe('Alice')
+      expect(graph.getNode('owned')!.vector).toEqual(new Float64Array([1, 0]))
+    })
+
+    it('validates node identity, timestamps, and vectors', () => {
+      expect(() => graph.addNode({ id: '', type: 't', data: {}, insertedAt: 1, updatedAt: 1 })).toThrow(TypeError)
+      expect(() => graph.addNode({ id: 'x', type: '', data: {}, insertedAt: 1, updatedAt: 1 })).toThrow(TypeError)
+      expect(() => graph.addNode({ id: 'x', type: 't', data: {}, insertedAt: -1, updatedAt: 1 })).toThrow(RangeError)
+      expect(() => graph.addNode({
+        id: 'x', type: 't', data: {}, vector: new Float64Array([Number.NaN]), insertedAt: 1, updatedAt: 1,
+      })).toThrow(RangeError)
+    })
+
     it('tracks node count via size', () => {
       graph.addNode({ id: 'a', type: 't1', data: {}, insertedAt: 1, updatedAt: 1 })
       graph.addNode({ id: 'b', type: 't2', data: {}, insertedAt: 2, updatedAt: 2 })
@@ -133,6 +159,17 @@ describe('PolyGraph', () => {
       expect(edges).toHaveLength(1)
       expect(edges[0].type).toBe('LINKS_TO')
       expect(edges[0].target).toBe('tgt')
+    })
+
+    it('owns edge data and returns detached edge snapshots', () => {
+      const data = { metadata: { weight: 5 } }
+      graph.addEdge('src', 'REL', 'target', data)
+      data.metadata.weight = 9
+      const edge = graph.getEdges('src')[0]
+      ;(edge.data!.metadata as { weight: number }).weight = 12
+
+      expect((graph.getEdges('src')[0].data!.metadata as { weight: number }).weight).toBe(5)
+      expect(() => graph.addEdge('', 'REL', 'target')).toThrow(TypeError)
     })
 
     it('retrieves edge targets', () => {
@@ -727,6 +764,30 @@ describe('PolyGraph', () => {
       // Re-add with different vector
       graph.addNode({ id: 'v', type: 't', data: {}, vector: new Float64Array([0, 1]), insertedAt: 2, updatedAt: 2 })
       expect(graph.vectors.get('v')).toEqual([0, 1])
+    })
+
+    it('removes a node vector explicitly and persists the removal', async () => {
+      const adapter = new MemoryAdapter()
+      const g = new PolyGraph(adapter)
+      g.addNode({ id: 'v', type: 't', data: {}, vector: new Float64Array([1, 0]), insertedAt: 1, updatedAt: 1 })
+      await g.flush()
+
+      expect(g.removeNodeVector('v')?.vector).toBeUndefined()
+      await g.flush()
+
+      expect(g.getNode('v')?.vector).toBeUndefined()
+      expect((await adapter.getNode('v'))?.vector).toBeNull()
+      expect(await adapter.getAllVectors()).toHaveLength(0)
+    })
+
+    it('validates query pagination, traversal, ranges, and vectors', () => {
+      expect(() => graph.query().limit(-1)).toThrow(RangeError)
+      expect(() => graph.query().offset(1.5)).toThrow(RangeError)
+      expect(() => graph.query().traverse('REL', -1)).toThrow(RangeError)
+      expect(() => graph.query().whereAttributeRange('x', { above: Number.NaN })).toThrow(RangeError)
+      expect(() => graph.query().similarTo([Number.POSITIVE_INFINITY])).toThrow(RangeError)
+      expect(() => graph.query().similarTo([1], 0, -1)).toThrow(RangeError)
+      expect(graph.query().limit(0).toArray()).toEqual([])
     })
 
     it('updateNode with vector updates VectorIndex', () => {

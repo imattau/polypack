@@ -1,5 +1,6 @@
 import type { PolyNode } from './types.js'
 import { cosineSimilarity } from './vector-index.js'
+import { assertFiniteVector, assertNonNegativeInteger, cloneData, clonePolyNode } from './utils.js'
 
 type EdgeIndex = Map<string, Array<{ target: string; type: string; data?: Record<string, unknown> }>>
 
@@ -68,6 +69,8 @@ export class GraphQuery {
   }
 
   whereAttributeRange(name: string, range: { above?: number; below?: number }): this {
+    if (range.above !== undefined && !Number.isFinite(range.above)) throw new RangeError('Range above must be finite')
+    if (range.below !== undefined && !Number.isFinite(range.below)) throw new RangeError('Range below must be finite')
     const ranges = this.opts.attributeRanges ?? {}
     ranges[name] = range
     this.opts.attributeRanges = ranges
@@ -80,12 +83,14 @@ export class GraphQuery {
   }
 
   whereEdge(type: string, target?: string): this {
+    if (!type) throw new TypeError('Edge type must not be empty')
     this.opts.edgeType = type
     if (target) this.opts.edgeTarget = target
     return this
   }
 
   whereEdgeSource(source: string): this {
+    if (!source) throw new TypeError('Edge source must not be empty')
     this.opts.edgeSource = source
     return this
   }
@@ -96,16 +101,20 @@ export class GraphQuery {
   }
 
   limit(n: number): this {
+    assertNonNegativeInteger(n, 'limit')
     this.opts.limit = n
     return this
   }
 
   offset(n: number): this {
+    assertNonNegativeInteger(n, 'offset')
     this.opts.offset = n
     return this
   }
 
   traverse(edgeType: string, depth: number, direction: 'out' | 'in' = 'out'): this {
+    if (!edgeType) throw new TypeError('Edge type must not be empty')
+    assertNonNegativeInteger(depth, 'depth')
     const steps = this.opts.afterSteps ?? []
     steps.push({ edgeType, depth, direction })
     this.opts.afterSteps = steps
@@ -113,6 +122,9 @@ export class GraphQuery {
   }
 
   similarTo(vector: number[], threshold = 0, topK?: number): this {
+    assertFiniteVector(vector, 'query vector')
+    if (!Number.isFinite(threshold)) throw new RangeError('threshold must be finite')
+    if (topK !== undefined) assertNonNegativeInteger(topK, 'topK')
     this.opts.similarVector = { vector, threshold, topK }
     return this
   }
@@ -285,10 +297,10 @@ export class GraphQuery {
       results = topK !== undefined ? scored.slice(0, topK).map(s => s.node) : scored.map(s => s.node)
     }
 
-    if (this.opts.offset) results = results.slice(this.opts.offset)
-    if (this.opts.limit) results = results.slice(0, this.opts.limit)
+    if (this.opts.offset !== undefined) results = results.slice(this.opts.offset)
+    if (this.opts.limit !== undefined) results = results.slice(0, this.opts.limit)
 
-    return results
+    return results.map(node => clonePolyNode(node))
   }
 
   first(): PolyNode | null {
@@ -388,16 +400,19 @@ export class GraphQuery {
    *     .toArray()
    */
   join(edgeType: string, direction: 'out' | 'in' = 'out', predicate?: (connectedNode: PolyNode) => boolean): this {
+    if (!edgeType) throw new TypeError('Edge type must not be empty')
     const filters = this.opts.joinFilters ?? []
     filters.push((node: PolyNode) => {
       const connected = direction === 'out'
         ? (this.edges.get(node.id)
             ?.filter(e => e.type === edgeType)
             .map(e => this.nodes.get(e.target))
-            .filter((n): n is PolyNode => !!n) ?? [])
+            .filter((n): n is PolyNode => !!n)
+            .map(clonePolyNode) ?? [])
         : this.getEdgeSourcesForTarget(node.id, edgeType)
             .map(id => this.nodes.get(id))
             .filter((n): n is PolyNode => !!n)
+            .map(clonePolyNode)
       if (connected.length === 0) return false
       if (predicate) return connected.some(predicate)
       return true
@@ -474,7 +489,7 @@ export class GraphQuery {
     const keys = new Set<unknown>()
     for (const node of this.nodes.values()) {
       const val = (node.data as Record<string, unknown>)[field]
-      if (val !== undefined) keys.add(val)
+      if (val !== undefined) keys.add(cloneData(val))
     }
     return [...keys]
   }
@@ -497,8 +512,9 @@ export class GraphQuery {
             if (seen.has(e.target)) continue
             seen.add(e.target)
             const node = this.nodes.get(e.target)
-            if (node && (!predicate || predicate(node))) {
-              collected.push(node)
+            if (node) {
+              const snapshot = clonePolyNode(node)
+              if (!predicate || predicate(snapshot)) collected.push(snapshot)
             }
           }
         }
@@ -513,8 +529,9 @@ export class GraphQuery {
             if (!matched) continue
             seen.add(src)
             const node = this.nodes.get(src)
-            if (node && (!predicate || predicate(node))) {
-              collected.push(node)
+            if (node) {
+              const snapshot = clonePolyNode(node)
+              if (!predicate || predicate(snapshot)) collected.push(snapshot)
             }
           }
         }

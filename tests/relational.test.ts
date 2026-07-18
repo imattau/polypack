@@ -182,11 +182,11 @@ describe('relational query extensions', () => {
     beforeEach(() => {
       // Add vectors to the existing books (they don't have them yet)
       // Books: b1=Neuromancer, b2=Dune, b3=LotR, b4=Name of the Wind, b5=Pride
-      const b1 = graph.getNode('b1')!; b1.vector = new Float64Array([0.9, 0.2, 0.1])
-      const b2 = graph.getNode('b2')!; b2.vector = new Float64Array([0.7, 0.4, 0.2])
-      const b3 = graph.getNode('b3')!; b3.vector = new Float64Array([0.3, 0.8, 0.7])
-      const b4 = graph.getNode('b4')!; b4.vector = new Float64Array([0.2, 0.7, 0.9])
-      const b5 = graph.getNode('b5')!; b5.vector = new Float64Array([0.9, 0.6, 0.3])
+      graph.updateNode('b1', {}, new Float64Array([0.9, 0.2, 0.1]))
+      graph.updateNode('b2', {}, new Float64Array([0.7, 0.4, 0.2]))
+      graph.updateNode('b3', {}, new Float64Array([0.3, 0.8, 0.7]))
+      graph.updateNode('b4', {}, new Float64Array([0.2, 0.7, 0.9]))
+      graph.updateNode('b5', {}, new Float64Array([0.9, 0.6, 0.3]))
     })
 
     it('groups by nearest centroid and aggregates', () => {
