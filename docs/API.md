@@ -182,17 +182,22 @@ edge types must not contain `::`; target IDs may contain it.
 ## `@0xx0lostcause0xx0/polypack/react`
 
 ```ts
-useGraphQuery(graph, queryFn, deps, delay?, nodeTypes?)
+useGraphQuery(graph, queryFn, deps, delay?, nodeTypes?, onError?)
 useLiveQuery(graph, querier, deps?, defaultResult?)
 ```
 
 Both hooks execute immediately, subscribe to graph changes, and support sync or
 async queries. `useGraphQuery` defaults to a 200 ms debounce. When `nodeTypes`
 is supplied, events for other known node types are ignored. Query errors are
-logged and set the result to `undefined`.
+logged, passed to the optional `onError(error)` callback, and set the result to
+`undefined`.
 
 The dependency list controls query closure refresh in the same way as other
-React hooks. React 18 and 19 are supported as an optional peer dependency.
+React hooks. Changing `nodeTypes` or `delay` updates the active subscription
+without requiring dependency-list changes. In-flight queries are serialized;
+stale results are discarded after dependency changes or unmounting, and one
+follow-up run is retained when mutations arrive during an asynchronous query.
+React 18 and 19 are supported as an optional peer dependency.
 
 ## `@0xx0lostcause0xx0/polypack/sync`
 

@@ -23,6 +23,7 @@ export function useGraphQuery<T>(
   deps: unknown[],
   delay = 200,
   nodeTypes?: string[],
+  onError?: (error: unknown) => void,
 ): T | undefined {
   const [result, setResult] = useState<T | undefined>(undefined)
   const timerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
@@ -31,6 +32,7 @@ export function useGraphQuery<T>(
   const mountedRef = useRef(true)
   const isFirstRef = useRef(true)
   const nodeTypesRef = useRef(nodeTypes)
+  const onErrorRef = useRef(onError)
   const queryInFlightRef = useRef(false)
   const rerunPendingRef = useRef(false)
   const queryEpochRef = useRef({})
@@ -38,7 +40,8 @@ export function useGraphQuery<T>(
 
   useEffect(() => {
     nodeTypesRef.current = nodeTypes
-  }, [nodeTypes])
+    onErrorRef.current = onError
+  }, [nodeTypes, onError])
 
   const runQuery = useCallback(() => {
     const epoch = queryEpochRef.current
@@ -78,6 +81,7 @@ export function useGraphQuery<T>(
           .catch((err) => {
             if (epoch !== queryEpochRef.current) return
             console.error('[Graph] Query error:', err)
+            onErrorRef.current?.(err)
             if (mountedRef.current) setResult(undefined)
           })
           .finally(finishQuery)
@@ -87,6 +91,7 @@ export function useGraphQuery<T>(
       }
     } catch (err) {
       console.error('[Graph] Query error:', err)
+      onErrorRef.current?.(err)
       if (mountedRef.current) setResult(undefined)
       finishQuery()
     }

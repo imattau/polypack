@@ -40,9 +40,9 @@
 
 ## 5. Expand React verification
 
-- Add mounted-hook tests for changing `nodeTypes` and `delay`.
-- Test asynchronous query races, unmounting, and rapid mutation bursts.
-- Consider an explicit error result or callback instead of only logging failures.
+- [x] Add mounted-hook tests for changing `nodeTypes` and `delay`.
+- [x] Test asynchronous query races, unmounting, and rapid mutation bursts.
+- [x] Add an optional query-error callback while preserving error logging.
 
 ## 6. Prepare the next release
 
