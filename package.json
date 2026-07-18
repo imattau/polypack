@@ -1,6 +1,6 @@
 {
   "name": "@0xx0lostcause0xx0/polypack",
-  "version": "1.1.0",
+  "version": "2.1.0",
   "description": "Generic property graph engine with vector similarity search — extracted from scrollstr's PolyGraph",
   "keywords": [
     "graph",
@@ -46,7 +46,7 @@
   "scripts": {
     "build": "tsc",
     "check": "npm test && npm run build && npm run check:exports",
-    "check:exports": "node --input-type=module --eval \"const core = await import('./dist/index.js'); const sync = await import('./dist/sync/index.js'); const react = await import('./dist/react.js'); if (!core.PolyGraph || !sync.SyncClient || !react.useGraphQuery) process.exit(1)\"",
+    "check:exports": "node --input-type=module --eval \"const core = await import('./dist/index.js'); const sync = await import('./dist/sync/index.js'); const react = await import('./dist/react.js'); if (!core.PolyGraph || !core.PersistedGraphQuery || !core.FeatureHashEmbedding || !sync.SyncClient || !sync.SyncServer || !react.useGraphQuery) process.exit(1)\"",
     "prepack": "npm run build",
     "prepublishOnly": "npm test && npm run build",
     "test": "vitest run",

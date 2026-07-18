@@ -46,16 +46,24 @@
 
 ## 6. Prepare the next release
 
-- Bump the package version beyond `1.1.0`.
-- Update `CHANGELOG.md`.
-- Choose `1.2.0` or a larger release based on persisted-query stability.
-- Inspect package contents with `npm pack --dry-run`.
-- Verify the IndexedDB version-2 migration in a real browser.
+- [x] Bump the package version to `2.1.0` for the breaking mutation-boundary,
+  validation, similarity, and IndexedDB schema changes.
+- [x] Update `CHANGELOG.md` with breaking changes and migration guidance.
+- [x] Inspect the package contents with `npm pack --dry-run` and install the
+  actual tarball in a clean consumer project.
+- [x] Verify root, sync, and optional React exports from the packed artifact.
+- [x] Verify the IndexedDB version-1 to version-2 migration in headless Firefox.
+
+## 7. Add pluggable text embeddings
+
+- [x] Define a sync/async provider contract for custom embedding models.
+- [x] Include a deterministic model-free feature-hash provider by default.
+- [x] Add graph helpers for embedded node creation, updates, and text queries.
+- [x] Validate provider dimensions and finite vector output.
 
 ## Recommended sequence
 
-1. Persisted edge traversal and join support.
-2. Persisted query performance and adapter pagination.
-3. Reliable synchronization as a separate milestone.
-4. Mutation-boundary and persistence hardening.
-5. React verification and release preparation.
+1. Add compact sync snapshots and an operation-log retention policy.
+2. Define sync conflict resolution, durable operation storage, and auth hooks.
+3. Expand persisted traversal and IndexedDB benchmarks at larger scales.
+4. Publish the prepared `2.1.0` release after final review.

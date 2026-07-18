@@ -146,6 +146,40 @@ All compared vectors must have identical dimensions; otherwise similarity
 functions throw `RangeError`. Zero vectors have cosine similarity `0`. Added
 vectors are copied, and `get()`/`entries()` return detached arrays.
 
+### Text embeddings
+
+- `EmbeddingProvider` defines `embed(text)` and an optional `dimensions`. The
+  method may be synchronous or asynchronous and may return a number array,
+  `Float32Array`, or `Float64Array`.
+- `FeatureHashEmbedding` is the default dependency-free provider. It produces
+  deterministic, normalized 384-dimensional lexical vectors without downloading
+  a model. Its dimensions can be configured in the constructor.
+- Pass a custom provider as the third `PolyGraph` constructor argument:
+
+  ```ts
+  const provider = {
+    dimensions: 768,
+    async embed(text: string) {
+      return model.embed(text)
+    },
+  }
+  const graph = new PolyGraph(adapter, 10_000, provider)
+  ```
+
+- `embed(text)` generates and validates a detached `Float64Array`.
+- `addNodeWithEmbedding(node, text)` adds a node using generated text features.
+- `updateNodeWithEmbedding(id, data, text)` and
+  `updateNodeSafeWithEmbedding(id, data, text)` regenerate a node vector.
+- `queryText(text, threshold?, topK?)` returns a `Promise<GraphQuery>` already
+  configured for similarity search.
+- `queryPersistedText(text, threshold?, topK?)` does the same across the complete
+  persisted dataset.
+
+The default provider captures shared words rather than learned semantic meaning.
+Use a model-backed provider when synonyms and deeper language relationships are
+required. Keep one provider and dimensionality for a vector index; similarity
+comparisons reject vectors with mismatched dimensions.
+
 ### Persistence
 
 - `MemoryAdapter` stores serialized records in memory.

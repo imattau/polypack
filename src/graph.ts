@@ -6,6 +6,8 @@ import { PersistedGraphQuery } from './persisted-query.js'
 import { assertFiniteVector, cloneData, clonePolyNode, edgeId, yieldToUI } from './utils.js'
 import type { PersistenceAdapter, PersistenceChanges } from './persistence/adapter.js'
 import { MemoryAdapter } from './persistence/memory.js'
+import { createEmbedding, defaultEmbedding } from './embedding.js'
+import type { EmbeddingProvider } from './embedding.js'
 
 type EdgeIndex = Map<string, Array<{ target: string; type: string; data?: Record<string, unknown> }>>
 
@@ -34,6 +36,7 @@ export class PolyGraph {
   readonly changes = new Subject<GraphChangeEvent>()
   readonly persistence: PersistenceAdapter
   readonly hotCacheMax: number
+  readonly embedding: EmbeddingProvider
 
   protected hotCacheOrder = new Map<string, true>()
   protected _byType = new Map<string, Set<string>>()
@@ -75,9 +78,10 @@ export class PolyGraph {
     }
   }
 
-  constructor(adapter?: PersistenceAdapter, hotCacheMax?: number) {
+  constructor(adapter?: PersistenceAdapter, hotCacheMax?: number, embedding?: EmbeddingProvider) {
     this.persistence = adapter ?? new MemoryAdapter()
     this.hotCacheMax = hotCacheMax ?? DEFAULT_HOT_CACHE_MAX
+    this.embedding = embedding ?? defaultEmbedding
     this.vectors = new VectorIndex((id) => {
       this.dirtyVectors.add(id)
       this.schedulePersist()
@@ -246,6 +250,12 @@ export class PolyGraph {
     this.emitChange({ type: 'node_added', nodeId: stored.id, nodeType: stored.type })
   }
 
+  /** Embed `text` with the configured provider and add the resulting node. */
+  async addNodeWithEmbedding(node: Omit<PolyNode, 'vector'>, text: string): Promise<void> {
+    const vector = await this.embed(text)
+    this.addNode({ ...node, vector })
+  }
+
   protected indexNode(node: PolyNode): void {
     const id = node.id
     if (!this._byType.has(node.type)) this._byType.set(node.type, new Set())
@@ -324,6 +334,26 @@ export class PolyGraph {
     this.markDirty(id)
     this.emitChange({ type: 'node_updated', nodeId: id, nodeType: node.type })
     return clonePolyNode(node)
+  }
+
+  /** Embed `text` and update a loaded node's data and vector together. */
+  async updateNodeWithEmbedding(
+    id: string,
+    data: Partial<Record<string, unknown>>,
+    text: string,
+  ): Promise<PolyNode | undefined> {
+    const vector = await this.embed(text)
+    return this.updateNode(id, data, vector)
+  }
+
+  /** Embed `text`, restoring an evicted node before updating when necessary. */
+  async updateNodeSafeWithEmbedding(
+    id: string,
+    data: Partial<Record<string, unknown>>,
+    text: string,
+  ): Promise<PolyNode | undefined> {
+    const vector = await this.embed(text)
+    return this.updateNodeSafe(id, data, vector)
   }
 
   /** Remove a node's vector while keeping the node and its data. */
@@ -586,6 +616,21 @@ export class PolyGraph {
 
   query(): GraphQuery {
     return new GraphQuery(this.nodes, this.edges, this.nodeToEdgeMap)
+  }
+
+  /** Generate a detached embedding using the graph's configured provider. */
+  async embed(text: string): Promise<Float64Array> {
+    return createEmbedding(this.embedding, text)
+  }
+
+  /** Start an in-memory similarity query from text using the configured provider. */
+  async queryText(text: string, threshold = 0, topK?: number): Promise<GraphQuery> {
+    return this.query().similarTo([...(await this.embed(text))], threshold, topK)
+  }
+
+  /** Start a complete persisted similarity query from embedded text. */
+  async queryPersistedText(text: string, threshold = 0, topK?: number): Promise<PersistedGraphQuery> {
+    return this.queryPersisted().similarTo([...(await this.embed(text))], threshold, topK)
   }
 
   /** Query all persisted nodes without loading them into the hot working set. */

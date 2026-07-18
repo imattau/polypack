@@ -15,6 +15,8 @@ React is an optional peer dependency and is only required when importing from `@
 - **Property graph** — typed nodes and edges with arbitrary data payloads
 - **LRU working set** — 10K loaded-node limit by default, with explicit restoration from persistence
 - **Vector similarity** — cosine, euclidean, or pluggable distance functions
+- **Pluggable text embeddings** — supply any local or hosted model, with a
+  dependency-free 384-dimensional feature-hash provider included by default
 - **Fluent query builder** — filter by type/attribute/edge/range, BFS traversal, vector similarity
 - **Relational extensions** — `pluck`, `aggregate`, `groupAggregate`, `join`, `groupByVector` (clustering)
 - **Edge ownership** — `owned` (cascade delete), `shared` (orphan detection), `reference` (no-op)
@@ -39,6 +41,18 @@ graph.addNode({
   insertedAt: Date.now(),
   updatedAt: Date.now(),
 })
+
+// Or generate vectors from text with the default model-free provider
+await graph.addNodeWithEmbedding({
+  id: 'doc-2',
+  type: 'document',
+  data: { title: 'Graph search' },
+  insertedAt: Date.now(),
+  updatedAt: Date.now(),
+}, 'Property graphs with vector similarity search')
+
+const textMatches = await graph.queryText('semantic graph search', 0.1, 10)
+textMatches.toArray()
 
 // Search by similarity
 graph.query()
