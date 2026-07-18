@@ -182,19 +182,22 @@ React hooks. React 18 and 19 are supported as an optional peer dependency.
   and edge writes in its `oplog`; set `onOp` to observe them.
 - `SyncClient({ graph, transport, clientId?, autoFlush?, retryMs? })` captures
   graph events, retains operations until acknowledged, retries unacknowledged
-  deltas, and applies remote operations with echo suppression. `retryMs` defaults
+  deltas, detects server-cursor gaps, and applies remote operations with echo
+  suppression. `retryMs` defaults
   to 1,000 ms and `0` disables automatic retry. Use `flush()` for manual sends,
-  inspect `pendingOps`, call `reconnect(transport)` to replace a transport and
-  resend pending work, and use `disconnect()` to unsubscribe and close.
+  inspect `pendingOps`, call `requestSync(fromStart?)` for catch-up, inspect
+  `syncCursor`, call `reconnect(transport)` to replace a transport, resend pending
+  work, and request missing server operations, and use `disconnect()` to close.
 - `SyncServer` is an in-memory relay. `addClient(handle)` returns that client's
   incoming-message handler, `removeClient(handle)` unregisters it, and `ops`
   exposes the received log. The server deduplicates operations by client and
-  sequence and acknowledges both first-time and repeated delivery.
+  sequence, acknowledges both first-time and repeated delivery, and serves full
+  operation snapshots or cursor-based deltas for late and reconnecting clients.
 - `SyncTransport` requires `send`, `onMessage`, and `close`.
 - `MemoryTransport.pair()` creates linked asynchronous in-process transports.
 
 The bundled sync layer is intentionally transport-agnostic and in-memory. It
-does not provide authentication, durable server storage, snapshot recovery, or
-conflict resolution. Applications must detect transport failure and supply a
+does not provide authentication, durable server storage, compact state snapshots,
+or conflict resolution. Applications must detect transport failure and supply a
 replacement transport to `reconnect()`; production deployments must also
 supply the remaining durability and security guarantees.

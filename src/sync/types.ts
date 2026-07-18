@@ -7,7 +7,10 @@ export interface SyncOp {
   payload: Record<string, unknown>
 }
 
-/** Transport envelope. For acknowledgements, `fromSeq` is the accepted sequence. */
+/**
+ * Transport envelope. `fromSeq` is a client sequence for acknowledgements and
+ * a server operation cursor for server deltas, snapshots, and recovery requests.
+ */
 export interface SyncMessage {
   type: 'delta' | 'snapshot' | 'ack' | 'request-snapshot'
   clientId: string

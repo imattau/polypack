@@ -16,7 +16,8 @@
 - [x] Add acknowledgements and retain unacknowledged operations.
 - [x] Add retry and explicit transport reconnection behavior.
 - [x] Deduplicate operations on the server.
-- Recover through snapshots or deltas after reconnect.
+- [x] Recover through operation snapshots or cursor-based deltas after reconnect.
+- Add compact state snapshots and operation-log retention/compaction policies.
 - Define an explicit conflict-resolution policy.
 - Add durable server operation storage.
 - Provide authentication integration hooks while leaving authentication policy to applications.

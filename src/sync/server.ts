@@ -31,7 +31,19 @@ export class SyncServer {
   }
 
   private handleMessage(msg: SyncMessage, sender: SyncServerClient): void {
+    if (msg.type === 'request-snapshot') {
+      const cursorIsValid = msg.fromSeq >= 0 && msg.fromSeq <= this.opLog.length
+      const requestedCursor = cursorIsValid ? msg.fromSeq : 0
+      sender.send({
+        type: requestedCursor === 0 ? 'snapshot' : 'delta',
+        clientId: 'server',
+        fromSeq: requestedCursor,
+        ops: this.opLog.slice(requestedCursor),
+      })
+      return
+    }
     if (msg.type === 'delta') {
+      const broadcastCursor = this.opLog.length
       const accepted: SyncOp[] = []
       for (const op of msg.ops) {
         const key = `${op.clientId}:${op.seq}`
@@ -54,7 +66,7 @@ export class SyncServer {
         client.send({
           type: 'delta',
           clientId: 'server',
-          fromSeq: 0,
+          fromSeq: broadcastCursor,
           ops: accepted,
         })
       }
@@ -63,5 +75,10 @@ export class SyncServer {
 
   get ops(): readonly SyncOp[] {
     return this.opLog
+  }
+
+  /** Cursor immediately after the latest accepted server operation. */
+  get cursor(): number {
+    return this.opLog.length
   }
 }

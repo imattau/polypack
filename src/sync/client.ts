@@ -41,6 +41,7 @@ export class SyncClient {
   private autoFlush: boolean
   private retryMs: number
   private retryTimer: ReturnType<typeof setTimeout> | null = null
+  private serverCursor = 0
   private applyingRemote = false
 
   constructor(options: SyncClientOptions) {
@@ -197,9 +198,39 @@ export class SyncClient {
       this.scheduleRetry()
       return
     }
+    if (msg.type === 'snapshot' && msg.clientId === 'server') {
+      this.applyRemote(msg.ops)
+      this.serverCursor = msg.fromSeq + msg.ops.length
+      return
+    }
+    if (msg.type === 'delta' && msg.clientId === 'server') {
+      if (msg.fromSeq > this.serverCursor) {
+        this.requestSync()
+        return
+      }
+      const alreadyApplied = Math.max(0, this.serverCursor - msg.fromSeq)
+      const unseen = msg.ops.slice(alreadyApplied)
+      this.applyRemote(unseen)
+      this.serverCursor = Math.max(this.serverCursor, msg.fromSeq + msg.ops.length)
+      return
+    }
     if (msg.type === 'delta' || msg.type === 'snapshot') {
       this.applyRemote(msg.ops)
     }
+  }
+
+  /** Request all server operations after the last applied server cursor. */
+  requestSync(fromStart = false): void {
+    this.transport.send({
+      type: 'request-snapshot',
+      clientId: this.oplog.clientId,
+      fromSeq: fromStart ? 0 : this.serverCursor,
+      ops: [],
+    })
+  }
+
+  get syncCursor(): number {
+    return this.serverCursor
   }
 
   /** Operations retained until the server acknowledges their sequence. */
@@ -214,6 +245,7 @@ export class SyncClient {
     this.transport.close()
     this.bindTransport(transport)
     this.flush()
+    this.requestSync()
   }
 
   disconnect(): void {

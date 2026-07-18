@@ -176,10 +176,92 @@ describe('SyncServer + SyncClient', () => {
     client.reconnect(second)
 
     expect(firstMessages).toHaveLength(1)
-    expect(secondMessages).toHaveLength(1)
+    expect(secondMessages.map(msg => msg.type)).toEqual(['delta', 'request-snapshot'])
     second.onMessage?.({ type: 'ack', clientId: 'reconnect-client', fromSeq: 1, ops: [] })
     expect(client.pendingOps).toHaveLength(0)
     client.disconnect()
+  })
+
+  it('catches up a late client from a server snapshot', async () => {
+    const server = new SyncServer()
+    const sourceGraph = new PolyGraph()
+    const { client: source, cleanup: cleanupSource } = connect(sourceGraph, 'source', server, false)
+    sourceGraph.addNode({ id: 'existing', type: 'note', data: { text: 'before' }, insertedAt: 1, updatedAt: 1 })
+    source.flush()
+    await new Promise(resolve => setTimeout(resolve, 10))
+
+    const lateGraph = new PolyGraph()
+    const { client: late, cleanup: cleanupLate } = connect(lateGraph, 'late', server, false)
+    late.requestSync()
+    await new Promise(resolve => setTimeout(resolve, 10))
+
+    expect(lateGraph.getNode('existing')?.data.text).toBe('before')
+    expect(late.syncCursor).toBe(server.cursor)
+    cleanupSource()
+    cleanupLate()
+  })
+
+  it('detects a server cursor gap and requests recovery', async () => {
+    const server = new SyncServer()
+    const receive = server.addClient({ send: () => undefined, clientId: 'seed' })
+    const makeNodeOp = (seq: number, id: string) => ({
+      seq,
+      clientId: 'seed',
+      timestamp: seq,
+      kind: 'addNode' as const,
+      payload: { id, type: 't', data: {}, vector: null, insertedAt: seq, updatedAt: seq },
+    })
+    const first = makeNodeOp(1, 'first')
+    const second = makeNodeOp(2, 'second')
+    receive({ type: 'delta', clientId: 'seed', fromSeq: 0, ops: [first, second] })
+
+    const graph = new PolyGraph()
+    const { client, cleanup } = connect(graph, 'recovering', server, false)
+    client.handleMessage({ type: 'delta', clientId: 'server', fromSeq: 1, ops: [second] })
+    await new Promise(resolve => setTimeout(resolve, 10))
+
+    expect(graph.getNode('first')).toBeDefined()
+    expect(graph.getNode('second')).toBeDefined()
+    expect(client.syncCursor).toBe(2)
+    cleanup()
+  })
+
+  it('returns only operations after a requested server cursor', () => {
+    const server = new SyncServer()
+    const seedReceive = server.addClient({ send: () => undefined, clientId: 'seed' })
+    const ops = ['a', 'b'].map((id, index) => ({
+      seq: index + 1,
+      clientId: 'seed',
+      timestamp: index,
+      kind: 'removeNode' as const,
+      payload: { id },
+    }))
+    seedReceive({ type: 'delta', clientId: 'seed', fromSeq: 0, ops })
+    const responses: SyncMessage[] = []
+    const request = server.addClient({ send: msg => responses.push(msg), clientId: 'late' })
+
+    request({ type: 'request-snapshot', clientId: 'late', fromSeq: 1, ops: [] })
+
+    expect(responses).toHaveLength(1)
+    expect(responses[0]).toMatchObject({ type: 'delta', clientId: 'server', fromSeq: 1 })
+    expect(responses[0].ops.map(op => op.payload.id)).toEqual(['b'])
+  })
+
+  it('falls back to a full snapshot when a recovery cursor is invalid', () => {
+    const server = new SyncServer()
+    const seedReceive = server.addClient({ send: () => undefined, clientId: 'seed' })
+    seedReceive({
+      type: 'delta', clientId: 'seed', fromSeq: 0, ops: [{
+        seq: 1, clientId: 'seed', timestamp: 1, kind: 'removeNode', payload: { id: 'a' },
+      }],
+    })
+    const responses: SyncMessage[] = []
+    const request = server.addClient({ send: msg => responses.push(msg), clientId: 'late' })
+
+    request({ type: 'request-snapshot', clientId: 'late', fromSeq: 99, ops: [] })
+
+    expect(responses[0]).toMatchObject({ type: 'snapshot', clientId: 'server', fromSeq: 0 })
+    expect(responses[0].ops).toHaveLength(1)
   })
 
   /** Wire a client to the server. The server broadcasts to all other clients'
