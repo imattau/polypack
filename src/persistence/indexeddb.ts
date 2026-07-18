@@ -6,11 +6,19 @@ import { applyPersistedCountPagination, applyPersistedNodeQuery, matchesPersiste
 export interface IndexedDBConfig {
   name: string
   version: number
+  /** Node data fields to index for ordered persisted queries. */
+  nodeIndexes?: string[]
 }
 
-const DEFAULT_CONFIG: IndexedDBConfig = { name: 'polypack', version: 2 }
+type ResolvedIndexedDBConfig = Required<IndexedDBConfig>
 
-function openDB(config: IndexedDBConfig): Promise<IDBDatabase> {
+const DEFAULT_CONFIG: ResolvedIndexedDBConfig = { name: 'polypack', version: 2, nodeIndexes: [] }
+
+function nodeDataIndexName(field: string): string {
+  return `data:${field}`
+}
+
+function openDB(config: ResolvedIndexedDBConfig): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
     const req = indexedDB.open(config.name, config.version)
     req.onupgradeneeded = () => {
@@ -20,6 +28,12 @@ function openDB(config: IndexedDBConfig): Promise<IDBDatabase> {
         : req.transaction!.objectStore('nodes')
       if (!nodeStore.indexNames.contains('type')) {
         nodeStore.createIndex('type', 'type', { unique: false })
+      }
+      for (const field of new Set(config.nodeIndexes)) {
+        const indexName = nodeDataIndexName(field)
+        if (!nodeStore.indexNames.contains(indexName)) {
+          nodeStore.createIndex(indexName, `data.${field}`, { unique: false })
+        }
       }
       if (!db.objectStoreNames.contains('edges')) {
         const store = db.createObjectStore('edges', { keyPath: 'id' })
@@ -72,13 +86,14 @@ function cursorQueryNodes(
   source: IDBObjectStore | IDBIndex,
   query: PersistedNodeQuery,
   range?: IDBKeyRange,
+  direction: IDBCursorDirection = 'next',
 ): Promise<SerializedNode[]> {
   if (query.limit === 0) return Promise.resolve([])
   return new Promise((resolve, reject) => {
     const results: SerializedNode[] = []
     let matched = 0
     const offset = query.offset ?? 0
-    const req = source.openCursor(range)
+    const req = source.openCursor(range, direction)
     req.onsuccess = () => {
       const cursor = req.result
       if (!cursor) {
@@ -99,13 +114,32 @@ function cursorQueryNodes(
   })
 }
 
+function queryIndexRange(query: PersistedNodeQuery, field: string): IDBKeyRange | undefined {
+  const exact = query.attributes?.[field]
+  if (exact !== undefined) {
+    try {
+      return IDBKeyRange.only(exact as IDBValidKey)
+    } catch {
+      return undefined
+    }
+  }
+  const range = query.attributeRanges?.[field]
+  if (!range) return undefined
+  if (range.above !== undefined && range.below !== undefined) {
+    return IDBKeyRange.bound(range.above, range.below, true, true)
+  }
+  if (range.above !== undefined) return IDBKeyRange.lowerBound(range.above, true)
+  if (range.below !== undefined) return IDBKeyRange.upperBound(range.below, true)
+  return undefined
+}
+
 /** Browser persistence adapter backed by three IndexedDB object stores. */
 export class IndexedDBAdapter implements PersistenceAdapter {
   private dbPromise: Promise<IDBDatabase> | null = null
-  private config: IndexedDBConfig
+  private config: ResolvedIndexedDBConfig
 
   constructor(config?: Partial<IndexedDBConfig>) {
-    this.config = { ...DEFAULT_CONFIG, ...config }
+    this.config = { ...DEFAULT_CONFIG, ...config, nodeIndexes: config?.nodeIndexes ?? [] }
   }
 
   private async db(): Promise<IDBDatabase> {
@@ -187,6 +221,24 @@ export class IndexedDBAdapter implements PersistenceAdapter {
     const cursorPage = query.orderBy === undefined &&
       Number.isInteger(query.offset ?? 0) && (query.offset ?? 0) >= 0 &&
       (query.limit === undefined || (Number.isInteger(query.limit) && query.limit >= 0))
+
+    const orderedFieldConstrained = query.orderBy && (
+      Object.prototype.hasOwnProperty.call(query.attributes ?? {}, query.orderBy.field) ||
+      query.attributeRanges?.[query.orderBy.field] !== undefined
+    )
+    const indexedOrder = query.orderBy && orderedFieldConstrained &&
+      store.indexNames.contains(nodeDataIndexName(query.orderBy.field)) &&
+      Number.isInteger(query.offset ?? 0) && (query.offset ?? 0) >= 0 &&
+      (query.limit === undefined || (Number.isInteger(query.limit) && query.limit >= 0))
+    if (indexedOrder) {
+      const { field, direction } = query.orderBy!
+      return cursorQueryNodes(
+        store.index(nodeDataIndexName(field)),
+        query,
+        queryIndexRange(query, field),
+        direction === 'asc' ? 'next' : 'prev',
+      )
+    }
 
     if (cursorPage && (!query.nodeTypes || query.nodeTypes.length === 1)) {
       if (query.nodeTypes?.length === 1 && store.indexNames.contains('type')) {

@@ -135,9 +135,14 @@ functions throw `RangeError`. Zero vectors have cosine similarity `0`.
 ### Persistence
 
 - `MemoryAdapter` stores serialized records in memory.
-- `IndexedDBAdapter({ name?, version? })` persists browser data. Defaults to
+- `IndexedDBAdapter({ name?, version?, nodeIndexes? })` persists browser data. Defaults to
   database `polypack`, version `2`. Its node-type index accelerates persisted
   type queries; existing default databases are upgraded automatically.
+- `nodeIndexes` is an array of node data fields, such as `['score', 'createdAt']`.
+  Constrained range queries ordered by one of these fields use the corresponding
+  IndexedDB index for ordered cursor paging. Fields must be valid dotted
+  IndexedDB key paths. When adding indexes to an existing custom-named database,
+  increment its configured schema `version` so IndexedDB runs the upgrade.
 - `PersistenceAdapter` is the contract for custom storage. It contains node,
   edge, and vector single/bulk operations plus `clearAll()` and `close()`.
 

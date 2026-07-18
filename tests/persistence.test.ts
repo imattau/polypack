@@ -159,3 +159,59 @@ function runAdapterTests(label: string, create: () => PersistenceAdapter) {
 
 runAdapterTests('MemoryAdapter', () => new MemoryAdapter())
 runAdapterTests('IndexedDBAdapter', () => new IndexedDBAdapter({ name: 'test-db-' + (++counter) + '-' + Date.now(), version: 1 }))
+
+describe('IndexedDBAdapter schema and configured indexes', () => {
+  it('upgrades a version-1 database and uses a configured data index', async () => {
+    const name = `migration-db-${++counter}-${Date.now()}`
+    const version1 = new IndexedDBAdapter({ name, version: 1 })
+    await version1.bulkPutNodes([
+      { id: 'a', type: 'item', data: { score: 10 }, vector: null, insertedAt: 1, updatedAt: 1 },
+      { id: 'b', type: 'item', data: { score: 40 }, vector: null, insertedAt: 2, updatedAt: 2 },
+      { id: 'c', type: 'item', data: { score: 20 }, vector: null, insertedAt: 3, updatedAt: 3 },
+      { id: 'd', type: 'item', data: { score: 30 }, vector: null, insertedAt: 4, updatedAt: 4 },
+    ])
+    await version1.close()
+
+    const version2 = new IndexedDBAdapter({ name, version: 2, nodeIndexes: ['score'] })
+    const page = await version2.queryNodes({
+      nodeTypes: ['item'],
+      attributeRanges: { score: { above: 0, below: 100 } },
+      orderBy: { field: 'score', direction: 'desc' },
+      offset: 1,
+      limit: 2,
+    })
+
+    expect(page.map(node => node.id)).toEqual(['d', 'c'])
+    await version2.close()
+
+    const indexNames = await new Promise<string[]>((resolve, reject) => {
+      const request = indexedDB.open(name, 2)
+      request.onsuccess = () => {
+        const database = request.result
+        const names = [...database.transaction('nodes').objectStore('nodes').indexNames]
+        database.close()
+        resolve(names)
+      }
+      request.onerror = () => reject(request.error)
+    })
+    expect(indexNames).toContain('data:score')
+  })
+
+  it('preserves missing-field ordering semantics when a data index is configured', async () => {
+    const adapter = new IndexedDBAdapter({
+      name: `missing-index-db-${++counter}-${Date.now()}`,
+      version: 1,
+      nodeIndexes: ['score'],
+    })
+    await adapter.bulkPutNodes([
+      { id: 'scored', type: 'item', data: { score: 10 }, vector: null, insertedAt: 1, updatedAt: 1 },
+      { id: 'missing', type: 'item', data: {}, vector: null, insertedAt: 2, updatedAt: 2 },
+    ])
+
+    const nodes = await adapter.queryNodes({
+      orderBy: { field: 'score', direction: 'asc' },
+    })
+    expect(nodes.map(node => node.id)).toEqual(['missing', 'scored'])
+    await adapter.close()
+  })
+})

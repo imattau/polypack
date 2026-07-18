@@ -5,8 +5,9 @@
 - [x] Add persisted edge filters, joins, collection, and traversal.
 - [x] Push pagination into adapters and stop IndexedDB cursor scans early when
   query ordering and shape permit it.
-- Push indexed ordering into adapters to avoid sorting every matching node.
-- Add configurable IndexedDB indexes for frequently queried attributes.
+- [x] Push constrained indexed ordering into IndexedDB adapters to avoid sorting
+  every matching node.
+- [x] Add configurable IndexedDB indexes for frequently queried attributes.
 - [x] Add initial persisted-query benchmarks and 10K-node coverage.
 - Add larger persisted traversal and IndexedDB-specific benchmarks.
 
@@ -32,7 +33,7 @@
 
 - Define atomic node, edge, and vector transaction expectations.
 - Test partial adapter failures across mixed operations.
-- Add IndexedDB schema migration tests from version 1 to version 2.
+- [x] Add IndexedDB schema migration tests from version 1 to version 2.
 - Prefer adapter-native persisted counts over `allNodeIds()` fallbacks.
 
 ## 5. Expand React verification
