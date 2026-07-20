@@ -736,7 +736,7 @@ describe('PolyGraph', () => {
       })
 
       expect(graph.vectors.has('vec-node')).toBe(true)
-      expect(graph.vectors.get('vec-node')).toEqual([1, 0, 0])
+      expect([...graph.vectors.get('vec-node')!]).toEqual([1, 0, 0])
     })
 
     it('similarTo filters and sorts by cosine similarity', () => {
@@ -786,10 +786,11 @@ describe('PolyGraph', () => {
 
     it('vector overwrite via addNode updates VectorIndex', () => {
       graph.addNode({ id: 'v', type: 't', data: {}, vector: new Float64Array([1, 0]), insertedAt: 1, updatedAt: 1 })
-      expect(graph.vectors.get('v')).toEqual([1, 0])
+      expect([...graph.vectors.get('v')!]).toEqual([1, 0])
       // Re-add with different vector
-      graph.addNode({ id: 'v', type: 't', data: {}, vector: new Float64Array([0, 1]), insertedAt: 2, updatedAt: 2 })
-      expect(graph.vectors.get('v')).toEqual([0, 1])
+      graph.addNode({ id: 'v', type: 't', data: {}, vector: new Float64Array([0, 1]), insertedAt: 1, updatedAt: 1 })
+      graph.flush()
+      expect([...graph.vectors.get('v')!]).toEqual([0, 1])
     })
 
     it('removes a node vector explicitly and persists the removal', async () => {
@@ -822,7 +823,7 @@ describe('PolyGraph', () => {
 
       graph.updateNode('x', { label: 'updated' }, new Float64Array([0, 1, 0]))
       expect(graph.vectors.has('x')).toBe(true)
-      expect(graph.vectors.get('x')).toEqual([0, 1, 0])
+      expect([...graph.vectors.get('x')!]).toEqual([0, 1, 0])
     })
 
     it('getNodeSafe restores vector to VectorIndex', async () => {
@@ -840,7 +841,7 @@ describe('PolyGraph', () => {
       const node = await g.getNodeSafe('stored')
       expect(node).toBeDefined()
       expect(g.vectors.has('stored')).toBe(true)
-      expect(g.vectors.get('stored')).toEqual([0.5, 0.5, 0])
+      expect([...g.vectors.get('stored')!]).toEqual([0.5, 0.5, 0])
     })
 
     it('cascade deletion removes vectors of cascaded children', () => {
@@ -864,7 +865,7 @@ describe('PolyGraph', () => {
       const g2 = new PolyGraph(adapter)
       await g2.warm()
       expect(g2.vectors.has('a')).toBe(true)
-      expect(g2.vectors.get('b')).toEqual([0, 1, 0])
+      expect([...g2.vectors.get('b')!]).toEqual([0, 1, 0])
     })
 
     it('euclideanSimilarity works as VectorIndex distance function', () => {

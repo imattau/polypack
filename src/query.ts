@@ -2,7 +2,8 @@ import type { PolyNode, DataTransform } from './types.js'
 import { cosineSimilarity } from './vector-index.js'
 import { assertFiniteVector, assertNonNegativeInteger, cloneData, clonePolyNode } from './utils.js'
 
-type EdgeIndex = Map<string, Array<{ target: string; type: string; data?: Record<string, unknown> }>>
+type EdgeEntry = { target: string; type: string; data?: Record<string, unknown> }
+type EdgeIndex = Map<string, Map<string, EdgeEntry>>
 
 interface TraversalStep {
   edgeType: string
@@ -166,19 +167,27 @@ export class GraphQuery {
     if (this.opts.edgeType) {
       const nodeEdges = this.edges.get(node.id)
       if (!nodeEdges) return false
-      const matched = nodeEdges.some(
-        e =>
-          e.type === this.opts.edgeType &&
-          (!this.opts.edgeTarget || e.target === this.opts.edgeTarget)
-      )
+      let matched = false
+      for (const e of nodeEdges.values()) {
+        if (e.type === this.opts.edgeType && (!this.opts.edgeTarget || e.target === this.opts.edgeTarget)) {
+          matched = true
+          break
+        }
+      }
       if (!matched) return false
     }
 
     if (this.opts.edgeSource) {
       const nodeEdges = this.edges.get(this.opts.edgeSource)
-      if (!nodeEdges || !nodeEdges.some(e => e.target === node.id && (!this.opts.edgeType || e.type === this.opts.edgeType))) {
-        return false
+      if (!nodeEdges) return false
+      let matched = false
+      for (const e of nodeEdges.values()) {
+        if (e.target === node.id && (!this.opts.edgeType || e.type === this.opts.edgeType)) {
+          matched = true
+          break
+        }
       }
+      if (!matched) return false
     }
 
     if (this.opts.joinFilters) {
@@ -196,13 +205,13 @@ export class GraphQuery {
     if (this.opts.edgeSource && this.opts.edgeType) {
       const sourceEdges = this.edges.get(this.opts.edgeSource)
       if (sourceEdges) {
-        for (const e of sourceEdges) {
+        for (const e of sourceEdges.values()) {
           if (e.type === this.opts.edgeType) ids.add(e.target)
         }
       }
     } else if (this.opts.edgeTarget && this.opts.edgeType) {
       for (const [nodeId, nodeEdges] of this.edges) {
-        for (const e of nodeEdges) {
+        for (const e of nodeEdges.values()) {
           if (e.type === this.opts.edgeType && e.target === this.opts.edgeTarget) {
             ids.add(nodeId)
           }
@@ -230,7 +239,7 @@ export class GraphQuery {
         if (step.direction === 'out') {
           const outEdges = this.edges.get(id)
           if (outEdges) {
-            for (const e of outEdges) {
+            for (const e of outEdges.values()) {
               if (e.type === step.edgeType && !visited.has(e.target)) {
                 visited.add(e.target)
                 next.push(e.target)
@@ -244,7 +253,7 @@ export class GraphQuery {
               if (visited.has(src)) continue
               const srcEdges = this.edges.get(src)
               if (srcEdges) {
-                for (const e of srcEdges) {
+                for (const e of srcEdges.values()) {
                   if (e.type === step.edgeType && e.target === id && !visited.has(src)) {
                     visited.add(src)
                     next.push(src)
@@ -418,11 +427,11 @@ export class GraphQuery {
     const filters = this.opts.joinFilters ?? []
     filters.push((node: PolyNode) => {
       const connected = direction === 'out'
-        ? (this.edges.get(node.id)
-            ?.filter(e => e.type === edgeType)
+        ? [...(this.edges.get(node.id)?.values() ?? [])]
+            .filter((e: EdgeEntry) => e.type === edgeType)
             .map(e => this.nodes.get(e.target))
             .filter((n): n is PolyNode => !!n)
-            .map(n => this.readNode(n)) ?? [])
+            .map(n => this.readNode(n))
         : this.getEdgeSourcesForTarget(node.id, edgeType)
             .map(id => this.nodes.get(id))
             .filter((n): n is PolyNode => !!n)
@@ -495,7 +504,11 @@ export class GraphQuery {
     if (!sources) return []
     return [...sources].filter(src => {
       const edges = this.edges.get(src)
-      return edges?.some(e => e.type === edgeType && e.target === targetId)
+      if (!edges) return false
+      for (const e of edges.values()) {
+        if (e.type === edgeType && e.target === targetId) return true
+      }
+      return false
     })
   }
 
@@ -521,7 +534,7 @@ export class GraphQuery {
       if (direction === 'out') {
         const outEdges = this.edges.get(seed.id)
         if (outEdges) {
-          for (const e of outEdges) {
+          for (const e of outEdges.values()) {
             if (e.type !== edgeType) continue
             if (seen.has(e.target)) continue
             seen.add(e.target)
@@ -539,7 +552,10 @@ export class GraphQuery {
             if (seen.has(src)) continue
             const srcEdges = this.edges.get(src)
             if (!srcEdges) continue
-            const matched = srcEdges.some(e => e.type === edgeType && e.target === seed.id)
+            let matched = false
+            for (const e of srcEdges.values()) {
+              if (e.type === edgeType && e.target === seed.id) { matched = true; break }
+            }
             if (!matched) continue
             seen.add(src)
             const node = this.nodes.get(src)

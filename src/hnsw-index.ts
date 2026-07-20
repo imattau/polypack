@@ -22,7 +22,7 @@ const DEF: Required<HNSWConfig> = {
 }
 
 export class HNSWIndex {
-  private nodes = new Map<string, number[]>()
+  private nodes = new Map<string, Float64Array>()
   private nodeLevel = new Map<string, number>()
   private adjacency = new Map<number, Map<string, Set<string>>>()
   private entryPoint: string | null = null
@@ -46,29 +46,29 @@ export class HNSWIndex {
 
   // ── Public API ──
 
-  add(id: string, vector: number[]): void {
+  add(id: string, vector: number[] | Float64Array): void {
     if (!id) throw new TypeError('Vector id must not be empty')
     assertFiniteVector(vector)
     const level = this.assignLevel()
-    this.nodes.set(id, [...vector])
+    this.nodes.set(id, vector instanceof Float64Array ? vector : new Float64Array(vector))
     this.insertIntoGraph(id, level)
     this.onChange?.(id)
   }
 
-  hydrate(id: string, vector: number[]): void {
+  hydrate(id: string, vector: number[] | Float64Array): void {
     if (!id) throw new TypeError('Vector id must not be empty')
     assertFiniteVector(vector)
     const level = this.assignLevel()
-    this.nodes.set(id, [...vector])
+    this.nodes.set(id, vector instanceof Float64Array ? vector : new Float64Array(vector))
     this.insertIntoGraph(id, level)
   }
 
-  addMany(entries: Array<{ id: string; vector: number[] }>): void {
+  addMany(entries: Array<{ id: string; vector: number[] | Float64Array }>): void {
     for (const { id, vector } of entries) {
       if (!id) throw new TypeError('Vector id must not be empty')
       assertFiniteVector(vector)
       const level = this.assignLevel()
-      this.nodes.set(id, [...vector])
+      this.nodes.set(id, vector instanceof Float64Array ? vector : new Float64Array(vector))
       this.insertIntoGraph(id, level)
       this.onChange?.(id)
     }
@@ -128,9 +128,9 @@ export class HNSWIndex {
     return this.nodes.size
   }
 
-  *entries(): IterableIterator<[string, number[]]> {
+  *entries(): IterableIterator<[string, Float64Array]> {
     for (const [id, vector] of this.nodes) {
-      if (!this.removed.has(id)) yield [id, [...vector]]
+      if (!this.removed.has(id)) yield [id, vector]
     }
   }
 
@@ -138,9 +138,8 @@ export class HNSWIndex {
     return this.nodes.has(id)
   }
 
-  get(id: string): number[] | undefined {
-    const vector = this.nodes.get(id)
-    return vector ? [...vector] : undefined
+  get(id: string): Float64Array | undefined {
+    return this.nodes.get(id)
   }
 
   // ── Internal helpers ──

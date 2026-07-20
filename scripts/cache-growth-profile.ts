@@ -54,7 +54,7 @@ function runProfile(hotLimit: number, total: number, step: number) {
         nodes: graph.size,
         vectors: graph.vectors.size,
         hotCache: (graph as any).hotCacheOrder.size,
-        edges: [...(graph as any).edges.values()].reduce((s: number, a: any[]) => s + a.length, 0),
+        edges: [...(graph as any).edges.values()].reduce((s: number, m: Map<string, any>) => s + m.size, 0),
         heapMB: (heap - baseline) / (1024 * 1024),
         perNodeKB: heap > baseline && graph.size > 0 ? ((heap - baseline) / graph.size / 1024).toFixed(1) : '-',
       })

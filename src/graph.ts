@@ -9,7 +9,8 @@ import { MemoryAdapter } from './persistence/memory.js'
 import { createEmbedding, defaultEmbedding } from './embedding.js'
 import type { EmbeddingProvider } from './embedding.js'
 
-type EdgeIndex = Map<string, Array<{ target: string; type: string; data?: Record<string, unknown> }>>
+type EdgeEntry = { target: string; type: string; data?: Record<string, unknown> }
+type EdgeIndex = Map<string, Map<string, EdgeEntry>>
 
 const DEFAULT_HOT_CACHE_MAX = 50000
 
@@ -174,10 +175,10 @@ export class PolyGraph {
     for (const edgeIdStr of dirtyEdgeIds) {
       const parts = edgeIdStr.split('::')
       if (parts.length < 3) continue
-      const [source, type, ...rest] = parts
-      const target = rest.join('::')
-      const edges = this.edges.get(source)
-      const edge = edges?.find(e => e.type === type && e.target === target)
+      const source = parts[0]
+      const innerKey = parts.slice(1).join('::')
+      const sourceEdges = this.edges.get(source)
+      const edge = sourceEdges?.get(innerKey)
       if (edge) {
         dirtyEdgeList.push({
           id: edgeIdStr,
@@ -191,8 +192,8 @@ export class PolyGraph {
     }
     const dirtyVectorEntries: Array<{ id: string; vector: number[] }> = []
     for (const id of dirtyVectorIds) {
-      const vector = this.vectors.get(id) ?? evictedSnapshots.get(id)?.vector ?? undefined
-      if (vector) dirtyVectorEntries.push({ id, vector })
+      const vec = this.vectors.get(id) ?? evictedSnapshots.get(id)?.vector ?? undefined
+      if (vec) dirtyVectorEntries.push({ id, vector: Array.isArray(vec) ? vec : [...vec] })
     }
     try {
       const changes: PersistenceChanges = {
@@ -256,7 +257,7 @@ export class PolyGraph {
     this.indexNode(stored)
     if (stored.vector) {
       this.removedVectorIds.delete(stored.id)
-      this.vectors.add(stored.id, [...stored.vector])
+      this.vectors.add(stored.id, stored.vector)
     }
     this.emitChange({ type: 'node_added', nodeId: stored.id, nodeType: stored.type })
   }
@@ -342,7 +343,7 @@ export class PolyGraph {
     this.indexNode(restored)
     this.touchHotCache(id)
     if (restored.vector) {
-      this.vectors.hydrate(restored.id, [...restored.vector])
+      this.vectors.hydrate(restored.id, restored.vector)
     }
     return this.applyDeserialize(clonePolyNode(restored))
   }
@@ -426,8 +427,10 @@ export class PolyGraph {
     for (const src of sources) {
       if (src === excludeSource) continue
       const srcEdges = this.edges.get(src)
-      if (srcEdges?.some(e => e.target === target && getOwnership(e.data) === 'owned')) {
-        return true
+      if (srcEdges) {
+        for (const e of srcEdges.values()) {
+          if (e.target === target && getOwnership(e.data) === 'owned') return true
+        }
       }
     }
     return false
@@ -441,8 +444,10 @@ export class PolyGraph {
     for (const src of sources) {
       if (src === excludeSource) continue
       const srcEdges = this.edges.get(src)
-      if (srcEdges?.some(e => e.target === target)) {
-        return true
+      if (srcEdges) {
+        for (const e of srcEdges.values()) {
+          if (e.target === target) return true
+        }
       }
     }
     return false
@@ -465,7 +470,7 @@ export class PolyGraph {
 
     // Process outgoing edges before cleanup — a snapshot avoids concurrent
     // modification issues when cascading recursively mutates this.edges.
-    const outgoing = [...(this.edges.get(id) ?? [])]
+    const outgoing = [...(this.edges.get(id)?.values() ?? [])]
     for (const edge of outgoing) {
       const ownership = getOwnership(edge.data)
       if (ownership === 'owned') {
@@ -507,7 +512,7 @@ export class PolyGraph {
     const node = await this.getNodeSafe(id)
     if (!node) return false
 
-    const outgoing = [...(this.edges.get(id) ?? [])]
+    const outgoing = [...(this.edges.get(id)?.values() ?? [])]
     for (const edge of outgoing) {
       if (getOwnership(edge.data) === 'owned' && !this.hasOtherOwnedSource(edge.target, id)) {
         await this.removeNodeSafeRecursive(edge.target, visited)
@@ -529,24 +534,26 @@ export class PolyGraph {
     for (const source of incomingSources) {
       const sourceEdges = this.edges.get(source)
       if (!sourceEdges) continue
-      const removed = sourceEdges.filter(e => e.target === id)
-      for (const edge of removed) this.recordRemovedEdge(source, edge)
-      const remaining = sourceEdges.filter(e => e.target !== id)
-      if (remaining.length > 0) this.edges.set(source, remaining)
-      else this.edges.delete(source)
+      for (const [key, edge] of sourceEdges) {
+        if (edge.target === id) {
+          sourceEdges.delete(key)
+          this.recordRemovedEdge(source, edge)
+        }
+      }
+      if (sourceEdges.size === 0) this.edges.delete(source)
     }
     const sourceEdges = this.edges.get(id)
     if (sourceEdges) {
-      for (const e of sourceEdges) {
-        this.nodeToEdgeMap.get(e.target)?.delete(id)
-        this.recordRemovedEdge(id, e)
+      for (const edge of sourceEdges.values()) {
+        this.nodeToEdgeMap.get(edge.target)?.delete(id)
+        this.recordRemovedEdge(id, edge)
       }
       this.edges.delete(id)
     }
     this.nodeToEdgeMap.delete(id)
   }
 
-  private recordRemovedEdge(source: string, edge: { target: string; type: string }): void {
+  private recordRemovedEdge(source: string, edge: EdgeEntry): void {
     const id = edgeId(source, edge.type, edge.target)
     this.dirtyEdges.delete(id)
     this.removedEdgeIds.add(id)
@@ -559,15 +566,15 @@ export class PolyGraph {
     if (!source || !type || !target) throw new TypeError('Edge source, type, and target must not be empty')
     const id = edgeId(source, type, target)
     this.removedEdgeIds.delete(id)
-    if (!this.edges.has(source)) this.edges.set(source, [])
-    const edges = this.edges.get(source)!
-    const existing = edges.find(e => e.type === type && e.target === target)
-    if (existing) return
+    const inner = id.slice(source.length + 2)
+    if (!this.edges.has(source)) this.edges.set(source, new Map())
+    const sourceEdges = this.edges.get(source)!
+    if (sourceEdges.has(inner)) return
 
     const inputData = data === undefined ? undefined : cloneData(data)
     const fullData = ownership !== undefined ? { ...inputData, [OWNERSHIP_KEY]: ownership } : inputData
 
-    edges.push({ target, type, data: fullData })
+    sourceEdges.set(inner, { target, type, data: fullData })
     if (!this.nodeToEdgeMap.has(target)) this.nodeToEdgeMap.set(target, new Set())
     this.nodeToEdgeMap.get(target)!.add(source)
     this.dirtyEdges.add(id)
@@ -580,17 +587,18 @@ export class PolyGraph {
     this.schedulePersist()
   }
 
-  getEdges(source: string, type?: string): Array<{ target: string; type: string; data?: Record<string, unknown> }> {
+  getEdges(source: string, type?: string): EdgeEntry[] {
     const edges = this.edges.get(source)
     if (!edges) return []
-    const selected = type ? edges.filter(e => e.type === type) : edges
+    const all = [...edges.values()]
+    const selected = type ? all.filter(e => e.type === type) : all
     return selected.map(edge => ({ ...edge, data: edge.data ? cloneData(edge.data) : undefined }))
   }
 
   getEdgeTargets(source: string, type: string): string[] {
     const edges = this.edges.get(source)
     if (!edges) return []
-    return edges.filter(e => e.type === type).map(e => e.target)
+    return [...edges.values()].filter(e => e.type === type).map(e => e.target)
   }
 
   getEdgeSources(target: string, type: string): string[] {
@@ -598,7 +606,11 @@ export class PolyGraph {
     if (!sources) return []
     return [...sources].filter(source => {
       const edges = this.edges.get(source)
-      return edges?.some(e => e.type === type && e.target === target)
+      if (!edges) return false
+      for (const e of edges.values()) {
+        if (e.type === type && e.target === target) return true
+      }
+      return false
     })
   }
 
@@ -610,10 +622,14 @@ export class PolyGraph {
   removeEdges(source: string, type?: string, target?: string): void {
     const edges = this.edges.get(source)
     if (!edges) return
-    const removed = edges.filter(e => (!type || e.type === type) && (!target || e.target === target))
+    const removed: EdgeEntry[] = []
+    for (const edge of edges.values()) {
+      if ((!type || edge.type === type) && (!target || edge.target === target)) {
+        removed.push(edge)
+      }
+    }
     if (removed.length === 0) return
 
-    // 1. Cascade: delete owned targets that lose their last owner
     for (const edge of removed) {
       const ownership = getOwnership(edge.data)
       if (ownership === 'owned' && !this.hasOtherOwnedSource(edge.target, source)) {
@@ -621,13 +637,13 @@ export class PolyGraph {
       }
     }
 
-    // 2. Clean up all removed edges from this source (including those whose
-    //    targets may have been cascaded — removeNode does NOT clean incoming
-    //    edges, so we must do that here).
+    const removeAll = !type && !target
     for (const edge of removed) {
+      if (!removeAll) edges.delete(`${edge.type}::${edge.target}`)
       this.nodeToEdgeMap.get(edge.target)?.delete(source)
-      this.dirtyEdges.delete(edgeId(source, edge.type, edge.target))
-      this.removedEdgeIds.add(edgeId(source, edge.type, edge.target))
+      const id = edgeId(source, edge.type, edge.target)
+      this.dirtyEdges.delete(id)
+      this.removedEdgeIds.add(id)
       this.emitChange({ type: 'edge_removed', edgeType: edge.type, source, target: edge.target })
 
       if (getOwnership(edge.data) === 'shared') {
@@ -638,8 +654,8 @@ export class PolyGraph {
       }
     }
 
-    this.edges.set(source, edges.filter(e => !removed.includes(e)))
-    if (this.edges.get(source)?.length === 0) this.edges.delete(source)
+    if (removeAll) this.edges.delete(source)
+    else if (edges.size === 0) this.edges.delete(source)
     this.schedulePersist()
   }
 
@@ -720,7 +736,7 @@ export class PolyGraph {
     }
 
     for (const [source, edgeList] of this.edges) {
-      for (const e of edgeList) {
+      for (const e of edgeList.values()) {
         edges.push({
           id: edgeId(source, e.type, e.target),
           source,
@@ -733,7 +749,7 @@ export class PolyGraph {
     }
 
     for (const [id, vector] of this.vectors.entries()) {
-      vectors.push({ id, vector })
+      vectors.push({ id, vector: [...vector] })
     }
 
     await Promise.all([
@@ -755,8 +771,9 @@ export class PolyGraph {
       if (e.id !== edgeId(e.source, e.type, e.target)) {
         throw new Error(`Invalid persisted edge ID: ${e.id}`)
       }
-      if (!this.edges.has(e.source)) this.edges.set(e.source, [])
-      this.edges.get(e.source)!.push({
+      const inner = e.id.slice(e.source.length + 2)
+      if (!this.edges.has(e.source)) this.edges.set(e.source, new Map())
+      this.edges.get(e.source)!.set(inner, {
         target: e.target,
         type: e.type,
         data: e.data ? cloneData(e.data) : undefined,

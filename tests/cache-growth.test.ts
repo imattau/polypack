@@ -74,7 +74,7 @@ describe('Cache growth extrapolation', () => {
           vectorsSize: graph.vectors.size,
           hotCacheSize: (graph as any).hotCacheOrder.size,
           byTypeSize: [...(graph as any)._byType.values()].reduce((s: number, set: Set<string>) => s + set.size, 0),
-          edgeIndexSize: [...(graph as any).edges.values()].reduce((s: number, arr: any[]) => s + arr.length, 0),
+          edgeIndexSize: [...(graph as any).edges.values()].reduce((s: number, m: Map<string, any>) => s + m.size, 0),
           heapMB: heap ? (heap - baselineHeap) / (1024 * 1024) : 0,
         })
       }

@@ -31,20 +31,12 @@ export class MemoryAdapter implements PersistenceAdapter {
   }
 
   async applyChanges(changes: PersistenceChanges): Promise<void> {
-    const nodes = new Map(this.nodes)
-    const edges = new Map(this.edges)
-    const vectors = new Map(this.vectors)
-    const nodeOrder = new Map(this.nodeOrder)
-    for (const id of changes.deleteNodeIds) { nodes.delete(id); nodeOrder.delete(id) }
-    for (const id of changes.deleteEdgeIds) edges.delete(id)
-    for (const id of changes.deleteVectorIds) vectors.delete(id)
-    for (const node of changes.putNodes) { nodes.set(node.id, node); nodeOrder.set(node.id, true) }
-    for (const edge of changes.putEdges) edges.set(edge.id, edge)
-    for (const entry of changes.putVectors) vectors.set(entry.id, entry.vector)
-    this.nodes = nodes
-    this.edges = edges
-    this.vectors = vectors
-    this.nodeOrder = nodeOrder
+    for (const id of changes.deleteNodeIds) { this.nodes.delete(id); this.nodeOrder.delete(id) }
+    for (const id of changes.deleteEdgeIds) this.edges.delete(id)
+    for (const id of changes.deleteVectorIds) this.vectors.delete(id)
+    for (const node of changes.putNodes) { this.nodes.set(node.id, node); this.nodeOrder.set(node.id, true) }
+    for (const edge of changes.putEdges) this.edges.set(edge.id, edge)
+    for (const entry of changes.putVectors) this.vectors.set(entry.id, entry.vector)
     this.evictIfOverCap()
   }
 

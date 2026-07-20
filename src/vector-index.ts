@@ -36,7 +36,7 @@ export function euclideanSimilarity(a: ArrayLike<number>, b: ArrayLike<number>):
 
 /** Exact in-memory vector index with O(n log k) top-k selection. */
 export class VectorIndex {
-  private vectors = new Map<string, number[]>()
+  private vectors = new Map<string, Float64Array>()
   private onChange?: (id: string) => void
   private distanceFn: DistanceFunction
 
@@ -45,25 +45,25 @@ export class VectorIndex {
     this.distanceFn = distanceFn ?? cosineSimilarity
   }
 
-  add(id: string, vector: number[]): void {
+  add(id: string, vector: number[] | Float64Array): void {
     if (!id) throw new TypeError('Vector id must not be empty')
     assertFiniteVector(vector)
-    this.vectors.set(id, [...vector])
+    this.vectors.set(id, vector instanceof Float64Array ? vector : new Float64Array(vector))
     this.onChange?.(id)
   }
 
   /** Add an already-persisted vector without marking it dirty again. */
-  hydrate(id: string, vector: number[]): void {
+  hydrate(id: string, vector: number[] | Float64Array): void {
     if (!id) throw new TypeError('Vector id must not be empty')
     assertFiniteVector(vector)
-    this.vectors.set(id, [...vector])
+    this.vectors.set(id, vector instanceof Float64Array ? vector : new Float64Array(vector))
   }
 
-  addMany(entries: Array<{ id: string; vector: number[] }>): void {
+  addMany(entries: Array<{ id: string; vector: number[] | Float64Array }>): void {
     for (const { id, vector } of entries) {
       if (!id) throw new TypeError('Vector id must not be empty')
       assertFiniteVector(vector)
-      this.vectors.set(id, [...vector])
+      this.vectors.set(id, vector instanceof Float64Array ? vector : new Float64Array(vector))
       this.onChange?.(id)
     }
   }
@@ -138,17 +138,16 @@ export class VectorIndex {
     return this.vectors.size
   }
 
-  *entries(): IterableIterator<[string, number[]]> {
-    for (const [id, vector] of this.vectors) yield [id, [...vector]]
+  *entries(): IterableIterator<[string, Float64Array]> {
+    for (const [id, vector] of this.vectors) yield [id, vector]
   }
 
   has(id: string): boolean {
     return this.vectors.has(id)
   }
 
-  get(id: string): number[] | undefined {
-    const vector = this.vectors.get(id)
-    return vector ? [...vector] : undefined
+  get(id: string): Float64Array | undefined {
+    return this.vectors.get(id)
   }
 }
 import { assertFiniteVector, assertNonNegativeInteger } from './utils.js'

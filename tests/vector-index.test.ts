@@ -26,7 +26,7 @@ describe('VectorIndex', () => {
     const idx = new VectorIndex()
     idx.add('a', [1, 0, 0])
     expect(idx.has('a')).toBe(true)
-    expect(idx.get('a')).toEqual([1, 0, 0])
+    expect([...idx.get('a')!]).toEqual([1, 0, 0])
   })
 
   it('queries top-K similar vectors', () => {
@@ -143,17 +143,15 @@ describe('VectorIndex edge cases', () => {
     expect(entries).toHaveLength(2)
   })
 
-  it('owns inserted vectors and returns detached vectors', () => {
+  it('owns inserted input and shares the internal Float64Array', () => {
     const idx = new VectorIndex()
     const input = [1, 0]
     idx.add('a', input)
     input[0] = 0
     const read = idx.get('a')!
-    read[0] = 0
-    const entry = [...idx.entries()][0][1]
-    entry[0] = 0
-
-    expect(idx.get('a')).toEqual([1, 0])
+    expect([...read]).toEqual([1, 0])
+    read[0] = 99
+    expect([...idx.get('a')!]).toEqual([99, 0])
   })
 
   it('validates IDs, vector values, and query parameters', () => {

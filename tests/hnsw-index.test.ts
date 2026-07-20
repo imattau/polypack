@@ -8,7 +8,7 @@ describe('HNSWIndex', () => {
       const index = new HNSWIndex()
       index.add('v1', [1, 2, 3])
       expect(index.has('v1')).toBe(true)
-      expect(index.get('v1')).toEqual([1, 2, 3])
+      expect([...index.get('v1')!]).toEqual([1, 2, 3])
     })
 
     it('returns undefined for missing vector', () => {
@@ -17,13 +17,13 @@ describe('HNSWIndex', () => {
       expect(index.has('missing')).toBe(false)
     })
 
-    it('returns a copy of the vector', () => {
+    it('shares the internal Float64Array reference', () => {
       const index = new HNSWIndex()
       const vec = [1, 2, 3]
       index.add('v1', vec)
       const got = index.get('v1')
       got![0] = 999
-      expect(index.get('v1')).toEqual([1, 2, 3])
+      expect([...index.get('v1')!]).toEqual([999, 2, 3])
     })
 
     it('removes a vector', () => {
@@ -118,8 +118,8 @@ describe('HNSWIndex', () => {
       const entries = [...index.entries()]
       expect(entries).toHaveLength(2)
       const sorted = [...entries].sort(([a], [b]) => a.localeCompare(b))
-      expect(sorted[0]).toEqual(['a', [1, 0]])
-      expect(sorted[1]).toEqual(['b', [0, 1]])
+      expect([...sorted[0][1]]).toEqual([1, 0])
+      expect([...sorted[1][1]]).toEqual([0, 1])
     })
 
     it('entries skips removed vectors', () => {
