@@ -49,8 +49,10 @@
     "check:exports": "node --input-type=module --eval \"const core = await import('./dist/index.js'); const sync = await import('./dist/sync/index.js'); const react = await import('./dist/react.js'); if (!core.PolyGraph || !core.PersistedGraphQuery || !core.FeatureHashEmbedding || !sync.SyncClient || !sync.SyncServer || !react.useGraphQuery) process.exit(1)\"",
     "prepack": "npm run build",
     "prepublishOnly": "npm test && npm run build",
-    "test": "vitest run",
+    "test": "vitest run --exclude 'tests/stress.test.ts'",
+    "test:all": "vitest run",
     "test:gc": "NODE_OPTIONS=\"--expose-gc\" vitest run tests/cache-growth.test.ts",
+    "test:stress": "vitest run tests/stress.test.ts",
     "test:watch": "vitest"
   },
   "engines": {
