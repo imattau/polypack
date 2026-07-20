@@ -1,6 +1,6 @@
 {
   "name": "@0xx0lostcause0xx0/polypack",
-  "version": "2.2.0",
+  "version": "2.3.0",
   "description": "Generic property graph engine with vector similarity search — extracted from scrollstr's PolyGraph",
   "keywords": [
     "graph",
@@ -60,6 +60,7 @@
     "access": "public"
   },
   "dependencies": {
+    "@msgpack/msgpack": "^3.1.3",
     "rxjs": "^7.8.2"
   },
   "peerDependencies": {
@@ -72,9 +73,9 @@
   },
   "devDependencies": {
     "@testing-library/react": "^16.3.2",
+    "@types/node": "^26.1.1",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
-    "fake-indexeddb": "^6.2.5",
     "jsdom": "^26.1.0",
     "react": "^19.2.6",
     "react-dom": "^19.2.7",

@@ -11,7 +11,7 @@ import {
   PolyGraph,
   VectorIndex,
   MemoryAdapter,
-  IndexedDBAdapter,
+  BinaryStoreAdapter,
   cosineSimilarity,
   euclideanSimilarity,
 } from '../src/index'
@@ -23,7 +23,7 @@ import type { PolyNode, EdgeOwnership, GraphChangeEvent, DistanceFunction } from
 //
 // PolyGraph with no adapter = in-memory only (ephemeral).
 // Pass a MemoryAdapter for testable persistence, or
-// IndexedDBAdapter for browser persistence.
+// BinaryStoreAdapter for on-disk binary persistence.
 
 const graph = new PolyGraph(new MemoryAdapter())
 console.log('─ PolyGraph created (MemoryAdapter)')

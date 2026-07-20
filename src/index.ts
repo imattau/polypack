@@ -9,9 +9,9 @@ export { GraphQuery } from './query.js'
 export type { AggregateOp, AggregateResult, GroupedRow } from './query.js'
 export { PersistedGraphQuery } from './persisted-query.js'
 export { MemoryAdapter } from './persistence/memory.js'
-export { IndexedDBAdapter } from './persistence/indexeddb.js'
+export { BinaryStoreAdapter } from './persistence/binary-store.js'
+export type { BinaryStoreConfig } from './persistence/binary-store.js'
 export type { PersistenceAdapter, PersistenceChanges, PersistedNodeQuery } from './persistence/adapter.js'
-export type { IndexedDBConfig } from './persistence/indexeddb.js'
 export type {
   PolyNode,
   PolyEdge,

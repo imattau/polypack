@@ -2,7 +2,8 @@ import { describe, it, expect, beforeEach } from 'vitest'
 import { PolyGraph } from '../src/graph'
 import { VectorIndex, euclideanSimilarity } from '../src/vector-index'
 import { MemoryAdapter } from '../src/persistence/memory'
-import { IndexedDBAdapter } from '../src/persistence/indexeddb'
+import { BinaryStoreAdapter } from '../src/persistence/binary-store'
+import { MemoryFileIO } from '../src/persistence/binary-file-io'
 
 describe('PolyGraph', () => {
   let graph: PolyGraph
@@ -561,9 +562,10 @@ describe('PolyGraph', () => {
     })
   })
 
-  describe('persistence with indexeddb adapter', () => {
-    it('saves and loads via IndexedDBAdapter', async () => {
-      const adapter = new IndexedDBAdapter({ name: 'test-db-' + Date.now(), version: 1 })
+  describe('persistence with binary adapter', () => {
+    it('saves and loads via BinaryStoreAdapter', async () => {
+      const io = new MemoryFileIO()
+      const adapter = new BinaryStoreAdapter({ storeDir: 'test-graph', fileIO: io })
       const g = new PolyGraph(adapter)
 
       g.addNode({ id: 'n1', type: 'doc', data: { text: 'hello' }, insertedAt: 1, updatedAt: 1 })
@@ -573,8 +575,9 @@ describe('PolyGraph', () => {
       await g.save()
       await g.dispose()
 
-      // Reload from same adapter
-      const g2 = new PolyGraph(adapter)
+      // Reload from same files
+      const adapter2 = new BinaryStoreAdapter({ storeDir: 'test-graph', fileIO: io })
+      const g2 = new PolyGraph(adapter2)
       await g2.warm()
 
       expect(g2.size).toBe(2)
