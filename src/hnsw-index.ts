@@ -112,7 +112,7 @@ export class HNSWIndex {
       .map(({ id, dist }) => ({ id, score: 1 - dist }))
       .filter(r => r.score >= threshold)
 
-    return scored.slice(0, topK).map((r, i) => ({ id: r.id, score: r.score }))
+    return scored.slice(0, topK).map(r => ({ id: r.id, score: r.score }))
   }
 
   clear(): void {
@@ -144,7 +144,7 @@ export class HNSWIndex {
 
   // ── Internal helpers ──
 
-  private dist(a: number[], b: number[]): number {
+  private dist(a: ArrayLike<number>, b: ArrayLike<number>): number {
     if (a.length !== b.length) {
       throw new RangeError(`Vector dimension mismatch: ${a.length} !== ${b.length}`)
     }
@@ -182,7 +182,7 @@ export class HNSWIndex {
 
   // ── HNSW algorithms ──
 
-  private greedySearch(q: number[], ep: string, layer: number): string {
+  private greedySearch(q: ArrayLike<number>, ep: string, layer: number): string {
     let current = ep
     let currentDist = this.dist(q, this.nodes.get(current)!)
     const visited = new Set<string>([current])
@@ -207,7 +207,7 @@ export class HNSWIndex {
   }
 
   private searchLayer(
-    q: number[],
+    q: ArrayLike<number>,
     entry: string,
     ef: number,
     layer: number,
