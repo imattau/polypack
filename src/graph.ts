@@ -766,7 +766,9 @@ export class PolyGraph {
     const allNodeIds = await this.persistence.allNodeIds()
     if (allNodeIds.length === 0) return
 
-    const serialized = await this.persistence.getNodes(allNodeIds)
+    const loadCount = Math.min(allNodeIds.length, this.hotCacheMax)
+    const hotIds = allNodeIds.slice(allNodeIds.length - loadCount)
+    const serialized = await this.persistence.getNodes(hotIds)
     for (const sn of serialized) {
       if (!this.nodes.has(sn.id)) {
         this.nodes.set(sn.id, {
@@ -785,9 +787,19 @@ export class PolyGraph {
 
     await yieldToUI()
 
-    const allVectors = await this.persistence.getAllVectors()
-    for (const { id, vector } of allVectors) {
-      this.vectors.hydrate(id, vector)
+    const hotNodeIds = new Set(hotIds)
+    if (this.persistence.getVectors) {
+      const vectors = await this.persistence.getVectors(hotIds)
+      for (const { id, vector } of vectors) {
+        this.vectors.hydrate(id, vector)
+      }
+    } else {
+      const allVectors = await this.persistence.getAllVectors()
+      for (const { id, vector } of allVectors) {
+        if (hotNodeIds.has(id)) {
+          this.vectors.hydrate(id, vector)
+        }
+      }
     }
 
     await yieldToUI()

@@ -382,6 +382,16 @@ export class IndexedDBAdapter implements PersistenceAdapter {
     await idbTransaction(tx)
   }
 
+  async getVectors(ids: string[]): Promise<Array<{ id: string; vector: number[] }>> {
+    if (ids.length === 0) return []
+    const database = await this.db()
+    const store = database.transaction('vectors').objectStore('vectors')
+    const results = await Promise.all(
+      ids.map(id => idbRequest<{ id: string; vector: number[] } | undefined>(store.get(id))),
+    )
+    return results.filter((v): v is { id: string; vector: number[] } => v !== undefined)
+  }
+
   async getAllVectors(): Promise<Array<{ id: string; vector: number[] }>> {
     const database = await this.db()
     return cursorAll<{ id: string; vector: number[] }>(database.transaction('vectors').objectStore('vectors'))

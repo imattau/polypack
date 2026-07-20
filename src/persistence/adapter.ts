@@ -50,6 +50,8 @@ export interface PersistenceAdapter {
   bulkPutVectors(entries: Array<{ id: string; vector: number[] }>): Promise<void>
   deleteVector(id: string): Promise<void>
   getAllVectors(): Promise<Array<{ id: string; vector: number[] }>>
+  /** Optional batch vector fetch. When absent callers fall back to getAllVectors. */
+  getVectors?(ids: string[]): Promise<Array<{ id: string; vector: number[] }>>
 
   clearAll(): Promise<void>
   close(): Promise<void>

@@ -7,28 +7,56 @@ export class MemoryAdapter implements PersistenceAdapter {
   private nodes = new Map<string, SerializedNode>()
   private edges = new Map<string, SerializedEdge>()
   private vectors = new Map<string, number[]>()
+  private nodeOrder = new Map<string, true>()
+  private readonly maxNodes: number | undefined
+
+  constructor(maxNodes?: number) {
+    this.maxNodes = maxNodes
+  }
+
+  private touchNode(id: string): void {
+    this.nodeOrder.delete(id)
+    this.nodeOrder.set(id, true)
+  }
+
+  private evictIfOverCap(): void {
+    if (this.maxNodes === undefined) return
+    while (this.nodeOrder.size > this.maxNodes) {
+      const evict = this.nodeOrder.keys().next().value
+      if (evict === undefined) break
+      this.nodeOrder.delete(evict)
+      this.nodes.delete(evict)
+      this.vectors.delete(evict)
+    }
+  }
 
   async applyChanges(changes: PersistenceChanges): Promise<void> {
     const nodes = new Map(this.nodes)
     const edges = new Map(this.edges)
     const vectors = new Map(this.vectors)
-    for (const id of changes.deleteNodeIds) nodes.delete(id)
+    const nodeOrder = new Map(this.nodeOrder)
+    for (const id of changes.deleteNodeIds) { nodes.delete(id); nodeOrder.delete(id) }
     for (const id of changes.deleteEdgeIds) edges.delete(id)
     for (const id of changes.deleteVectorIds) vectors.delete(id)
-    for (const node of changes.putNodes) nodes.set(node.id, node)
+    for (const node of changes.putNodes) { nodes.set(node.id, node); nodeOrder.set(node.id, true) }
     for (const edge of changes.putEdges) edges.set(edge.id, edge)
     for (const entry of changes.putVectors) vectors.set(entry.id, entry.vector)
     this.nodes = nodes
     this.edges = edges
     this.vectors = vectors
+    this.nodeOrder = nodeOrder
+    this.evictIfOverCap()
   }
 
   async putNode(node: SerializedNode): Promise<void> {
     this.nodes.set(node.id, node)
+    this.touchNode(node.id)
+    this.evictIfOverCap()
   }
 
   async bulkPutNodes(nodes: SerializedNode[]): Promise<void> {
-    for (const node of nodes) this.nodes.set(node.id, node)
+    for (const node of nodes) { this.nodes.set(node.id, node); this.touchNode(node.id) }
+    this.evictIfOverCap()
   }
 
   async getNode(id: string): Promise<SerializedNode | undefined> {
@@ -41,10 +69,11 @@ export class MemoryAdapter implements PersistenceAdapter {
 
   async deleteNode(id: string): Promise<void> {
     this.nodes.delete(id)
+    this.nodeOrder.delete(id)
   }
 
   async bulkDeleteNodes(ids: string[]): Promise<void> {
-    for (const id of ids) this.nodes.delete(id)
+    for (const id of ids) { this.nodes.delete(id); this.nodeOrder.delete(id) }
   }
 
   async allNodeIds(): Promise<string[]> {
@@ -107,6 +136,15 @@ export class MemoryAdapter implements PersistenceAdapter {
 
   async deleteVector(id: string): Promise<void> {
     this.vectors.delete(id)
+  }
+
+  async getVectors(ids: string[]): Promise<Array<{ id: string; vector: number[] }>> {
+    const results: Array<{ id: string; vector: number[] }> = []
+    for (const id of ids) {
+      const vector = this.vectors.get(id)
+      if (vector) results.push({ id, vector })
+    }
+    return results
   }
 
   async getAllVectors(): Promise<Array<{ id: string; vector: number[] }>> {
