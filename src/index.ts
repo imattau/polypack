@@ -1,5 +1,7 @@
 export { PolyGraph } from './graph.js'
 export { VectorIndex, cosineSimilarity, euclideanSimilarity } from './vector-index.js'
+export { HNSWIndex } from './hnsw-index.js'
+export type { HNSWConfig } from './hnsw-index.js'
 export type { DistanceFunction } from './vector-index.js'
 export { FeatureHashEmbedding, createEmbedding, defaultEmbedding, buildEmbeddingText } from './embedding.js'
 export type { EmbeddingProvider, EmbeddingVector, FeatureHashEmbeddingOptions } from './embedding.js'

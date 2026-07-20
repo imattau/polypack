@@ -81,12 +81,18 @@ export class PolyGraph {
     }
   }
 
-  constructor(adapter?: PersistenceAdapter, hotCacheMax?: number, embedding?: EmbeddingProvider, transform?: DataTransform) {
+  constructor(
+    adapter?: PersistenceAdapter,
+    hotCacheMax?: number,
+    embedding?: EmbeddingProvider,
+    transform?: DataTransform,
+    createVectorIndex?: (onChange: (id: string) => void) => VectorIndex,
+  ) {
     this.persistence = adapter ?? new MemoryAdapter()
     this.hotCacheMax = hotCacheMax ?? DEFAULT_HOT_CACHE_MAX
     this.embedding = embedding ?? defaultEmbedding
     this.transform = transform
-    this.vectors = new VectorIndex((id) => {
+    this.vectors = (createVectorIndex ?? ((onChange) => new VectorIndex(onChange)))((id) => {
       this.dirtyVectors.add(id)
       this.schedulePersist()
     })
