@@ -1,11 +1,22 @@
 import { describe, it, expect } from 'vitest'
 import { PolyGraph } from '../src/graph'
 import { MemoryAdapter } from '../src/persistence/memory'
+import { BinaryStoreAdapter } from '../src/persistence/binary-store'
+import { NodeFileIO, MemoryFileIO } from '../src/persistence/binary-file-io'
+import { encodeWalEntries } from '../src/persistence/binary-format'
+import type { WalEntry } from '../src/persistence/binary-format'
 import { HNSWIndex } from '../src/hnsw-index'
 import { VectorIndex, cosineSimilarity } from '../src/vector-index'
+import * as fs from 'node:fs'
+import * as path from 'node:path'
+import * as os from 'node:os'
 
 const KB = 1024
 const MB = KB * KB
+
+function tmpDir(): string {
+  return fs.mkdtempSync(path.join(os.tmpdir(), 'polypack-stress-'))
+}
 
 function formatMs(ms: number): string {
   return ms < 1 ? `${(ms * 1000).toFixed(0)}µs` : `${ms.toFixed(2)}ms`
@@ -268,6 +279,207 @@ describe('Stress limits', () => {
       console.log(`  Estimated max (20 GB):  ~${(estimatedMax / 1_000_000).toFixed(1)}M nodes`)
       console.log(`  With ${384}-d vector:    ~${(vecKB + perNodeKB).toFixed(1)} KB/node`)
       console.log(`  Vector max (20 GB):     ~${(vecMax / 1_000_000).toFixed(1)}M nodes`)
+    })
+  })
+
+  describe('BinaryStoreAdapter stress (MemoryFileIO)', () => {
+    const DIMS = 8
+
+    function makeSerNode(i: number) {
+      return {
+        id: `n${i}`,
+        type: i % 3 === 0 ? 'page' : i % 3 === 1 ? 'post' : 'comment',
+        data: { idx: i, score: Math.random() },
+        vector: Array.from({ length: DIMS }, () => Math.random() * 2 - 1),
+        insertedAt: i,
+        updatedAt: i,
+      }
+    }
+
+    it('bulkPutNodes throughput at 10K / 50K', { timeout: 60_000 }, async () => {
+      for (const count of [10_000, 50_000]) {
+        const io = new MemoryFileIO()
+        const adapter = new BinaryStoreAdapter({ storeDir: 'perf', fileIO: io, compactThreshold: 500_000 })
+        const nodes = Array.from({ length: count }, (_, i) => makeSerNode(i))
+
+        const t0 = performance.now()
+        await adapter.bulkPutNodes(nodes)
+        const elapsed = performance.now() - t0
+
+        const ids = await adapter.allNodeIds()
+        expect(ids).toHaveLength(count)
+        await adapter.close()
+
+        console.log(`    bulkPutNodes ${count.toLocaleString()}: ${elapsed.toFixed(2)}ms (${(count / (elapsed / 1000)).toFixed(0)} n/s)`)
+      }
+    })
+
+    it('applyChanges WAL append throughput at 10K / 50K', { timeout: 60_000 }, async () => {
+      for (const count of [10_000, 50_000]) {
+        const io = new MemoryFileIO()
+        const adapter = new BinaryStoreAdapter({ storeDir: 'wal-perf', fileIO: io, compactThreshold: 500_000 })
+        const nodes = Array.from({ length: count }, (_, i) => makeSerNode(i))
+
+        const t0 = performance.now()
+        await adapter.applyChanges({
+          putNodes: nodes,
+          deleteNodeIds: [],
+          putEdges: [],
+          deleteEdgeIds: [],
+          putVectors: nodes.map(n => ({ id: n.id, vector: n.vector! })),
+          deleteVectorIds: [],
+        })
+        const elapsed = performance.now() - t0
+
+        const walBytes = (await io.readFile('wal.msgpack'))?.length ?? 0
+        expect(await adapter.allNodeIds()).toHaveLength(count)
+        expect(await adapter.getAllVectors()).toHaveLength(count)
+        await adapter.close()
+
+        console.log(`    applyChanges ${count.toLocaleString()}: ${elapsed.toFixed(2)}ms (${(count / (elapsed / 1000)).toFixed(0)} ops/s, ${(walBytes / KB).toFixed(1)} KB WAL)`)
+      }
+    })
+
+    it('compaction time at 10K / 50K', { timeout: 120_000 }, async () => {
+      for (const count of [10_000, 50_000]) {
+        const io = new MemoryFileIO()
+        const adapter = new BinaryStoreAdapter({
+          storeDir: 'compact',
+          fileIO: io,
+          compactThreshold: count + 1,
+        })
+        const nodes = Array.from({ length: count }, (_, i) => makeSerNode(i))
+        await adapter.bulkPutNodes(nodes)
+
+        // Force compact via close
+        const t0 = performance.now()
+        await adapter.close()
+        const elapsed = performance.now() - t0
+
+        const snapBytes = (await io.readFile('snapshot.msgpack'))?.length ?? 0
+        const walBytes = (await io.readFile('wal.msgpack'))?.length ?? 0
+        console.log(`    compact ${count.toLocaleString()}: ${elapsed.toFixed(2)}ms (snapshot: ${(snapBytes / KB).toFixed(1)} KB, WAL: ${walBytes} B)`)
+      }
+    })
+
+    it('warm() from snapshot at 10K / 50K', { timeout: 60_000 }, async () => {
+      for (const count of [10_000, 50_000]) {
+        const io = new MemoryFileIO()
+
+        // Write snapshot
+        const writer = new BinaryStoreAdapter({ storeDir: 'warm', fileIO: io, compactThreshold: count + 1 })
+        const nodes = Array.from({ length: count }, (_, i) => makeSerNode(i))
+        await writer.bulkPutNodes(nodes)
+        await writer.close()
+
+        // Measure warm
+        const t0 = performance.now()
+        const reader = new BinaryStoreAdapter({ storeDir: 'warm', fileIO: io })
+        const ids = await reader.allNodeIds()
+        const elapsed = performance.now() - t0
+
+        expect(ids).toHaveLength(count)
+        await reader.close()
+
+        console.log(`    warm() ${count.toLocaleString()}: ${elapsed.toFixed(2)}ms (${(count / (elapsed / 1000)).toFixed(0)} n/s)`)
+      }
+    })
+
+    it('WAL replay overhead at 10K / 50K entries', { timeout: 60_000 }, async () => {
+      for (const count of [10_000, 50_000]) {
+        const io = new MemoryFileIO()
+
+        // Write WAL directly (no snapshot)
+        const entries: WalEntry[] = Array.from({ length: count }, (_, i) => ({
+          kind: 'putNode' as const,
+          node: makeSerNode(i),
+        }))
+        const walData = encodeWalEntries(entries)
+        await io.writeFile('wal.msgpack', walData)
+
+        // Measure replay
+        const t0 = performance.now()
+        const adapter = new BinaryStoreAdapter({ storeDir: 'replay', fileIO: io })
+        const ids = await adapter.allNodeIds()
+        const elapsed = performance.now() - t0
+
+        expect(ids).toHaveLength(count)
+        await adapter.close()
+
+        console.log(`    WAL replay ${count.toLocaleString()}: ${elapsed.toFixed(2)}ms (${(count / (elapsed / 1000)).toFixed(0)} entries/s)`)
+      }
+    })
+  })
+
+  describe('BinaryStoreAdapter stress (NodeFileIO)', () => {
+    const DIMS = 8
+
+    function makeSerNode(i: number) {
+      return {
+        id: `n${i}`,
+        type: i % 3 === 0 ? 'page' : i % 3 === 1 ? 'post' : 'comment',
+        data: { idx: i, score: Math.random() },
+        vector: Array.from({ length: DIMS }, () => Math.random() * 2 - 1),
+        insertedAt: i,
+        updatedAt: i,
+      }
+    }
+
+    it('bulkPutNodes with real filesystem at 10K', { timeout: 60_000 }, async () => {
+      const dir = tmpDir()
+      try {
+        const adapter = new BinaryStoreAdapter({ storeDir: dir, compactThreshold: 500_000 })
+        const nodes = Array.from({ length: 10_000 }, (_, i) => makeSerNode(i))
+
+        const t0 = performance.now()
+        await adapter.bulkPutNodes(nodes)
+        const elapsed = performance.now() - t0
+
+        const ids = await adapter.allNodeIds()
+        expect(ids).toHaveLength(10_000)
+        await adapter.close()
+
+        console.log(`    NodeFileIO bulkPutNodes 10K: ${elapsed.toFixed(2)}ms (${(10_000 / (elapsed / 1000)).toFixed(0)} n/s)`)
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true })
+      }
+    })
+
+    it('warm() from filesystem snapshot at 10K', { timeout: 60_000 }, async () => {
+      const dir = tmpDir()
+      try {
+        const writer = new BinaryStoreAdapter({ storeDir: dir, compactThreshold: 50_000 })
+        const nodes = Array.from({ length: 10_000 }, (_, i) => makeSerNode(i))
+        await writer.bulkPutNodes(nodes)
+        await writer.close()
+
+        const t0 = performance.now()
+        const reader = new BinaryStoreAdapter({ storeDir: dir })
+        const ids = await reader.allNodeIds()
+        const elapsed = performance.now() - t0
+
+        expect(ids).toHaveLength(10_000)
+        await reader.close()
+
+        console.log(`    NodeFileIO warm() 10K: ${elapsed.toFixed(2)}ms (${(10_000 / (elapsed / 1000)).toFixed(0)} n/s)`)
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true })
+      }
+    })
+
+    it('binary store file sizes at 10K', { timeout: 60_000 }, async () => {
+      const dir = tmpDir()
+      try {
+        const adapter = new BinaryStoreAdapter({ storeDir: dir, compactThreshold: 500_000 })
+        const nodes = Array.from({ length: 10_000 }, (_, i) => makeSerNode(i))
+        await adapter.bulkPutNodes(nodes)
+        await adapter.close()
+
+        const snapStat = fs.statSync(path.join(dir, 'snapshot.msgpack'))
+        console.log(`    snapshot.msgpack: ${(snapStat.size / KB).toFixed(1)} KB for 10K nodes (${(snapStat.size / 10_000).toFixed(1)} bytes/node)`)
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true })
+      }
     })
   })
 })
