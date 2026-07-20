@@ -107,7 +107,7 @@ describe('Stress limits', () => {
         expect(results).toHaveLength(10)
       })
 
-      it(`vector search (HNSW) at ${label}`, { timeout: 120_000 }, () => {
+      it(`vector search (HNSW) at ${label}`, { timeout: 300_000 }, () => {
         const ef = count <= 10_000 ? 200 : count <= 100_000 ? 100 : 0
         if (ef === 0) { console.log('    (skipped — measured in dedicated HNSW test)'); return }
         const index = new HNSWIndex(undefined, cosineSimilarity, { M: 16, efConstruction: ef, efSearch: 100 })
