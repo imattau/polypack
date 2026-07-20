@@ -1,7 +1,7 @@
 export { PolyGraph } from './graph.js'
 export { VectorIndex, cosineSimilarity, euclideanSimilarity } from './vector-index.js'
 export type { DistanceFunction } from './vector-index.js'
-export { FeatureHashEmbedding, createEmbedding, defaultEmbedding } from './embedding.js'
+export { FeatureHashEmbedding, createEmbedding, defaultEmbedding, buildEmbeddingText } from './embedding.js'
 export type { EmbeddingProvider, EmbeddingVector, FeatureHashEmbeddingOptions } from './embedding.js'
 export { GraphQuery } from './query.js'
 export type { AggregateOp, AggregateResult, GroupedRow } from './query.js'
@@ -18,5 +18,8 @@ export type {
   SerializedNode,
   SerializedEdge,
   VectorQuery,
+  EdgeTypes,
+  DataTransform,
 } from './types.js'
+export { defineEdges } from './types.js'
 export { yieldToUI, edgeId } from './utils.js'

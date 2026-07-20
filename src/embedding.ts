@@ -72,5 +72,28 @@ export async function createEmbedding(provider: EmbeddingProvider, text: string)
   return vector
 }
 
+/**
+ * Build a weighted embedding text by repeating fields according to their weight.
+ * The default weight is 1; fields with weight 3 are repeated 3× so the
+ * feature-hash bag-of-words embedding treats them as more significant.
+ *
+ * ```ts
+ * buildEmbeddingText({ subject: 'Hello', content: 'World' }, { subject: 3 })
+ * // => "Hello Hello Hello World"
+ * ```
+ */
+export function buildEmbeddingText(
+  fields: Record<string, string>,
+  weights?: Record<string, number>,
+): string {
+  const parts: string[] = []
+  for (const [key, value] of Object.entries(fields)) {
+    if (!value) continue
+    const w = weights?.[key] ?? 1
+    for (let i = 0; i < w; i++) parts.push(value)
+  }
+  return parts.join(' ')
+}
+
 /** Default model-free 384-dimensional embedding provider. */
 export const defaultEmbedding = new FeatureHashEmbedding()

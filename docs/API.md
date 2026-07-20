@@ -8,7 +8,7 @@ requires IndexedDB. React is optional and only loaded by `@0xx0lostcause0xx0/pol
 ### `PolyGraph`
 
 ```ts
-new PolyGraph(adapter?: PersistenceAdapter, hotCacheMax?: number)
+new PolyGraph(adapter?: PersistenceAdapter, hotCacheMax?: number, embedding?: EmbeddingProvider, transform?: DataTransform)
 ```
 
 The main property-graph container. Without an adapter it uses `MemoryAdapter`.
@@ -17,10 +17,15 @@ evicted, and dirty evicted nodes are retained until persistence completes.
 Synchronous queries and mutations operate on currently loaded nodes; use
 `getNodeSafe(id)` to restore an evicted node before mutating it.
 
+The optional `transform` parameter provides `serialize`/`deserialize` hooks for
+non-cloneable data (Blob, File, etc.) that cannot pass through
+`structuredClone`. See the DataTransform section below.
+
 Lifecycle:
 
 - `warm()` / `load()` loads persisted nodes, vectors, and edges. Call it before
-  querying an existing database.
+  querying an existing database. `warm()` is idempotent — subsequent calls are
+  no-ops until the graph is cleared or disposed.
 - `flush()` immediately persists queued mutations. Flushes are serialized.
 - `save()` writes the complete currently loaded graph without clearing dirty state.
 - `dispose()` flushes queued mutations, clears memory, then closes the adapter.
@@ -45,6 +50,26 @@ Nodes:
 - `size` and `loadedSize` are the number of currently loaded nodes, not total
   persisted nodes. `hasLoadedNode(id)` checks membership in that working set.
 - `persistedSize()` asynchronously returns the adapter's current node count.
+- `getNodesByType(type)` loads all persisted nodes of a type (async convenience).
+- `getNodesByTypeOrdered(type, field, direction?)` loads all persisted nodes of
+  a type ordered by a data field (async convenience).
+- `countNodesByType(type)` returns the persisted count for a node type (async).
+- `deleteNodesByType(type)` removes all persisted nodes of a type (async).
+
+Convenience — graph traversal:
+
+- `walkAncestors(id, edgeType)` walks the parent chain backwards through
+  incoming edges of `edgeType`. Returns `PolyNode[]` from root to start node
+  (inclusive). Detects cycles.
+- `walkDescendants(id, edgeType)` walks the child chain forwards through
+  outgoing edges of `edgeType`. Returns `PolyNode[]` from start node to deepest
+  child (inclusive). Detects cycles.
+
+Full-text search:
+
+- `searchNodes(text, type, threshold?, topK?)` shorthand for
+  `queryPersistedText(text, threshold, topK).then(q => q.whereNodeType(type).toArray())`.
+  Returns `Promise<PolyNode[]>`.
 
 Edges:
 
@@ -206,12 +231,76 @@ compatible but cannot guarantee cross-store atomicity through the fallback path.
 ### Types and utilities
 
 The root exports `PolyNode`, `PolyEdge`, `EdgeOwnership`, `GraphChangeEvent`,
-`SerializedNode`, `SerializedEdge`, `VectorQuery`, aggregate types,
-`DistanceFunction`, `IndexedDBConfig`, and `PersistenceAdapter`.
+`SerializedNode`, `SerializedEdge`, `VectorQuery`, `EdgeTypes`, `DataTransform`,
+aggregate types, `DistanceFunction`, `IndexedDBConfig`, and `PersistenceAdapter`.
 
 `edgeId(source, type, target)` produces the persistence edge key. Source IDs and
 edge types must not contain `::`; target IDs may contain it.
 `yieldToUI()` yields through a zero-delay timer.
+
+#### `DataTransform`
+
+Optional hooks for handling non-cloneable data (Blob, File, etc.) that cannot
+pass through `structuredClone`. Pass as the fourth PolyGraph constructor
+argument:
+
+```ts
+const blobStore = new Map<string, Blob>()
+
+const transform: DataTransform = {
+  serialize(data) {
+    const copy = { ...data }
+    if (copy.blob instanceof Blob) {
+      blobStore.set(copy.id, copy.blob)
+      copy.blob = null
+    }
+    return { data: copy }
+  },
+  deserialize(data) {
+    const copy = { ...data }
+    if ('blob' in copy && copy.blob === null) {
+      copy.blob = blobStore.get(copy.id) ?? null
+    }
+    return copy
+  },
+}
+
+const graph = new PolyGraph(adapter, 10_000, undefined, transform)
+```
+
+`serialize` returns `{ data: cloneableData, sidecar?: unknown }`. The sidecar
+is stored in memory alongside the node and re-supplied to `deserialize` on every
+read. The sidecar is **not** persisted across sessions.
+
+#### `defineEdges`
+
+Create a frozen edge-type constant object with full literal-type inference:
+
+```ts
+import { defineEdges } from '@0xx0lostcause0xx0/polypack'
+
+export const EDGE = defineEdges({
+  KNOWS: 'KNOWS',
+  LIKES: 'LIKES',
+})
+// typeof EDGE.KNOWS === 'KNOWS' (literal string type)
+```
+
+#### `buildEmbeddingText`
+
+Build a weighted embedding string by repeating fields according to their weight.
+The default weight is 1; fields with higher weights are repeated more often so
+the feature-hash bag-of-words embedding treats them as more significant:
+
+```ts
+import { buildEmbeddingText } from '@0xx0lostcause0xx0/polypack'
+
+buildEmbeddingText(
+  { subject: 'Hello', content: 'World' },
+  { subject: 3 }
+)
+// => "Hello Hello Hello World"
+```
 
 ## `@0xx0lostcause0xx0/polypack/react`
 

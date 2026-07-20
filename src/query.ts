@@ -1,4 +1,4 @@
-import type { PolyNode } from './types.js'
+import type { PolyNode, DataTransform } from './types.js'
 import { cosineSimilarity } from './vector-index.js'
 import { assertFiniteVector, assertNonNegativeInteger, cloneData, clonePolyNode } from './utils.js'
 
@@ -43,15 +43,29 @@ export class GraphQuery {
   private nodes: Map<string, PolyNode>
   private edges: EdgeIndex
   private nodeToEdgeMap: Map<string, Set<string>>
+  private transform?: DataTransform
+  private sidecarData: Map<string, unknown>
 
   constructor(
     nodes: Map<string, PolyNode>,
     edges: EdgeIndex,
     nodeToEdgeMap: Map<string, Set<string>>,
+    transform?: DataTransform,
+    sidecarData?: Map<string, unknown>,
   ) {
     this.nodes = nodes
     this.edges = edges
     this.nodeToEdgeMap = nodeToEdgeMap
+    this.transform = transform
+    this.sidecarData = sidecarData ?? new Map()
+  }
+
+  private readNode(node: PolyNode): PolyNode {
+    const cloned = clonePolyNode(node)
+    if (!this.transform?.deserialize) return cloned
+    const sidecar = this.sidecarData.get(cloned.id)
+    cloned.data = this.transform.deserialize(cloned.data, sidecar) as Record<string, unknown>
+    return cloned
   }
 
   where(field: string, value: unknown): this {
@@ -300,7 +314,7 @@ export class GraphQuery {
     if (this.opts.offset !== undefined) results = results.slice(this.opts.offset)
     if (this.opts.limit !== undefined) results = results.slice(0, this.opts.limit)
 
-    return results.map(node => clonePolyNode(node))
+    return results.map(node => this.readNode(node))
   }
 
   first(): PolyNode | null {
@@ -408,11 +422,11 @@ export class GraphQuery {
             ?.filter(e => e.type === edgeType)
             .map(e => this.nodes.get(e.target))
             .filter((n): n is PolyNode => !!n)
-            .map(clonePolyNode) ?? [])
+            .map(n => this.readNode(n)) ?? [])
         : this.getEdgeSourcesForTarget(node.id, edgeType)
             .map(id => this.nodes.get(id))
             .filter((n): n is PolyNode => !!n)
-            .map(clonePolyNode)
+            .map(n => this.readNode(n))
       if (connected.length === 0) return false
       if (predicate) return connected.some(predicate)
       return true
@@ -513,7 +527,7 @@ export class GraphQuery {
             seen.add(e.target)
             const node = this.nodes.get(e.target)
             if (node) {
-              const snapshot = clonePolyNode(node)
+              const snapshot = this.readNode(node)
               if (!predicate || predicate(snapshot)) collected.push(snapshot)
             }
           }
@@ -530,7 +544,7 @@ export class GraphQuery {
             seen.add(src)
             const node = this.nodes.get(src)
             if (node) {
-              const snapshot = clonePolyNode(node)
+              const snapshot = this.readNode(node)
               if (!predicate || predicate(snapshot)) collected.push(snapshot)
             }
           }

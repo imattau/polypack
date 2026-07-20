@@ -1,23 +1,31 @@
-import type { PolyNode, SerializedEdge, SerializedNode } from './types.js'
+import type { PolyNode, SerializedEdge, SerializedNode, DataTransform } from './types.js'
 import type { PersistenceAdapter, PersistedNodeQuery } from './persistence/adapter.js'
 import { applyPersistedNodeQuery } from './persistence/query.js'
 import { cosineSimilarity } from './vector-index.js'
 import { assertFiniteVector, assertNonNegativeInteger, cloneData } from './utils.js'
 
-function restoreNode(node: SerializedNode): PolyNode {
-  return {
+function readNode(node: PolyNode, transform?: DataTransform, sidecarData?: Map<string, unknown>): PolyNode {
+  if (!transform?.deserialize) return node
+  const sidecar = sidecarData?.get(node.id)
+  return { ...node, data: transform.deserialize(node.data, sidecar) as Record<string, unknown> }
+}
+
+function restoreNode(node: SerializedNode, transform?: DataTransform, sidecarData?: Map<string, unknown>): PolyNode {
+  return readNode({
     id: node.id,
     type: node.type,
     data: cloneData(node.data),
     vector: node.vector ? new Float64Array(node.vector) : undefined,
     insertedAt: node.insertedAt,
     updatedAt: node.updatedAt,
-  }
+  }, transform, sidecarData)
 }
 
 /** Chainable asynchronous query over all persisted nodes. Results are detached. */
 export class PersistedGraphQuery {
   private readonly adapter: PersistenceAdapter
+  private readonly transform?: DataTransform
+  private readonly sidecarData: Map<string, unknown>
   private query: PersistedNodeQuery = {}
   private resultOffset?: number
   private resultLimit?: number
@@ -36,8 +44,10 @@ export class PersistedGraphQuery {
     direction: 'out' | 'in'
   }> = []
 
-  constructor(adapter: PersistenceAdapter) {
+  constructor(adapter: PersistenceAdapter, transform?: DataTransform, sidecarData?: Map<string, unknown>) {
     this.adapter = adapter
+    this.transform = transform
+    this.sidecarData = sidecarData ?? new Map()
   }
 
   where(field: string, value: unknown): this {
@@ -172,7 +182,7 @@ export class PersistedGraphQuery {
         join.direction === 'out' ? edge.target : edge.source
       ))]
       const connected = new Map(
-        (await this.adapter.getNodes(connectedIds)).map(node => [node.id, restoreNode(node)]),
+        (await this.adapter.getNodes(connectedIds)).map(node => [node.id, restoreNode(node, this.transform, this.sidecarData)]),
       )
       const matched = new Set<string>()
       for (const edge of edges) {
@@ -220,7 +230,7 @@ export class PersistedGraphQuery {
     serialized = await this.applyEdgeFilters(serialized)
     serialized = await this.applyJoins(serialized)
     if (hasTraversal) serialized = await this.applyTraversals(serialized)
-    let results = serialized.map(restoreNode)
+    let results = serialized.map(n => restoreNode(n, this.transform, this.sidecarData))
 
     if (hasTraversal && this.query.orderBy) {
       const { field, direction } = this.query.orderBy
@@ -279,7 +289,7 @@ export class PersistedGraphQuery {
       : await this.edgesByTargets(seedIds, edgeType)
     const connectedIds = [...new Set(edges.map(edge => direction === 'out' ? edge.target : edge.source))]
     return (await this.adapter.getNodes(connectedIds))
-      .map(restoreNode)
+      .map(n => restoreNode(n, this.transform, this.sidecarData))
       .filter(node => !predicate || predicate(node))
   }
 }

@@ -1,5 +1,5 @@
 import { Subject } from 'rxjs'
-import type { PolyNode, EdgeOwnership, GraphChangeEvent, SerializedNode, SerializedEdge } from './types.js'
+import type { PolyNode, EdgeOwnership, GraphChangeEvent, SerializedNode, SerializedEdge, DataTransform } from './types.js'
 import { VectorIndex } from './vector-index.js'
 import { GraphQuery } from './query.js'
 import { PersistedGraphQuery } from './persisted-query.js'
@@ -37,7 +37,9 @@ export class PolyGraph {
   readonly persistence: PersistenceAdapter
   readonly hotCacheMax: number
   readonly embedding: EmbeddingProvider
+  readonly transform?: DataTransform
 
+  protected sidecarData = new Map<string, unknown>()
   protected hotCacheOrder = new Map<string, true>()
   protected _byType = new Map<string, Set<string>>()
   protected evictedDirtyNodes = new Map<string, SerializedNode>()
@@ -48,6 +50,7 @@ export class PolyGraph {
   protected removedVectorIds = new Set<string>()
   protected removedEdgeIds = new Set<string>()
   protected removedNodeIds = new Set<string>()
+  protected _warmed = false
   protected persistTimer: ReturnType<typeof setTimeout> | null = null
   protected flushInFlight: Promise<void> | null = null
   protected evictionSkipCounter = 0
@@ -78,10 +81,11 @@ export class PolyGraph {
     }
   }
 
-  constructor(adapter?: PersistenceAdapter, hotCacheMax?: number, embedding?: EmbeddingProvider) {
+  constructor(adapter?: PersistenceAdapter, hotCacheMax?: number, embedding?: EmbeddingProvider, transform?: DataTransform) {
     this.persistence = adapter ?? new MemoryAdapter()
     this.hotCacheMax = hotCacheMax ?? DEFAULT_HOT_CACHE_MAX
     this.embedding = embedding ?? defaultEmbedding
+    this.transform = transform
     this.vectors = new VectorIndex((id) => {
       this.dirtyVectors.add(id)
       this.schedulePersist()
@@ -228,7 +232,8 @@ export class PolyGraph {
       throw new RangeError('Node timestamps must be finite non-negative numbers')
     }
     if (node.vector) assertFiniteVector(node.vector)
-    const stored = clonePolyNode(node)
+    const serializedData = this.applySerialize(node.id, node.data as Record<string, unknown>)
+    const stored = clonePolyNode({ ...node, data: serializedData })
     const previous = this.nodes.get(stored.id)
     if (previous) {
       this.unindexNode(stored.id)
@@ -274,6 +279,24 @@ export class PolyGraph {
     this.onNodeUnindex?.(id, node)
   }
 
+  protected applySerialize(id: string, data: Record<string, unknown>): Record<string, unknown> {
+    if (!this.transform?.serialize) return data
+    const result = this.transform.serialize(data)
+    if (result.sidecar !== undefined) {
+      this.sidecarData.set(id, result.sidecar)
+    }
+    return result.data
+  }
+
+  protected applyDeserialize(node: PolyNode): PolyNode {
+    if (!this.transform?.deserialize) return node
+    const sidecar = this.sidecarData.get(node.id)
+    return {
+      ...node,
+      data: this.transform.deserialize(node.data, sidecar) as Record<string, unknown>,
+    }
+  }
+
   protected onNodeIndex?(node: PolyNode): void
   protected onNodeUnindex?(id: string, node: PolyNode): void
 
@@ -286,7 +309,7 @@ export class PolyGraph {
     const node = this.nodes.get(id)
     if (node) {
       this.touchHotCache(id)
-      return clonePolyNode(node)
+      return this.applyDeserialize(clonePolyNode(node))
     }
     return undefined
   }
@@ -315,13 +338,14 @@ export class PolyGraph {
     if (restored.vector) {
       this.vectors.hydrate(restored.id, [...restored.vector])
     }
-    return clonePolyNode(restored)
+    return this.applyDeserialize(clonePolyNode(restored))
   }
 
   updateNode(id: string, data: Partial<Record<string, unknown>>, vector?: Float64Array): PolyNode | undefined {
     const node = this.nodes.get(id)
     if (!node) return undefined
-    Object.assign(node.data, cloneData(data))
+    const serialized = this.applySerialize(id, data as Record<string, unknown>)
+    Object.assign(node.data, cloneData(serialized))
     if (vector !== undefined) {
       assertFiniteVector(vector)
       node.vector = new Float64Array(vector)
@@ -333,7 +357,7 @@ export class PolyGraph {
     this.touchHotCache(id)
     this.markDirty(id)
     this.emitChange({ type: 'node_updated', nodeId: id, nodeType: node.type })
-    return clonePolyNode(node)
+    return this.applyDeserialize(clonePolyNode(node))
   }
 
   /** Embed `text` and update a loaded node's data and vector together. */
@@ -368,7 +392,7 @@ export class PolyGraph {
     this.touchHotCache(id)
     this.markDirty(id)
     this.emitChange({ type: 'node_updated', nodeId: id, nodeType: node.type })
-    return clonePolyNode(node)
+    return this.applyDeserialize(clonePolyNode(node))
   }
 
   /** Restore an evicted node when necessary, then remove its vector. */
@@ -454,6 +478,7 @@ export class PolyGraph {
 
     this.dirtyNodes.delete(id)
     this.removedNodeIds.add(id)
+    this.sidecarData.delete(id)
     this.schedulePersist()
     this.hotCacheOrder.delete(id)
     this.emitChange({ type: 'node_removed', nodeId: id, nodeType: node.type })
@@ -615,7 +640,7 @@ export class PolyGraph {
   // ── Query ──
 
   query(): GraphQuery {
-    return new GraphQuery(this.nodes, this.edges, this.nodeToEdgeMap)
+    return new GraphQuery(this.nodes, this.edges, this.nodeToEdgeMap, this.transform, this.sidecarData)
   }
 
   /** Generate a detached embedding using the graph's configured provider. */
@@ -635,7 +660,7 @@ export class PolyGraph {
 
   /** Query all persisted nodes without loading them into the hot working set. */
   queryPersisted(): PersistedGraphQuery {
-    return new PersistedGraphQuery(this.persistence)
+    return new PersistedGraphQuery(this.persistence, this.transform, this.sidecarData)
   }
 
   // ── Hot Cache ──
@@ -736,6 +761,8 @@ export class PolyGraph {
   }
 
   async warm(): Promise<void> {
+    if (this._warmed) return
+    this._warmed = true
     const allNodeIds = await this.persistence.allNodeIds()
     if (allNodeIds.length === 0) return
 
@@ -805,6 +832,7 @@ export class PolyGraph {
     this.removedNodeIds.clear()
     this.removedEdgeIds.clear()
     this.removedVectorIds.clear()
+    this._warmed = false
   }
 
   async dispose(): Promise<void> {
@@ -825,7 +853,7 @@ export class PolyGraph {
     const results: PolyNode[] = []
     for (const id of ids) {
       const node = this.nodes.get(id)
-      if (node) results.push(clonePolyNode(node))
+      if (node) results.push(this.applyDeserialize(clonePolyNode(node)))
     }
     return results
   }
@@ -847,5 +875,81 @@ export class PolyGraph {
   /** Number of nodes currently stored by the persistence adapter. */
   async persistedSize(): Promise<number> {
     return (await this.persistence.allNodeIds()).length
+  }
+
+  // ── Graph traversal ──
+
+  /**
+   * Walk ancestor chain backwards through incoming edges of `edgeType`.
+   * Returns nodes from root ancestor to start node (inclusive). Detects cycles.
+   */
+  walkAncestors(id: string, edgeType: string): PolyNode[] {
+    const path: PolyNode[] = []
+    const seen = new Set<string>()
+    let current: string | undefined = id
+    while (current && !seen.has(current)) {
+      seen.add(current)
+      const node = this.nodes.get(current)
+      if (!node) break
+      path.unshift(this.applyDeserialize(clonePolyNode(node)))
+      const sources = this.getEdgeSources(current, edgeType)
+      current = sources.length > 0 ? sources[0] : undefined
+    }
+    return path
+  }
+
+  /**
+   * Walk descendant chain forwards through outgoing edges of `edgeType`.
+   * Returns nodes from start node to deepest child (inclusive). Detects cycles.
+   */
+  walkDescendants(id: string, edgeType: string): PolyNode[] {
+    const path: PolyNode[] = []
+    const seen = new Set<string>()
+    let current: string | undefined = id
+    while (current && !seen.has(current)) {
+      seen.add(current)
+      const node = this.nodes.get(current)
+      if (!node) break
+      path.push(this.applyDeserialize(clonePolyNode(node)))
+      const targets = this.getEdgeTargets(current, edgeType)
+      current = targets.length > 0 ? targets[0] : undefined
+    }
+    return path
+  }
+
+  // ── Full-text search ──
+
+  /**
+   * Quick full-text search across persisted nodes of a single type.
+   * Shorthand for `queryPersistedText(text, threshold, topK).whereNodeType(type).toArray()`.
+   */
+  async searchNodes<T = PolyNode>(text: string, type: string, threshold = 0, topK?: number): Promise<T[]> {
+    if (!text.trim()) return []
+    return (await this.queryPersistedText(text, threshold, topK).then(q => q.whereNodeType(type).toArray())) as unknown as T[]
+  }
+
+  // ── Convenience queries ──
+
+  /** Load all persisted nodes of a type into the hot cache. */
+  async getNodesByType<T = PolyNode>(type: string): Promise<T[]> {
+    return (await this.queryPersisted().whereNodeType(type).toArray()) as unknown as T[]
+  }
+
+  /** Load all persisted nodes of a type ordered by a data field. */
+  async getNodesByTypeOrdered<T = PolyNode>(type: string, field: string, direction: 'asc' | 'desc' = 'desc'): Promise<T[]> {
+    return (await this.queryPersisted().whereNodeType(type).orderBy(field, direction).toArray()) as unknown as T[]
+  }
+
+  /** Count persisted nodes of a type. */
+  async countNodesByType(type: string): Promise<number> {
+    return this.queryPersisted().whereNodeType(type).count()
+  }
+
+  /** Remove all persisted nodes of a type. */
+  async deleteNodesByType(type: string): Promise<void> {
+    const ids = await this.queryPersisted().whereNodeType(type).ids()
+    for (const id of ids) {
+      await this.removeNodeSafe(id)
+    }
   }
 }

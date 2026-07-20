@@ -1,5 +1,9 @@
 # polypack
 
+[![npm version](https://img.shields.io/npm/v/%400xx0lostcause0xx0%2Fpolypack?logo=npm)](https://www.npmjs.com/package/@0xx0lostcause0xx0/polypack)
+[![GitHub release](https://img.shields.io/github/v/release/imattau/polypack?logo=github)](https://github.com/imattau/polypack/releases/latest)
+[![CI](https://github.com/imattau/polypack/actions/workflows/ci.yml/badge.svg)](https://github.com/imattau/polypack/actions/workflows/ci.yml)
+
 Generic property graph engine with vector similarity search, edge ownership semantics, relational queries, and real-time sync. Runs in browser (IndexedDB) and Node.js (MemoryAdapter).
 
 ## Install
@@ -9,6 +13,18 @@ npm install @0xx0lostcause0xx0/polypack
 ```
 
 React is an optional peer dependency and is only required when importing from `@0xx0lostcause0xx0/polypack/react`.
+
+## Releases
+
+- **npm package:** [`@0xx0lostcause0xx0/polypack`](https://www.npmjs.com/package/@0xx0lostcause0xx0/polypack)
+  is the installable distribution for Node.js and browser build tooling.
+- **GitHub releases:** [release notes, source archives, and tags](https://github.com/imattau/polypack/releases)
+  are published from the repository. The current source release is
+  [`v2.1.0`](https://github.com/imattau/polypack/releases/tag/v2.1.0).
+
+Stable GitHub releases run the complete test, build, export, and package checks
+before the corresponding package is submitted to npm with provenance. See the
+[changelog](CHANGELOG.md) for breaking changes and migration notes.
 
 ## Features
 
