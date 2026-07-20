@@ -11,7 +11,7 @@ import type { EmbeddingProvider } from './embedding.js'
 
 type EdgeIndex = Map<string, Array<{ target: string; type: string; data?: Record<string, unknown> }>>
 
-const DEFAULT_HOT_CACHE_MAX = 10000
+const DEFAULT_HOT_CACHE_MAX = 50000
 
 const OWNERSHIP_KEY = '__ownership'
 
