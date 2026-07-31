@@ -56,7 +56,13 @@ jobs:
           node --input-type=module --eval "const pkg = (await import('./package.json', { with: { type: 'json' } })).default; const expected = 'v' + pkg.version; if (process.env.RELEASE_TAG !== expected) { console.error('Release tag ' + process.env.RELEASE_TAG + ' does not match ' + expected); process.exit(1) }"
       - run: npm ci
       - name: Publish TypeScript package
-        run: npm publish --access public --provenance
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          if npm view "@0xx0lostcause0xx0/polypack@$VERSION" version >/dev/null 2>&1; then
+            echo "skip @0xx0lostcause0xx0/polypack@$VERSION (already published)"
+          else
+            npm publish --access public --provenance
+          fi
 
   native-publish:
     needs: release-candidate
@@ -125,12 +131,20 @@ jobs:
             esac
             cp "$f" "$d/"
           done
+          VERSION=$(node -p "require('./package.json').version")
+          publish_if_missing() {
+            local name="$1" dir="$2"
+            if npm view "$name@$VERSION" version >/dev/null 2>&1; then
+              echo "  skip $name@$VERSION (already published)"
+            else
+              (cd "$dir" && npm publish --provenance --access public)
+            fi
+          }
           for pkg in npm/*/; do
-            npm publish "$pkg" --provenance --access public
+            name=$(node -p "require('./$pkg/package.json').name")
+            publish_if_missing "$name" "$pkg"
           done
-      - name: Publish wrapper package
-        working-directory: packages/node-native
-        run: npm publish --provenance --access public
+          publish_if_missing "$(node -p "require('./package.json').name")" .
 
   crate-publish:
     needs: release-candidate
