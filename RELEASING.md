@@ -41,12 +41,34 @@ The release workflow publishes, in order:
 
 All npm publishing happens in `release.yml` and uses npm OIDC trusted
 publishing (audience `npm`; `id-token: write` is set at the workflow level).
-In your npm account settings, add trusted publishers for the workflow file
-`release.yml` for each package (or the `@0xx0lostcause0xx0` scope):
+npm configures trusted publishing **per package name** (there is no
+scope-level grant), so add one trusted publisher for each of these packages,
+all pointing at workflow `release.yml`:
 
 - `@0xx0lostcause0xx0/polypack`
-- `@0xx0lostcause0xx0/polypack-native` + the 5 `polypack-native-*` platform
-  packages
+- `@0xx0lostcause0xx0/polypack-native`
+- `@0xx0lostcause0xx0/polypack-native-darwin-arm64`
+- `@0xx0lostcause0xx0/polypack-native-darwin-x64`
+- `@0xx0lostcause0xx0/polypack-native-linux-arm64-gnu`
+- `@0xx0lostcause0xx0/polypack-native-linux-x64-gnu`
+- `@0xx0lostcause0xx0/polypack-native-win32-x64-msvc`
+
+How to add each one:
+
+1. Sign in to [npmjs.com](https://www.npmjs.com) and open
+   **Access Tokens → Generate New Token → Generate a token via OIDC (GitHub
+   Actions)**.
+2. Fill in:
+   - **Workflow file**: `release.yml`
+   - **Environment**: leave blank (the publish jobs have no environment)
+   - **Package**: the exact package name (one per token/publisher)
+3. Generate. Repeat for each of the 7 names above.
+
+The native platform packages (`polypack-native-*`) do not exist yet; the first
+OIDC publish creates them. If npm refuses to configure a trusted publisher for
+a name that doesn't exist, publish each once manually with a classic token
+(`npm publish --access public` from the package directory) to create it, then
+add the OIDC publisher.
 
 ### crates.io
 
