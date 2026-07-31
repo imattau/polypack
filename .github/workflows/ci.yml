@@ -150,7 +150,7 @@ jobs:
       - name: Clean-venv wheel install + 100K example (no Rust)
         run: |
           set -e
-          WHEEL=$(ls "$GITHUB_WORKSPACE"/*.whl | head -1)
+          WHEEL=$(ls "$GITHUB_WORKSPACE"/*manylinux*.whl | head -1)
           python -m venv /tmp/wheel-venv
           /tmp/wheel-venv/bin/pip install --quiet "$WHEEL" numpy
           /tmp/wheel-venv/bin/python "$GITHUB_WORKSPACE/python/examples/100k.py"
