@@ -37,14 +37,64 @@ The release workflow publishes, in order:
 
 ## One-time registry setup (required before the first release)
 
-- **npm**: publish once manually with an auth token (or configure trusted
-  publishing) so the packages exist; `NODE_AUTH_TOKEN` is provided by the
-  npmjs registry setup.
-- **crates.io**: add the `CRATES_IO_TOKEN` repo secret, or configure the repo
-  as a trusted publisher and switch `crate-publish` to the OIDC token.
-- **PyPI**: configure trusted publishing for this repository's `release`
-  environment (see [pypa/gh-action-pypi-publish](https://github.com/pypa/gh-action-pypi-publish)),
-  or set a `PYPI_TOKEN` secret.
+### npm
+
+The npm publish jobs use the npm registry auth from `actions/setup-node`
+(`NODE_AUTH_TOKEN`). The packages must exist on npm before they can be
+published, so either:
+
+- publish each package once manually (`npm publish --access public` from
+  `packages/node-native` and each `packages/node-native/npm/*/`), or
+- configure npm trusted publishing for the repository.
+
+### crates.io (trusted publishing)
+
+No token is stored. The `crate-publish` job fetches a GitHub OIDC token and
+cargo sends it to crates.io, which validates it against the provider you
+register.
+
+1. Sign in to [crates.io](https://crates.io) and open
+   **Account settings → OIDC Providers → Add GitHub OIDC provider**.
+2. Fill in:
+   - **Repository owner**: `imattau`
+   - **Repository name**: `polypack`
+   - **Workflow name**: `release.yml`
+   - **Environment**: leave blank
+3. Save. The provider applies to the `polypack-core` crate (and any future
+   crates you add to the same workflow).
+
+Requirements: `cargo` ≥ 1.74 (the CI workflow installs stable), the workflow
+has `permissions: id-token: write` (already set), and `release.yml` lives on
+the default branch.
+
+Alternative: set a classic **`CRATES_IO_TOKEN`** repo secret instead; the
+workflow falls back to it when the OIDC token is unavailable.
+
+### PyPI (trusted publishing)
+
+No token is stored. The `wheel-publish-upload` job uses
+`pypa/gh-action-pypi-publish` with `id-token: write` and the `release`
+environment, and PyPI validates the GitHub OIDC token against the trusted
+publisher you register.
+
+1. Sign in to [PyPI](https://pypi.org), open **Account settings → Publishing
+   → Add trusted publisher**.
+2. Fill in:
+   - **Workflow name**: `release.yml`
+   - **Environment name**: `release`
+   - **Project name**: `polypack`
+   - **Owner**: `imattau`
+   - **Repository**: `polypack`
+3. Save. The `polypack` project name is available (verified); the first
+   trusted publish creates it.
+
+The `release` GitHub environment is referenced by the workflow; create it in
+**Settings → Environments → New environment → `release`** (no deployment
+branch protection needed, but do not restrict it in a way that blocks the
+workflow).
+
+Alternative: set a **`PYPI_TOKEN`** secret and the pypi-publish action will
+use it instead of OIDC.
 
 ## Rules
 

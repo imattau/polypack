@@ -116,12 +116,24 @@ jobs:
   crate-publish:
     needs: release-candidate
     runs-on: ubuntu-latest
-    env:
-      CARGO_REGISTRIES_CRATES_IO_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - name: Fetch crates.io OIDC token
+        id: oidc
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const resp = await fetch(process.env.ACTIONS_ID_TOKEN_REQUEST_URL, {
+              headers: { Authorization: `Bearer ${process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN}` },
+            })
+            const data = await resp.json()
+            core.setOutput('oidc_token', data.value)
       - name: Publish polypack-core to crates.io
+        env:
+          # Trusted publishing uses the OIDC token; fall back to the
+          # CRATES_IO_TOKEN secret if one is configured.
+          CARGO_REGISTRIES_CRATES_IO_TOKEN: ${{ steps.oidc.outputs.oidc_token || secrets.CRATES_IO_TOKEN }}
         run: cargo publish -p polypack-core
         working-directory: crates
 
