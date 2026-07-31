@@ -9,6 +9,7 @@ persistence lands in Phase 5).
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any, Optional
 
@@ -23,7 +24,14 @@ from . import (
     PolypackValueError,
 )
 
-_FIXTURES = Path(__file__).resolve().parent.parent.parent / "fixtures" / "conformance"
+# Resolve fixtures from the source tree, or from POLYPACK_FIXTURES when running
+# against an installed wheel.
+_FIXTURES = Path(
+    os.environ.get(
+        "POLYPACK_FIXTURES",
+        str(Path(__file__).resolve().parent.parent.parent / "fixtures" / "conformance"),
+    )
+)
 
 
 class ConformanceError(AssertionError):

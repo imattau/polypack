@@ -25,11 +25,15 @@ jobs:
       - run: npm run check
       - run: cargo test --release --manifest-path crates/Cargo.toml
       - run: cargo clippy --all-targets --manifest-path crates/Cargo.toml -- -D warnings
-      - name: Python extension + tests
+      - name: Python tests against the built wheel
+        env:
+          POLYPACK_FIXTURES: ${{ github.workspace }}/fixtures/conformance
         run: |
           pip install maturin numpy pytest
-          maturin develop --release
-          python -m pytest -q
+          maturin build --release --out dist
+          pip install dist/*.whl
+          cd "$RUNNER_TEMP"
+          python -m pytest "$GITHUB_WORKSPACE/python/tests" -q --rootdir="$GITHUB_WORKSPACE/python"
         working-directory: python
 
   native-publish:

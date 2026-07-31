@@ -72,15 +72,18 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Install tooling
         run: pip install maturin numpy pytest
-      - name: Build and install extension (editable)
-        run: maturin develop --release
-        working-directory: python
-      - name: Run Python tests
-        run: python -m pytest -q
-        working-directory: python
       - name: Build wheel
         run: maturin build --release --out dist
         working-directory: python
+      - name: Install wheel
+        run: pip install dist/*.whl
+        working-directory: python
+      - name: Run Python tests against the installed wheel
+        env:
+          POLYPACK_FIXTURES: ${{ github.workspace }}/fixtures/conformance
+        run: |
+          cd "$RUNNER_TEMP"
+          python -m pytest "$GITHUB_WORKSPACE/python/tests" -q --rootdir="$GITHUB_WORKSPACE/python"
       - name: Upload wheel
         uses: actions/upload-artifact@v4
         with:
