@@ -3,6 +3,13 @@
 All notable changes to this project are documented here. This project follows
 [Semantic Versioning](https://semver.org/).
 
+## [2.4.1] - 2026-07-31
+
+Coordinated re-release of the multi-language stack after the initial 2.4.0
+attempt. Version bump only (npm/crates.io/PyPI require a fresh version for a
+re-publish); the Python wheel distribution is `polypack-db` to match the PyPI
+project.
+
 ## [2.4.0] - 2026-07-31
 
 ### Added

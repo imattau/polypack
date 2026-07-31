@@ -20,7 +20,7 @@ React is an optional peer dependency and is only required when importing from `@
   is the installable distribution for Node.js and browser build tooling.
 - **GitHub releases:** [release notes, source archives, and tags](https://github.com/imattau/polypack/releases)
   are published from the repository. The current source release is
-  [`v2.4.0`](https://github.com/imattau/polypack/releases/tag/v2.4.0).
+  [`v2.4.1`](https://github.com/imattau/polypack/releases/tag/v2.4.1).
 
 Stable GitHub releases run the complete test, build, export, and package checks
 before the corresponding package is submitted to npm with provenance. See the

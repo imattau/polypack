@@ -8,9 +8,9 @@ The native stack shares one version and is released together:
 
 | Package | Version (current) |
 |---|---|
-| `polypack-core` crate (`crates/polypack-core`) | `0.1.0` |
-| `@0xx0lostcause0xx0/polypack-native` + per-platform packages | `0.1.0` |
-| `polypack-db` Python wheel | `0.1.0` |
+| `polypack-core` crate (`crates/polypack-core`) | `0.1.1` |
+| `@0xx0lostcause0xx0/polypack-native` + per-platform packages | `0.1.1` |
+| `polypack-db` Python wheel | `0.1.1` |
 
 The TypeScript package follows its own semver (currently `2.x`); it is not
 bumped for native-stack releases unless its public API changes.
@@ -19,7 +19,7 @@ bumped for native-stack releases unless its public API changes.
 
 1. Bump versions (TS package + native stack as needed), update
    `CHANGELOG.md`, commit, and push `master`.
-2. Create a GitHub release tagged `v<ts-version>` (e.g. `v2.4.0`). The release
+2. Create a GitHub release tagged `v<ts-version>` (e.g. `v2.4.1`). The release
    event triggers `.github/workflows/release.yml` and the existing
    `.github/workflows/publish-npm.yml`.
 
