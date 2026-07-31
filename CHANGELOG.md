@@ -3,6 +3,36 @@
 All notable changes to this project are documented here. This project follows
 [Semantic Versioning](https://semver.org/).
 
+## [2.4.2] - 2026-08-01
+
+### Fixed
+
+- Python `PolyGraph.save()` only ever sent puts, so deleting a node, edge, or
+  vector and saving could resurrect it on the next `open()`. Deletions are
+  now tracked and flushed through `Store.apply()`.
+- Several Python graph invariants found alongside the above: a duplicate-edge
+  check against the wrong dict level, a set-based (not refcounted)
+  incoming-edge index that could drop a still-live source, stale
+  incoming-index entries after node removal, shallow node `data` copies,
+  `update_node()` always writing `updatedAt = 0`, the context manager
+  clearing state instead of closing the attached store, and an overly broad
+  `except` swallowing genuine native query errors.
+- `Store::apply()` in `polypack-core` mutated in-memory state before
+  appending to the WAL; a failed append or fsync could leave memory ahead of
+  disk. Mutation now only happens after the WAL write succeeds.
+- Snapshot writes (Node `FsStorage`, Python `DirectoryStorage`) now go
+  through a temp file, fsync, and atomic rename instead of a direct write;
+  the Node adapter also implements directory fsync.
+- Corrected the README's `@0xx0lostcause0xx0/polypack/native` subpath
+  reference to the real, separately published `@0xx0lostcause0xx0/polypack-native`
+  package.
+
+### Changed
+
+- The Rust crates, Python wheel, and native npm packages now share one
+  version with the TypeScript package instead of tracking an independent
+  `0.1.x` line. See `RELEASING.md`.
+
 ## [2.4.1] - 2026-07-31
 
 Coordinated re-release of the multi-language stack after the initial 2.4.0

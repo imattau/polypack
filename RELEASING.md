@@ -4,16 +4,20 @@ Release rules from the multi-language roadmap (POLYPACK_RUST_PYTHON_PLAN §9).
 
 ## Version coordination
 
-The native stack shares one version and is released together:
+As of `2.4.2`, every package in the repo — the TypeScript package, the native
+stack, and the Python wheel — shares a single version number:
 
 | Package | Version (current) |
 |---|---|
-| `polypack-core` crate (`crates/polypack-core`) | `0.1.1` |
-| `@0xx0lostcause0xx0/polypack-native` + per-platform packages | `0.1.1` |
-| `polypack-db` Python wheel | `0.1.1` |
+| `@0xx0lostcause0xx0/polypack` (TypeScript) | `2.4.2` |
+| `polypack-core` crate (`crates/polypack-core`) | `2.4.2` |
+| `@0xx0lostcause0xx0/polypack-native` + per-platform packages | `2.4.2` |
+| `polypack-db` Python wheel | `2.4.2` |
 
-The TypeScript package follows its own semver (currently `2.x`); it is not
-bumped for native-stack releases unless its public API changes.
+Bump all of them together for every release, even if only one language's code
+changed — registries need a fresh version to re-publish, and drift between
+the TypeScript version and the native/Python versions has been a source of
+confusion.
 
 ## How to release
 
