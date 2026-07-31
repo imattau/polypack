@@ -73,7 +73,7 @@ jobs:
       - name: Install tooling
         run: pip install maturin numpy pytest
       - name: Build and install extension (editable)
-        run: maturin develop --release --manifest-path crates/polypack-python/Cargo.toml
+        run: maturin develop --release
         working-directory: python
       - name: Run Python tests
         run: python -m pytest -q

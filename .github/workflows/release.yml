@@ -28,7 +28,7 @@ jobs:
       - name: Python extension + tests
         run: |
           pip install maturin numpy pytest
-          maturin develop --manifest-path crates/polypack-python/Cargo.toml
+          maturin develop --release
           python -m pytest -q
         working-directory: python
 

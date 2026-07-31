@@ -9,7 +9,7 @@ license.workspace = true
 crate-type = ["cdylib"]
 
 [dependencies]
-napi = { version = "2", default-features = false, features = ["napi8", "serde-json"] }
+napi = { version = "2", default-features = false, features = ["napi8", "serde-json", "dyn-symbols"] }
 napi-derive = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
