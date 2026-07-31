@@ -60,6 +60,8 @@ registered for this repository (not available on every account).
    tokens → New token** (with `publish-new` scope). Copy the token.
 2. In the GitHub repo → **Settings → Secrets and variables → Actions →
    New repository secret**: name `CRATES_IO_TOKEN`, value the token.
+3. Ensure the account has a **verified email address**
+   (Account settings → Profile), or `cargo publish` is rejected with a 400.
 
 **Alternative: OIDC trusted publishing**
 
