@@ -38,6 +38,61 @@ All notable changes to this project are documented here. This project follows
 - WAL recovery now persists a snapshot before deleting the replayed WAL, and
   tolerates a truncated WAL tail from a mid-append crash.
 
+### Changed
+
+- The stress suite now uses a fixed-seed PRNG for reproducible runs, asserts
+  `recall@10` against the exact index (100K/4-dim and 5K/384-dim), reports
+  p50/p95/p99 query latencies, and runs with `--expose-gc` so heap numbers are
+  accurate.
+
+## [2.3.0] - 2026-07-20
+
+### Breaking changes
+
+- `IndexedDBAdapter` is replaced by `BinaryStoreAdapter` (MessagePack snapshot
+  plus append-only WAL persistence). Existing browser IndexedDB data does not
+  migrate automatically.
+
+### Added
+
+- `HNSWIndex` approximate nearest-neighbour vector index with `PolyGraph`
+  factory integration, alongside the existing exact `VectorIndex`.
+- `BinaryStoreAdapter` — durable MessagePack + WAL persistence across nodes,
+  edges, and vectors.
+- Default hot cache increased from 10K to 50K loaded nodes.
+- Stress test suite measuring memory, vector search, HNSW, warm, and insert
+  throughput, plus BinaryStoreAdapter WAL/snapshot/warm benchmarks at 10K/50K.
+
+### Changed
+
+- Performance: `Float64Array` sharing between `PolyNode` and `VectorIndex`,
+  MemoryAdapter in-place flush and LRU eviction, edge-index `Map` refactor,
+  partial warm (load only the hot cache), and a batched `getVectors` API.
+- CI: stress tests run via `npm run test:stress` (with `npm run test:all` to
+  include them); vitest uses a single fork with a raised timeout.
+- Docs: release reference updated to v2.2.0.
+
+### Fixed
+
+- HNSW index type errors (`ArrayLike<number>` distance/search parameters).
+- vitest RPC timeouts on stress tests via `singleFork` and larger timeouts.
+
+## [2.2.0] - 2026-07-20
+
+### Added
+
+- `DataTransform` serialize/deserialize hooks for non-cloneable data (Blob,
+  File, etc.) applied transparently across `addNode`, `updateNode`, `getNode`,
+  and query results.
+- Idempotent `warm()` — safe to call repeatedly.
+- `defineEdges()`: typed frozen edge-constant utility.
+- `buildEmbeddingText()`: weighted field repetition for feature-hash embeddings.
+- `walkAncestors()` / `walkDescendants()`: linear traversal with cycle
+  detection.
+- `searchNodes()`: shorthand for `queryPersistedText` + `whereNodeType`.
+- Node-type query helpers: `getNodesByType`, `getNodesByTypeOrdered`,
+  `countNodesByType`, `deleteNodesByType`.
+
 ### Breaking changes
 
 - Public node, edge, query, and vector reads now return detached snapshots.

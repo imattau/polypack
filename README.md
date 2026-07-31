@@ -20,7 +20,7 @@ React is an optional peer dependency and is only required when importing from `@
   is the installable distribution for Node.js and browser build tooling.
 - **GitHub releases:** [release notes, source archives, and tags](https://github.com/imattau/polypack/releases)
   are published from the repository. The current source release is
-  [`v2.2.0`](https://github.com/imattau/polypack/releases/tag/v2.2.0).
+  [`v2.3.0`](https://github.com/imattau/polypack/releases/tag/v2.3.0).
 
 Stable GitHub releases run the complete test, build, export, and package checks
 before the corresponding package is submitted to npm with provenance. See the
@@ -29,7 +29,7 @@ before the corresponding package is submitted to npm with provenance. See the
 ## Features
 
 - **Property graph** — typed nodes and edges with arbitrary data payloads
-- **LRU working set** — 10K loaded-node limit by default, with explicit restoration from persistence
+- **LRU working set** — 50K loaded-node limit by default, with explicit restoration from persistence
 - **Vector similarity** — cosine, euclidean, or pluggable distance functions
 - **Pluggable text embeddings** — supply any local or hosted model, with a
   dependency-free 384-dimensional feature-hash provider included by default

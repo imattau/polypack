@@ -13,7 +13,7 @@ new PolyGraph(adapter?: PersistenceAdapter, hotCacheMax?: number, embedding?: Em
 ```
 
 The main property-graph container. Without an adapter it uses `MemoryAdapter`.
-The default hot-node limit is 10,000. Edges remain indexed when nodes are
+The default hot-node limit is 50,000. Edges remain indexed when nodes are
 evicted, and dirty evicted nodes are retained until persistence completes.
 Synchronous queries and mutations operate on currently loaded nodes; use
 `getNodeSafe(id)` to restore an evicted node before mutating it.

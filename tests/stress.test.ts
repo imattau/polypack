@@ -23,6 +23,29 @@ function formatMs(ms: number): string {
   return ms < 1 ? `${(ms * 1000).toFixed(0)}µs` : `${ms.toFixed(2)}ms`
 }
 
+function mulberry32(seed: number): () => number {
+  let a = seed >>> 0
+  return () => {
+    a = (a + 0x6d2b79f5) | 0
+    let t = Math.imul(a ^ (a >>> 15), 1 | a)
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296
+  }
+}
+
+// Fixed seed so every run is byte-for-byte reproducible.
+const rand = mulberry32(42)
+
+function percentile(sorted: number[], p: number): number {
+  if (sorted.length === 0) return 0
+  return sorted[Math.min(sorted.length - 1, Math.max(0, Math.ceil((p / 100) * sorted.length) - 1))]
+}
+
+function percentileReport(label: string, latencies: number[]): void {
+  const sorted = [...latencies].sort((a, b) => a - b)
+  console.log(`    ${label} p50: ${formatMs(percentile(sorted, 50))}  p95: ${formatMs(percentile(sorted, 95))}  p99: ${formatMs(percentile(sorted, 99))}`)
+}
+
 function measureHeap(): number {
   if (typeof (globalThis as any).gc === 'function') {
     ;(globalThis as any).gc()
@@ -32,13 +55,13 @@ function measureHeap(): number {
 
 function makeNode(i: number, dims: number, hasVec: boolean) {
   const vec = hasVec ? new Float64Array(dims) : undefined
-  if (hasVec) for (let d = 0; d < dims; d++) vec[d] = Math.random() * 2 - 1
+  if (hasVec) for (let d = 0; d < dims; d++) vec[d] = rand() * 2 - 1
   return {
     id: `n${i}`,
     type: i % 3 === 0 ? 'page' : i % 3 === 1 ? 'post' : 'comment',
     data: {
       title: `Node #${i}`,
-      score: Math.random(),
+      score: rand(),
       tags: ['a', 'b', 'c', 'd', 'e'].slice(0, i % 5 + 1),
       created_at: 1_700_000_000 + i,
     },
@@ -91,14 +114,14 @@ describe('Stress limits', () => {
         const t0 = performance.now()
         for (let i = 0; i < count; i++) {
           const v: number[] = []
-          for (let d = 0; d < dims; d++) v.push(Math.random() * 2 - 1)
+          for (let d = 0; d < dims; d++) v.push(rand() * 2 - 1)
           index.add(`v${i}`, v)
         }
         const buildTime = performance.now() - t0
         console.log(`    Build: ${formatMs(buildTime)} (${(count / (buildTime / 1000)).toFixed(0)} v/s)`)
 
         const q: number[] = []
-        for (let d = 0; d < dims; d++) q.push(Math.random() * 2 - 1)
+        for (let d = 0; d < dims; d++) q.push(rand() * 2 - 1)
 
         const q0 = performance.now()
         const results = index.query(q, 10, 0)
@@ -116,14 +139,14 @@ describe('Stress limits', () => {
         const t0 = performance.now()
         for (let i = 0; i < count; i++) {
           const v: number[] = []
-          for (let d = 0; d < dims; d++) v.push(Math.random() * 2 - 1)
+          for (let d = 0; d < dims; d++) v.push(rand() * 2 - 1)
           index.add(`v${i}`, v)
         }
         const buildTime = performance.now() - t0
         console.log(`    Build index: ${formatMs(buildTime)} (${(count / (buildTime / 1000)).toFixed(0)} v/s)`)
 
         const q: number[] = []
-        for (let d = 0; d < dims; d++) q.push(Math.random() * 2 - 1)
+        for (let d = 0; d < dims; d++) q.push(rand() * 2 - 1)
 
         const q0 = performance.now()
         const results = index.query(q, 10, 0)
@@ -172,39 +195,108 @@ describe('Stress limits', () => {
     it('compares query speed and recall at 100K (4-dim)', { timeout: 300_000 }, () => {
       const dims = 4
       const count = 100_000
+      const queryCount = 100
 
       const exact = new VectorIndex()
       const hnsw = new HNSWIndex(undefined, cosineSimilarity, { M: 16, efConstruction: 100, efSearch: 100 })
 
       for (let i = 0; i < count; i++) {
         const v: number[] = []
-        for (let d = 0; d < dims; d++) v.push(Math.random() * 2 - 1)
+        for (let d = 0; d < dims; d++) v.push(rand() * 2 - 1)
         exact.add(`v${i}`, v)
         hnsw.add(`v${i}`, v)
       }
 
-      const q: number[] = []
-      for (let d = 0; d < dims; d++) q.push(Math.random() * 2 - 1)
+      const queries: number[][] = []
+      for (let qi = 0; qi < queryCount; qi++) {
+        const q: number[] = []
+        for (let d = 0; d < dims; d++) q.push(rand() * 2 - 1)
+        queries.push(q)
+      }
+      for (const q of queries) {
+        exact.query(q, 10, 0)
+        hnsw.query(q, 10, 0)
+      }
 
-      const exactResults = exact.query(q, 10, 0)
-      let t = performance.now()
-      for (let iter = 0; iter < 10; iter++) exact.query(q, 10, 0)
-      const avgExact = (performance.now() - t) / 10
+      const exactLat: number[] = []
+      const hnswLat: number[] = []
+      let hits = 0
+      for (const q of queries) {
+        let t = performance.now()
+        const exactResults = exact.query(q, 10, 0)
+        exactLat.push(performance.now() - t)
 
-      const hnswResults = hnsw.query(q, 10, 0)
-      t = performance.now()
-      for (let iter = 0; iter < 10; iter++) hnsw.query(q, 10, 0)
-      const avgHnsw = (performance.now() - t) / 10
+        t = performance.now()
+        const hnswResults = hnsw.query(q, 10, 0)
+        hnswLat.push(performance.now() - t)
 
-      const exactIds = new Set(exactResults.map(r => r.id))
-      const hits = hnswResults.filter(r => exactIds.has(r.id)).length
+        const exactIds = new Set(exactResults.map(r => r.id))
+        hits += hnswResults.filter(r => exactIds.has(r.id)).length
+      }
+      const recall = hits / (queryCount * 10)
 
-      console.log(`\n  ── ${count.toLocaleString()} (${dims}-dim) ──`)
-      console.log(`    Exact avg:            ${formatMs(avgExact)}`)
-      console.log(`    HNSW avg:             ${formatMs(avgHnsw)}`)
-      console.log(`    Speedup:              ${(avgExact / Math.max(avgHnsw, 0.01)).toFixed(1)}x`)
-      console.log(`    Recall@10:            ${(hits / 10 * 100).toFixed(0)}%`)
-      console.log(`    HNSW build time:      included in insert timing above`)
+      console.log(`\n  ── ${count.toLocaleString()} (${dims}-dim, ${queryCount} queries) ──`)
+      percentileReport('Exact', exactLat)
+      percentileReport('HNSW', hnswLat)
+      console.log(`    Exact avg:            ${formatMs(exactLat.reduce((a, b) => a + b, 0) / queryCount)}`)
+      console.log(`    HNSW avg:             ${formatMs(hnswLat.reduce((a, b) => a + b, 0) / queryCount)}`)
+      console.log(`    Speedup (avg):        ${((exactLat.reduce((a, b) => a + b, 0) / Math.max(hnswLat.reduce((a, b) => a + b, 0), 0.01))).toFixed(1)}x`)
+      console.log(`    Recall@10:            ${(recall * 100).toFixed(1)}%`)
+      expect(recall).toBeGreaterThanOrEqual(0.9)
+    })
+  })
+
+  describe('HNSW at embedding dimensions', () => {
+    it('recall@10 >= 0.9 at 5K vectors with 384 dims', { timeout: 300_000 }, () => {
+      const dims = 384
+      const count = 5_000
+      const queryCount = 50
+
+      const exact = new VectorIndex()
+      // High-dimensional random vectors need larger ef than the low-dim tests:
+      // at 384 dims recall with ef=100 is only ~57% but ~98% with efSearch=300.
+      const hnsw = new HNSWIndex(undefined, cosineSimilarity, { M: 16, efConstruction: 200, efSearch: 300 })
+
+      for (let i = 0; i < count; i++) {
+        const v: number[] = []
+        for (let d = 0; d < dims; d++) v.push(rand() * 2 - 1)
+        exact.add(`v${i}`, v)
+        hnsw.add(`v${i}`, v)
+      }
+
+      const queries: number[][] = []
+      for (let qi = 0; qi < queryCount; qi++) {
+        const q: number[] = []
+        for (let d = 0; d < dims; d++) q.push(rand() * 2 - 1)
+        queries.push(q)
+      }
+      for (const q of queries) {
+        exact.query(q, 10, 0)
+        hnsw.query(q, 10, 0)
+      }
+
+      const exactLat: number[] = []
+      const hnswLat: number[] = []
+      let hits = 0
+      for (const q of queries) {
+        let t = performance.now()
+        const exactResults = exact.query(q, 10, 0)
+        exactLat.push(performance.now() - t)
+
+        t = performance.now()
+        const hnswResults = hnsw.query(q, 10, 0)
+        hnswLat.push(performance.now() - t)
+
+        const exactIds = new Set(exactResults.map(r => r.id))
+        hits += hnswResults.filter(r => exactIds.has(r.id)).length
+      }
+      const recall = hits / (queryCount * 10)
+
+      console.log(`\n  ── ${count.toLocaleString()} (${dims}-dim, ${queryCount} queries) ──`)
+      percentileReport('Exact', exactLat)
+      percentileReport('HNSW', hnswLat)
+      console.log(`    Recall@10:            ${(recall * 100).toFixed(1)}%`)
+      expect(recall).toBeGreaterThanOrEqual(0.9)
     })
   })
 
@@ -256,7 +348,7 @@ describe('Stress limits', () => {
         graph.addNode({
           id: `n${i}`,
           type: 't',
-          data: { idx: i, val: Math.random() },
+          data: { idx: i, val: rand() },
           insertedAt: i,
           updatedAt: i,
         })
@@ -290,8 +382,8 @@ describe('Stress limits', () => {
       return {
         id: `n${i}`,
         type: i % 3 === 0 ? 'page' : i % 3 === 1 ? 'post' : 'comment',
-        data: { idx: i, score: Math.random() },
-        vector: Array.from({ length: DIMS }, () => Math.random() * 2 - 1),
+        data: { idx: i, score: rand() },
+        vector: Array.from({ length: DIMS }, () => rand() * 2 - 1),
         insertedAt: i,
         updatedAt: i,
       }
@@ -419,8 +511,8 @@ describe('Stress limits', () => {
       return {
         id: `n${i}`,
         type: i % 3 === 0 ? 'page' : i % 3 === 1 ? 'post' : 'comment',
-        data: { idx: i, score: Math.random() },
-        vector: Array.from({ length: DIMS }, () => Math.random() * 2 - 1),
+        data: { idx: i, score: rand() },
+        vector: Array.from({ length: DIMS }, () => rand() * 2 - 1),
         insertedAt: i,
         updatedAt: i,
       }
