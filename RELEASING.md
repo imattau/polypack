@@ -47,28 +47,32 @@ published, so either:
   `packages/node-native` and each `packages/node-native/npm/*/`), or
 - configure npm trusted publishing for the repository.
 
-### crates.io (trusted publishing)
+### crates.io
 
-No token is stored. The `crate-publish` job fetches a GitHub OIDC token and
-cargo sends it to crates.io, which validates it against the provider you
-register.
+The `crate-publish` job prefers a classic API token from the `CRATES_IO_TOKEN`
+repo secret; it falls back to GitHub OIDC if crates.io trusted publishing is
+registered for this repository (not available on every account).
 
-1. Sign in to [crates.io](https://crates.io) and open
-   **Account settings → OIDC Providers → Add GitHub OIDC provider**.
-2. Fill in:
+**Recommended: classic token**
+
+1. Sign in to [crates.io](https://crates.io) → **Account settings → API
+   tokens → New token** (with `publish-new` scope). Copy the token.
+2. In the GitHub repo → **Settings → Secrets and variables → Actions →
+   New repository secret**: name `CRATES_IO_TOKEN`, value the token.
+
+**Alternative: OIDC trusted publishing**
+
+Only if crates.io shows **Account settings → OIDC Providers**:
+
+1. Add a GitHub OIDC provider with:
    - **Repository owner**: `imattau`
    - **Repository name**: `polypack`
    - **Workflow name**: `release.yml`
-   - **Environment**: leave blank
-3. Save. The provider applies to the `polypack-core` crate (and any future
-   crates you add to the same workflow).
+   - **Environment**: blank
+2. The workflow already fetches the OIDC token with audience `crates.io`.
 
-Requirements: `cargo` ≥ 1.74 (the CI workflow installs stable), the workflow
-has `permissions: id-token: write` (already set), and `release.yml` lives on
-the default branch.
-
-Alternative: set a classic **`CRATES_IO_TOKEN`** repo secret instead; the
-workflow falls back to it when the OIDC token is unavailable.
+Requirements for either path: `cargo` ≥ 1.74 (CI installs stable), workflow
+`id-token: write` (set), `release.yml` on the default branch.
 
 ### PyPI (trusted publishing)
 

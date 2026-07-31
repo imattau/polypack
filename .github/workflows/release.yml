@@ -127,10 +127,11 @@ jobs:
           echo "oidc_token=$token" >> "$GITHUB_OUTPUT"
       - name: Publish polypack-core to crates.io
         env:
-          # Trusted publishing uses the OIDC token; fall back to the
-          # CRATES_IO_TOKEN secret if one is configured.
-          CARGO_REGISTRIES_CRATES_IO_TOKEN: ${{ steps.oidc.outputs.oidc_token || secrets.CRATES_IO_TOKEN }}
-          CARGO_REGISTRY_TOKEN: ${{ steps.oidc.outputs.oidc_token || secrets.CRATES_IO_TOKEN }}
+          # Prefer a classic CRATES_IO_TOKEN secret (crates.io trusted
+          # publishing is not available to every account); fall back to the
+          # OIDC token when the provider is registered.
+          CARGO_REGISTRIES_CRATES_IO_TOKEN: ${{ secrets.CRATES_IO_TOKEN || steps.oidc.outputs.oidc_token }}
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN || steps.oidc.outputs.oidc_token }}
         run: cargo publish -p polypack-core
         working-directory: crates
 
