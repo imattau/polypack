@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "name": "traversal-in-direction",
+  "group": "traversal",
+  "setup": {
+    "nodes": [
+      { "id": "a", "type": "node", "data": { "seed": "a" }, "vector": null, "insertedAt": 1, "updatedAt": 1 },
+      { "id": "b", "type": "node", "data": { "seed": "b" }, "vector": null, "insertedAt": 1, "updatedAt": 1 },
+      { "id": "c", "type": "node", "data": { "seed": "c" }, "vector": null, "insertedAt": 1, "updatedAt": 1 }
+    ],
+    "edges": [
+      { "source": "b", "type": "REFERENCES", "target": "c" },
+      { "source": "a", "type": "REFERENCES", "target": "b" }
+    ]
+  },
+  "operations": [],
+  "expect": {
+    "queries": [
+      {
+        "plan": {
+          "attributes": [{ "field": "seed", "operator": "eq", "value": "c" }],
+          "traversal": [{ "edgeType": "REFERENCES", "direction": "in", "depth": 2 }]
+        },
+        "resultIds": ["c", "b", "a"]
+      }
+    ]
+  }
+}

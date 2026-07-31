@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "name": "delete-operations-replay-idempotent",
+  "group": "recovery",
+  "store": {
+    "wal": [
+      { "kind": "putNode", "node": { "id": "a", "type": "doc", "data": {}, "vector": null, "insertedAt": 1, "updatedAt": 1 } },
+      { "kind": "deleteNode", "id": "a" },
+      { "kind": "putNode", "node": { "id": "b", "type": "doc", "data": {}, "vector": null, "insertedAt": 2, "updatedAt": 2 } }
+    ]
+  },
+  "expect": {
+    "presentNodeIds": ["b"],
+    "absentNodeIds": ["a"],
+    "walRemovedAfterRecovery": true,
+    "snapshotPresentAfterRecovery": true
+  }
+}

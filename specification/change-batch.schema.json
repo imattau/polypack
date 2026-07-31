@@ -1,0 +1,75 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://polypack.dev/schema/change-batch.schema.json",
+  "title": "ChangeBatch",
+  "description": "One logical, atomically-applied graph mutation. Mirrors the TypeScript PersistenceChanges envelope. Ordering is deterministic: deletions are applied before insertions in the order listed below.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["putNodes", "deleteNodeIds", "putEdges", "deleteEdgeIds", "putVectors", "deleteVectorIds"],
+  "properties": {
+    "putNodes": {
+      "type": "array",
+      "items": { "$ref": "#/definitions/node" }
+    },
+    "deleteNodeIds": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "putEdges": {
+      "type": "array",
+      "items": { "$ref": "#/definitions/edge" }
+    },
+    "deleteEdgeIds": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "putVectors": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "vector"],
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "vector": { "$ref": "#/definitions/vector" }
+        }
+      }
+    },
+    "deleteVectorIds": {
+      "type": "array",
+      "items": { "type": "string" }
+    }
+  },
+  "definitions": {
+    "vector": {
+      "type": "array",
+      "items": { "type": "number", "minimum": -1.7976931348623157e308, "maximum": 1.7976931348623157e308 }
+    },
+    "node": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "type", "data", "insertedAt", "updatedAt"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "type": { "type": "string", "minLength": 1 },
+        "data": { "type": "object" },
+        "vector": { "type": ["array", "null"], "items": { "type": "number" } },
+        "insertedAt": { "type": "integer", "minimum": 0 },
+        "updatedAt": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "edge": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "source", "target", "type", "createdAt"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "source": { "type": "string", "minLength": 1 },
+        "target": { "type": "string", "minLength": 1 },
+        "type": { "type": "string", "minLength": 1 },
+        "data": { "type": ["object", "null"] },
+        "createdAt": { "type": "integer", "minimum": 0 }
+      }
+    }
+  }
+}

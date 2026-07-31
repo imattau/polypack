@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "name": "ownership-reference-no-lifecycle-effect",
+  "group": "ownership-reference",
+  "setup": {
+    "nodes": [
+      { "id": "a", "type": "user", "data": {}, "vector": null, "insertedAt": 1, "updatedAt": 1 },
+      { "id": "d1", "type": "document", "data": {}, "vector": null, "insertedAt": 1, "updatedAt": 1 }
+    ],
+    "edges": [
+      { "source": "a", "type": "LINKS", "target": "d1", "ownership": "reference" }
+    ]
+  },
+  "operations": [
+    { "op": "removeNode", "id": "a" }
+  ],
+  "expect": {
+    "presentNodeIds": ["d1"],
+    "absentNodeIds": ["a"]
+  }
+}

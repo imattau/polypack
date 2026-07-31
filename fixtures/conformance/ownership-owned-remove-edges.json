@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "name": "ownership-owned-cascade-on-remove-edges",
+  "group": "ownership-owned",
+  "setup": {
+    "nodes": [
+      { "id": "a", "type": "user", "data": {}, "vector": null, "insertedAt": 1, "updatedAt": 1 },
+      { "id": "d1", "type": "document", "data": {}, "vector": null, "insertedAt": 1, "updatedAt": 1 }
+    ],
+    "edges": [
+      { "source": "a", "type": "AUTHORED", "target": "d1", "ownership": "owned" }
+    ]
+  },
+  "operations": [
+    { "op": "removeEdges", "source": "a", "type": "AUTHORED" }
+  ],
+  "expect": {
+    "presentNodeIds": ["a"],
+    "absentNodeIds": ["d1"]
+  }
+}

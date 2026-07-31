@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "name": "ownership-owned-cascade-on-remove-node",
+  "group": "ownership-owned",
+  "setup": {
+    "nodes": [
+      { "id": "a", "type": "user", "data": { "name": "Alice" }, "vector": null, "insertedAt": 1, "updatedAt": 1 },
+      { "id": "d1", "type": "document", "data": {}, "vector": null, "insertedAt": 1, "updatedAt": 1 },
+      { "id": "d2", "type": "document", "data": {}, "vector": null, "insertedAt": 1, "updatedAt": 1 }
+    ],
+    "edges": [
+      { "source": "a", "type": "AUTHORED", "target": "d1", "ownership": "owned" },
+      { "source": "a", "type": "AUTHORED", "target": "d2", "ownership": "owned" }
+    ]
+  },
+  "operations": [
+    { "op": "removeNode", "id": "a" }
+  ],
+  "expect": {
+    "presentNodeIds": [],
+    "absentNodeIds": ["a", "d1", "d2"],
+    "nodeCount": 0
+  }
+}

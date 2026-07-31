@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "name": "node-crud-basic",
+  "group": "node-crud",
+  "setup": {
+    "nodes": [
+      { "id": "a", "type": "user", "data": { "name": "Alice", "score": 3 }, "vector": null, "insertedAt": 1, "updatedAt": 1 }
+    ]
+  },
+  "operations": [
+    { "op": "addNode", "node": { "id": "b", "type": "user", "data": { "name": "Bob", "score": 5 }, "vector": null, "insertedAt": 2, "updatedAt": 2 } },
+    { "op": "updateNode", "id": "a", "data": { "score": 9 } },
+    { "op": "addNode", "node": { "id": "", "type": "user", "data": {}, "vector": null, "insertedAt": 1, "updatedAt": 1 }, "expectError": "invalid_argument" },
+    { "op": "addNode", "node": { "id": "c", "type": "user", "data": {}, "vector": null, "insertedAt": -1, "updatedAt": 1 }, "expectError": "range_out_of_bounds" },
+    { "op": "removeNode", "id": "b" }
+  ],
+  "expect": {
+    "presentNodeIds": ["a"],
+    "absentNodeIds": ["b"],
+    "nodeCount": 1,
+    "nodeData": { "a": { "name": "Alice", "score": 9 } }
+  }
+}

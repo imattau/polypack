@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "name": "hot-cache-eviction-and-bounded-working-set",
+  "group": "hot-cache-eviction",
+  "graphOptions": { "hotCacheMax": 3 },
+  "setup": {
+    "nodes": [
+      { "id": "n0", "type": "node", "data": { "i": 0 }, "vector": null, "insertedAt": 1, "updatedAt": 1 },
+      { "id": "n1", "type": "node", "data": { "i": 1 }, "vector": null, "insertedAt": 1, "updatedAt": 1 },
+      { "id": "n2", "type": "node", "data": { "i": 2 }, "vector": null, "insertedAt": 1, "updatedAt": 1 },
+      { "id": "n3", "type": "node", "data": { "i": 3 }, "vector": null, "insertedAt": 1, "updatedAt": 1 },
+      { "id": "n4", "type": "node", "data": { "i": 4 }, "vector": null, "insertedAt": 1, "updatedAt": 1 },
+      { "id": "n5", "type": "node", "data": { "i": 5 }, "vector": null, "insertedAt": 1, "updatedAt": 1 },
+      { "id": "n6", "type": "node", "data": { "i": 6 }, "vector": null, "insertedAt": 1, "updatedAt": 1 },
+      { "id": "n7", "type": "node", "data": { "i": 7 }, "vector": null, "insertedAt": 1, "updatedAt": 1 },
+      { "id": "n8", "type": "node", "data": { "i": 8 }, "vector": null, "insertedAt": 1, "updatedAt": 1 },
+      { "id": "n9", "type": "node", "data": { "i": 9 }, "vector": null, "insertedAt": 1, "updatedAt": 1 }
+    ]
+  },
+  "operations": [],
+  "expect": {
+    "loadedSize": 3,
+    "presentNodeIds": ["n7", "n8", "n9"],
+    "absentNodeIds": ["n0", "n1", "n2", "n3", "n4", "n5", "n6"]
+  }
+}

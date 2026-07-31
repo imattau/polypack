@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "name": "query-filter-range-order",
+  "group": "query-filter-order",
+  "setup": {
+    "nodes": [
+      { "id": "d1", "type": "document", "data": { "category": "science", "score": 0.9 }, "vector": null, "insertedAt": 1, "updatedAt": 1 },
+      { "id": "d2", "type": "document", "data": { "category": "science", "score": 0.5 }, "vector": null, "insertedAt": 2, "updatedAt": 2 },
+      { "id": "d3", "type": "document", "data": { "category": "food", "score": 0.8 }, "vector": null, "insertedAt": 3, "updatedAt": 3 },
+      { "id": "d4", "type": "document", "data": { "category": "science", "score": 0.7 }, "vector": null, "insertedAt": 4, "updatedAt": 4 },
+      { "id": "d5", "type": "document", "data": { "category": "food", "score": 0.1 }, "vector": null, "insertedAt": 5, "updatedAt": 5 }
+    ]
+  },
+  "operations": [],
+  "expect": {
+    "queries": [
+      {
+        "plan": {
+          "nodeTypes": ["document"],
+          "attributes": [{ "field": "category", "operator": "eq", "value": "science" }],
+          "order": { "field": "score", "direction": "desc" }
+        },
+        "resultIds": ["d1", "d4", "d2"]
+      },
+      {
+        "plan": {
+          "attributes": [{ "field": "score", "operator": "range", "above": 0.6 }],
+          "order": { "field": "score", "direction": "asc" }
+        },
+        "resultIds": ["d4", "d3", "d1"]
+      }
+    ]
+  }
+}

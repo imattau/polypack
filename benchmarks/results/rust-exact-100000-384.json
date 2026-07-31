@@ -1,0 +1,27 @@
+{
+  "engine": "rust",
+  "hnswConfig": {
+    "M": 16,
+    "efConstruction": 200,
+    "efSearch": 300
+  },
+  "memoryNote": "heapUsedMB is VmRSS; maxRssMB is VmHWM (peak RSS)",
+  "results": [
+    {
+      "avg_ms": 25.176678235,
+      "build_ms": 122.153896,
+      "count": 100000,
+      "dims": 384,
+      "heap_used_mb": 609.33984375,
+      "index": "exact",
+      "max_rss_mb": 609.33984375,
+      "name": "exact-100000-384",
+      "p50": 25.070763,
+      "p95": 25.670168,
+      "p99": 27.554316999999998,
+      "query_count": 200,
+      "recall10": null
+    }
+  ],
+  "topK": 10
+}

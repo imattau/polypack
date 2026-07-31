@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 1,
+  "name": "join-connectivity",
+  "group": "join",
+  "setup": {
+    "nodes": [
+      { "id": "u1", "type": "user", "data": { "name": "Alice" }, "vector": null, "insertedAt": 1, "updatedAt": 1 },
+      { "id": "u2", "type": "user", "data": { "name": "Bob" }, "vector": null, "insertedAt": 2, "updatedAt": 2 },
+      { "id": "u3", "type": "user", "data": { "name": "Carol" }, "vector": null, "insertedAt": 3, "updatedAt": 3 },
+      { "id": "b1", "type": "book", "data": { "genre": "sci-fi" }, "vector": null, "insertedAt": 4, "updatedAt": 4 },
+      { "id": "b2", "type": "book", "data": { "genre": "fantasy" }, "vector": null, "insertedAt": 5, "updatedAt": 5 }
+    ],
+    "edges": [
+      { "source": "u1", "type": "RATED", "target": "b1" },
+      { "source": "u2", "type": "RATED", "target": "b2" },
+      { "source": "u2", "type": "RATED", "target": "b1" }
+    ]
+  },
+  "operations": [],
+  "expect": {
+    "queries": [
+      {
+        "plan": {
+          "nodeTypes": ["user"],
+          "joins": [{ "edgeType": "RATED", "direction": "out" }]
+        },
+        "resultIds": ["u1", "u2"]
+      }
+    ]
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "name": "truncated-wal-tail-tolerated",
+  "group": "recovery",
+  "store": {
+    "wal": [
+      { "kind": "putNode", "node": { "id": "a", "type": "doc", "data": {}, "vector": null, "insertedAt": 1, "updatedAt": 1 } },
+      { "kind": "putNode", "node": { "id": "b", "type": "doc", "data": {}, "vector": null, "insertedAt": 2, "updatedAt": 2 } }
+    ],
+    "corruptTailHex": "00000004"
+  },
+  "expect": {
+    "presentNodeIds": ["a", "b"],
+    "walRemovedAfterRecovery": true,
+    "snapshotPresentAfterRecovery": true
+  }
+}

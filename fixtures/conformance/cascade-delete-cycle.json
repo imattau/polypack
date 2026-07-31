@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "name": "cascade-delete-cycle-safe",
+  "group": "cascade-delete",
+  "setup": {
+    "nodes": [
+      { "id": "a", "type": "node", "data": {}, "vector": null, "insertedAt": 1, "updatedAt": 1 },
+      { "id": "b", "type": "node", "data": {}, "vector": null, "insertedAt": 1, "updatedAt": 1 }
+    ],
+    "edges": [
+      { "source": "a", "type": "OWNS", "target": "b", "ownership": "owned" },
+      { "source": "b", "type": "OWNS", "target": "a", "ownership": "owned" }
+    ]
+  },
+  "operations": [
+    { "op": "removeNode", "id": "a" }
+  ],
+  "expect": {
+    "presentNodeIds": [],
+    "absentNodeIds": ["a", "b"],
+    "nodeCount": 0
+  }
+}

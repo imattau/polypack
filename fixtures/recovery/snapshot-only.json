@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "name": "snapshot-only-load",
+  "group": "recovery",
+  "store": {
+    "snapshot": {
+      "nodes": [
+        { "id": "s1", "type": "doc", "data": { "v": 1 }, "vector": null, "insertedAt": 1, "updatedAt": 1 },
+        { "id": "s2", "type": "doc", "data": { "v": 2 }, "vector": null, "insertedAt": 2, "updatedAt": 2 }
+      ],
+      "edges": [
+        { "id": "s1::REL::s2", "source": "s1", "type": "REL", "target": "s2", "data": null, "createdAt": 1 }
+      ],
+      "vectors": [
+        ["s1", [0.1, 0.2]]
+      ]
+    }
+  },
+  "expect": {
+    "presentNodeIds": ["s1", "s2"],
+    "vectors": { "s1": [0.1, 0.2] },
+    "walRemovedAfterRecovery": true,
+    "snapshotPresentAfterRecovery": true
+  }
+}

@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "name": "traversal-out-in",
+  "group": "traversal",
+  "setup": {
+    "nodes": [
+      { "id": "a", "type": "node", "data": { "seed": "a" }, "vector": null, "insertedAt": 1, "updatedAt": 1 },
+      { "id": "b", "type": "node", "data": { "seed": "b" }, "vector": null, "insertedAt": 1, "updatedAt": 1 },
+      { "id": "c", "type": "node", "data": { "seed": "c" }, "vector": null, "insertedAt": 1, "updatedAt": 1 },
+      { "id": "d", "type": "node", "data": { "seed": "d" }, "vector": null, "insertedAt": 1, "updatedAt": 1 }
+    ],
+    "edges": [
+      { "source": "a", "type": "REFERENCES", "target": "b" },
+      { "source": "b", "type": "REFERENCES", "target": "c" },
+      { "source": "c", "type": "REFERENCES", "target": "d" }
+    ]
+  },
+  "operations": [],
+  "expect": {
+    "queries": [
+      {
+        "plan": {
+          "attributes": [{ "field": "seed", "operator": "eq", "value": "a" }],
+          "traversal": [{ "edgeType": "REFERENCES", "direction": "out", "depth": 2 }]
+        },
+        "resultIds": ["a", "b", "c"]
+      }
+    ]
+  }
+}

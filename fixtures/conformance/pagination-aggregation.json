@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "name": "pagination-and-aggregation",
+  "group": "pagination-aggregation",
+  "setup": {
+    "nodes": [
+      { "id": "p1", "type": "item", "data": { "score": 1 }, "vector": null, "insertedAt": 1, "updatedAt": 1 },
+      { "id": "p2", "type": "item", "data": { "score": 2 }, "vector": null, "insertedAt": 2, "updatedAt": 2 },
+      { "id": "p3", "type": "item", "data": { "score": 3 }, "vector": null, "insertedAt": 3, "updatedAt": 3 },
+      { "id": "p4", "type": "item", "data": { "score": 4 }, "vector": null, "insertedAt": 4, "updatedAt": 4 },
+      { "id": "p5", "type": "item", "data": { "score": 5 }, "vector": null, "insertedAt": 5, "updatedAt": 5 }
+    ]
+  },
+  "operations": [],
+  "expect": {
+    "queries": [
+      {
+        "plan": {
+          "order": { "field": "score", "direction": "desc" },
+          "offset": 1,
+          "limit": 2
+        },
+        "resultIds": ["p4", "p3"]
+      }
+    ],
+    "aggregate": { "field": "score", "op": "sum", "value": 15, "count": 5 }
+  }
+}

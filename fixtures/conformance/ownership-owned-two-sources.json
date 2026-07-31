@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "name": "ownership-owned-second-source-keeps-target",
+  "group": "ownership-owned",
+  "setup": {
+    "nodes": [
+      { "id": "a1", "type": "user", "data": {}, "vector": null, "insertedAt": 1, "updatedAt": 1 },
+      { "id": "a2", "type": "user", "data": {}, "vector": null, "insertedAt": 1, "updatedAt": 1 },
+      { "id": "d1", "type": "document", "data": {}, "vector": null, "insertedAt": 1, "updatedAt": 1 }
+    ],
+    "edges": [
+      { "source": "a1", "type": "AUTHORED", "target": "d1", "ownership": "owned" },
+      { "source": "a2", "type": "AUTHORED", "target": "d1", "ownership": "owned" }
+    ]
+  },
+  "operations": [
+    { "op": "removeNode", "id": "a1" }
+  ],
+  "expect": {
+    "presentNodeIds": ["a2", "d1"],
+    "absentNodeIds": ["a1"]
+  }
+}

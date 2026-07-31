@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "name": "ownership-shared-orphan-hook",
+  "group": "ownership-shared",
+  "orphanAware": true,
+  "setup": {
+    "nodes": [
+      { "id": "a", "type": "user", "data": {}, "vector": null, "insertedAt": 1, "updatedAt": 1 },
+      { "id": "d1", "type": "document", "data": {}, "vector": null, "insertedAt": 1, "updatedAt": 1 }
+    ],
+    "edges": [
+      { "source": "a", "type": "SHARED", "target": "d1", "ownership": "shared" }
+    ]
+  },
+  "operations": [
+    { "op": "removeEdges", "source": "a", "type": "SHARED" }
+  ],
+  "expect": {
+    "presentNodeIds": ["a", "d1"],
+    "orphanEvents": ["d1"]
+  }
+}

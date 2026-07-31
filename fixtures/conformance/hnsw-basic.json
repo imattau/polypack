@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "name": "hnsw-basic-recall",
+  "group": "hnsw",
+  "setup": {
+    "nodes": [
+      { "id": "a0", "type": "vec", "data": {}, "vector": [1, 0, 0, 0, 0, 0, 0, 0], "insertedAt": 1, "updatedAt": 1 },
+      { "id": "a1", "type": "vec", "data": {}, "vector": [0.9, 0.1, 0, 0, 0, 0, 0, 0], "insertedAt": 2, "updatedAt": 2 },
+      { "id": "a2", "type": "vec", "data": {}, "vector": [0.8, 0.2, 0, 0, 0, 0, 0, 0], "insertedAt": 3, "updatedAt": 3 },
+      { "id": "a3", "type": "vec", "data": {}, "vector": [0.7, 0.3, 0, 0, 0, 0, 0, 0], "insertedAt": 4, "updatedAt": 4 },
+      { "id": "a4", "type": "vec", "data": {}, "vector": [0.6, 0.4, 0, 0, 0, 0, 0, 0], "insertedAt": 5, "updatedAt": 5 },
+      { "id": "a5", "type": "vec", "data": {}, "vector": [0.5, 0.5, 0, 0, 0, 0, 0, 0], "insertedAt": 6, "updatedAt": 6 },
+      { "id": "a6", "type": "vec", "data": {}, "vector": [0, 1, 0, 0, 0, 0, 0, 0], "insertedAt": 7, "updatedAt": 7 },
+      { "id": "a7", "type": "vec", "data": {}, "vector": [0, 0, 1, 0, 0, 0, 0, 0], "insertedAt": 8, "updatedAt": 8 },
+      { "id": "a8", "type": "vec", "data": {}, "vector": [0, 0, 0, 1, 0, 0, 0, 0], "insertedAt": 9, "updatedAt": 9 },
+      { "id": "a9", "type": "vec", "data": {}, "vector": [0, 0, 0, 0, 1, 0, 0, 0], "insertedAt": 10, "updatedAt": 10 },
+      { "id": "a10", "type": "vec", "data": {}, "vector": [0, 0, 0, 0, 0, 1, 0, 0], "insertedAt": 11, "updatedAt": 11 },
+      { "id": "a11", "type": "vec", "data": {}, "vector": [0, 0, 0, 0, 0, 0, 1, 0], "insertedAt": 12, "updatedAt": 12 }
+    ]
+  },
+  "operations": [],
+  "expect": {
+    "hnswSearches": [
+      { "vector": [1, 0, 0, 0, 0, 0, 0, 0], "topK": 5, "minOverlap": 5, "resultIds": ["a0", "a1", "a2", "a3", "a4"] }
+    ],
+    "hnswSize": 12
+  }
+}

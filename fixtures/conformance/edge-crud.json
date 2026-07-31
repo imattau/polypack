@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "name": "edge-crud-basic",
+  "group": "edge-crud",
+  "setup": {
+    "nodes": [
+      { "id": "a", "type": "node", "data": {}, "vector": null, "insertedAt": 1, "updatedAt": 1 },
+      { "id": "b", "type": "node", "data": {}, "vector": null, "insertedAt": 1, "updatedAt": 1 },
+      { "id": "c", "type": "node", "data": {}, "vector": null, "insertedAt": 1, "updatedAt": 1 }
+    ]
+  },
+  "operations": [
+    { "op": "addEdge", "source": "a", "type": "REL", "target": "b" },
+    { "op": "addEdge", "source": "a", "type": "REL", "target": "b" },
+    { "op": "addEdge", "source": "", "type": "REL", "target": "b", "expectError": "invalid_argument" },
+    { "op": "addEdge", "source": "a::bad", "type": "REL", "target": "b", "expectError": "range_out_of_bounds" },
+    { "op": "addEdge", "source": "c", "type": "REL", "target": "b" },
+    { "op": "removeEdges", "source": "a", "type": "REL" }
+  ],
+  "expect": {
+    "presentNodeIds": ["a", "b", "c"],
+    "edgeTargets": [
+      { "source": "c", "type": "REL", "targets": ["b"] },
+      { "source": "a", "type": "REL", "targets": [] }
+    ]
+  }
+}

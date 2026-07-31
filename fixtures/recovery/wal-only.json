@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "name": "wal-only-recovery-without-snapshot",
+  "group": "recovery",
+  "store": {
+    "wal": [
+      { "kind": "putNode", "node": { "id": "w1", "type": "doc", "data": {}, "vector": null, "insertedAt": 1, "updatedAt": 1 } },
+      { "kind": "putNode", "node": { "id": "w2", "type": "doc", "data": {}, "vector": null, "insertedAt": 2, "updatedAt": 2 } }
+    ]
+  },
+  "expect": {
+    "presentNodeIds": ["w1", "w2"],
+    "walRemovedAfterRecovery": true,
+    "snapshotPresentAfterRecovery": true
+  }
+}

@@ -66,8 +66,13 @@
     "test": "vitest run --exclude 'tests/stress.test.ts'",
     "test:all": "vitest run",
     "test:gc": "NODE_OPTIONS=\"--expose-gc\" vitest run tests/cache-growth.test.ts",
+    "test:conformance": "vitest run tests/conformance",
     "test:stress": "NODE_OPTIONS=\"--expose-gc\" vitest run tests/stress.test.ts",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "bench:ts": "tsx benchmarks/run-ts.ts",
+    "bench:rust": "cargo run --release -p polypack-core --bin compare -- --out benchmarks/results/rust-all.json",
+    "bench:compare": "tsx benchmarks/compare.ts",
+    "bench:conformance": "npm run test:conformance"
   },
   "engines": {
     "node": ">=18"

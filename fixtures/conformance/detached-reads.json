@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "name": "detached-reads-protect-internal-state",
+  "group": "detached-reads",
+  "setup": {
+    "nodes": [
+      { "id": "a", "type": "node", "data": { "name": "Alice", "score": 3 }, "vector": [0.1, 0.2, 0.3], "insertedAt": 1, "updatedAt": 1 }
+    ]
+  },
+  "operations": [
+    { "op": "mutateDetached", "id": "a" }
+  ],
+  "expect": {
+    "nodeData": { "a": { "name": "Alice", "score": 3 } },
+    "nodeVector": { "a": [0.1, 0.2, 0.3] }
+  }
+}

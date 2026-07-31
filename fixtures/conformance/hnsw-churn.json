@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "name": "hnsw-remove-readd-update",
+  "group": "hnsw",
+  "setup": {
+    "nodes": [
+      { "id": "a0", "type": "vec", "data": {}, "vector": [1, 0, 0, 0, 0, 0, 0, 0], "insertedAt": 1, "updatedAt": 1 },
+      { "id": "a1", "type": "vec", "data": {}, "vector": [0.9, 0.1, 0, 0, 0, 0, 0, 0], "insertedAt": 2, "updatedAt": 2 },
+      { "id": "a2", "type": "vec", "data": {}, "vector": [0.8, 0.2, 0, 0, 0, 0, 0, 0], "insertedAt": 3, "updatedAt": 3 },
+      { "id": "a3", "type": "vec", "data": {}, "vector": [0.7, 0.3, 0, 0, 0, 0, 0, 0], "insertedAt": 4, "updatedAt": 4 },
+      { "id": "a4", "type": "vec", "data": {}, "vector": [0.6, 0.4, 0, 0, 0, 0, 0, 0], "insertedAt": 5, "updatedAt": 5 },
+      { "id": "a5", "type": "vec", "data": {}, "vector": [0.5, 0.5, 0, 0, 0, 0, 0, 0], "insertedAt": 6, "updatedAt": 6 },
+      { "id": "a6", "type": "vec", "data": {}, "vector": [0, 1, 0, 0, 0, 0, 0, 0], "insertedAt": 7, "updatedAt": 7 },
+      { "id": "a7", "type": "vec", "data": {}, "vector": [0, 0, 1, 0, 0, 0, 0, 0], "insertedAt": 8, "updatedAt": 8 }
+    ]
+  },
+  "operations": [
+    { "op": "hnswRemove", "id": "a1" },
+    { "op": "hnswAdd", "id": "a1", "vector": [0, 1, 0, 0, 0, 0, 0, 0] },
+    { "op": "hnswUpdate", "id": "a0", "vector": [0, 1, 0, 0, 0, 0, 0, 0] }
+  ],
+  "expect": {
+    "hnswSize": 8,
+    "hnswVector": {
+      "a1": [0, 1, 0, 0, 0, 0, 0, 0],
+      "a0": [0, 1, 0, 0, 0, 0, 0, 0]
+    },
+    "hnswSearches": [
+      { "vector": [0, 1, 0, 0, 0, 0, 0, 0], "topK": 3, "minOverlap": 3, "resultIds": ["a6", "a0", "a1"] }
+    ]
+  }
+}

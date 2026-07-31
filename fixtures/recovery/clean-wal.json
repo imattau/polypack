@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "name": "clean-wal-replayed-on-top-of-snapshot",
+  "group": "recovery",
+  "store": {
+    "snapshot": {
+      "nodes": [
+        { "id": "s", "type": "doc", "data": { "v": 0 }, "vector": null, "insertedAt": 1, "updatedAt": 1 }
+      ],
+      "edges": [],
+      "vectors": []
+    },
+    "wal": [
+      { "kind": "putNode", "node": { "id": "w", "type": "doc", "data": { "v": 1 }, "vector": null, "insertedAt": 2, "updatedAt": 2 } }
+    ]
+  },
+  "expect": {
+    "presentNodeIds": ["s", "w"],
+    "walRemovedAfterRecovery": true,
+    "snapshotPresentAfterRecovery": true
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "name": "exact-vector-search-and-dimension-errors",
+  "group": "exact-vector",
+  "setup": {
+    "nodes": [
+      { "id": "x", "type": "vec", "data": {}, "vector": [1, 0, 0], "insertedAt": 1, "updatedAt": 1 },
+      { "id": "y", "type": "vec", "data": {}, "vector": [0.8, 0.6, 0], "insertedAt": 2, "updatedAt": 2 },
+      { "id": "z", "type": "vec", "data": {}, "vector": [0.6, 0.8, 0], "insertedAt": 3, "updatedAt": 3 },
+      { "id": "w", "type": "vec", "data": {}, "vector": [0, 1, 0], "insertedAt": 4, "updatedAt": 4 },
+      { "id": "u", "type": "vec", "data": {}, "vector": [0, 0, 1], "insertedAt": 5, "updatedAt": 5 }
+    ]
+  },
+  "operations": [],
+  "expect": {
+    "exactSearches": [
+      { "vector": [1, 0, 0], "topK": 3, "resultIds": ["x", "y", "z"] },
+      { "vector": [1, 0], "topK": 3, "resultIds": [], "expectError": "dimension_mismatch" }
+    ]
+  }
+}

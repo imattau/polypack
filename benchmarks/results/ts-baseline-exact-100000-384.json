@@ -1,0 +1,30 @@
+{
+  "engine": "typescript",
+  "generated": "2026-07-31T04:01:11.983Z",
+  "seed": 42,
+  "prng": "mulberry32",
+  "hnswConfig": {
+    "M": 16,
+    "efConstruction": 200,
+    "efSearch": 300
+  },
+  "topK": 10,
+  "memoryNote": "heapUsedMB/maxRssMB are process values at end of run",
+  "results": [
+    {
+      "name": "exact-100000-384",
+      "index": "exact",
+      "count": 100000,
+      "dims": 384,
+      "buildMs": 279.73055899999997,
+      "queryCount": 200,
+      "avgMs": 56.386011869999976,
+      "p50": 54.3444870000003,
+      "p95": 62.114927000000534,
+      "p99": 62.49895800000013,
+      "recall10": null,
+      "heapUsedMB": 59.126365661621094,
+      "maxRssMB": 759.6875
+    }
+  ]
+}
