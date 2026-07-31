@@ -121,16 +121,16 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Fetch crates.io OIDC token
         id: oidc
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const id_token = await core.getIDToken('crates.io')
-            core.setOutput('oidc_token', id_token)
+        run: |
+          token=$(curl -sSf -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=crates.io" | jq -r .value)
+          test -n "$token" || { echo "OIDC token fetch failed"; exit 1; }
+          echo "oidc_token=$token" >> "$GITHUB_OUTPUT"
       - name: Publish polypack-core to crates.io
         env:
           # Trusted publishing uses the OIDC token; fall back to the
           # CRATES_IO_TOKEN secret if one is configured.
           CARGO_REGISTRIES_CRATES_IO_TOKEN: ${{ steps.oidc.outputs.oidc_token || secrets.CRATES_IO_TOKEN }}
+          CARGO_REGISTRY_TOKEN: ${{ steps.oidc.outputs.oidc_token || secrets.CRATES_IO_TOKEN }}
         run: cargo publish -p polypack-core
         working-directory: crates
 
@@ -169,8 +169,9 @@ jobs:
         with:
           pattern: release-wheel-*
           merge-multiple: true
+      - name: Collect wheels
+        run: |
+          mkdir -p dist
+          mv "$GITHUB_WORKSPACE"/*.whl dist/
       - name: Publish wheels to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
-        with:
-          # download-artifact merge-multiple places wheels at the workspace root
-          packages-dir: .
