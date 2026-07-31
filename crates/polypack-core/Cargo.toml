@@ -4,6 +4,10 @@ description = "Portable embedded property-graph and vector-search core for polyp
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+readme = "../../README.md"
+repository = "https://github.com/imattau/polypack"
+keywords = ["graph", "vector-search", "hnsw", "persistence", "embedded"]
+categories = ["data-structures", "algorithms", "database"]
 
 [lib]
 name = "polypack_core"

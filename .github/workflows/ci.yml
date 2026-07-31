@@ -113,7 +113,7 @@ jobs:
           npm run build:js --prefix packages/node-native
           cd packages/node-native
           npx napi create-npm-dirs
-          for f in ../*.node ../polypack-native.*.node; do
+          for f in "$GITHUB_WORKSPACE"/polypack-native.*.node; do
             [ -e "$f" ] || continue
             case "$(basename "$f")" in
               *linux-x64-gnu.node)   d=npm/linux-x64-gnu ;;

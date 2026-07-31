@@ -1,0 +1,157 @@
+name: Release
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  release-candidate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: dtolnay/rust-toolchain@stable
+      - run: npm ci
+      - run: npm run check
+      - run: cargo test --release --manifest-path crates/Cargo.toml
+      - run: cargo clippy --all-targets --manifest-path crates/Cargo.toml -- -D warnings
+      - name: Python extension + tests
+        run: |
+          pip install maturin numpy pytest
+          maturin develop --manifest-path crates/polypack-python/Cargo.toml
+          python -m pytest -q
+        working-directory: python
+
+  native-publish:
+    needs: release-candidate
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            triple: x86_64-unknown-linux-gnu
+          - os: ubuntu-24.04-arm
+            triple: aarch64-unknown-linux-gnu
+          - os: macos-latest
+            triple: x86_64-apple-darwin
+          - os: macos-14
+            triple: aarch64-apple-darwin
+          - os: windows-latest
+            triple: x86_64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          registry-url: https://registry.npmjs.org/
+      - uses: dtolnay/rust-toolchain@stable
+      - run: npm ci
+      - name: Build native addon for ${{ matrix.triple }}
+        run: npm run build:binary --prefix packages/node-native
+      - name: Upload addon
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-addon-${{ matrix.triple }}
+          path: packages/node-native/dist/polypack-native.*.node
+          if-no-files-found: error
+
+  native-package-publish:
+    needs: native-publish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          registry-url: https://registry.npmjs.org/
+      - run: npm ci
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-addon-*
+          merge-multiple: true
+      - name: Stage addons and publish platform packages
+        run: |
+          set -e
+          npm run build:js --prefix packages/node-native
+          cd packages/node-native
+          npx napi create-npm-dirs
+          for f in "$GITHUB_WORKSPACE"/polypack-native.*.node; do
+            [ -e "$f" ] || continue
+            case "$(basename "$f")" in
+              *linux-x64-gnu.node)   d=npm/linux-x64-gnu ;;
+              *linux-arm64-gnu.node) d=npm/linux-arm64-gnu ;;
+              *darwin-x64.node)      d=npm/darwin-x64 ;;
+              *darwin-arm64.node)    d=npm/darwin-arm64 ;;
+              *win32-x64-msvc.node)  d=npm/win32-x64-msvc ;;
+              *) continue ;;
+            esac
+            cp "$f" "$d/"
+          done
+          for pkg in npm/*/; do
+            npm publish "$pkg" --provenance --access public
+          done
+      - name: Publish wrapper package
+        working-directory: packages/node-native
+        run: npm publish --provenance --access public
+
+  crate-publish:
+    needs: release-candidate
+    runs-on: ubuntu-latest
+    env:
+      CARGO_REGISTRIES_CRATES_IO_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Publish polypack-core to crates.io
+        run: cargo publish -p polypack-core
+        working-directory: crates
+
+  wheel-publish:
+    needs: release-candidate
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install maturin
+        run: pip install maturin
+      - name: Build wheel
+        run: maturin build --release --out dist
+        working-directory: python
+      - name: Upload wheel
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-wheel-${{ runner.os }}
+          path: python/dist/*.whl
+          if-no-files-found: error
+
+  wheel-publish-upload:
+    needs: wheel-publish
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-wheel-*
+          merge-multiple: true
+      - name: Publish wheels to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1

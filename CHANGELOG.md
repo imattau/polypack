@@ -3,6 +3,22 @@
 All notable changes to this project are documented here. This project follows
 [Semantic Versioning](https://semver.org/).
 
+## [2.4.0] - 2026-07-31
+
+### Added
+
+- Release hardening: per-platform native npm packages
+  (`polypack-native-<triple>`) with `optionalDependencies`, an abi3 Python
+  wheel build, a clean-venv 100K-vector example, cross-platform CI
+  (macOS/Windows) for Rust, native, and Python, a `package` job running the
+  release-candidate suite (clean Rust-free native install + clean-venv wheel
+  install), and `RELEASING.md` documenting the coordinated versioning and
+  release rules.
+- Rust persistence state machine with byte-compatible v1 codecs, query-plan
+  executor, Node native (NAPI-RS) and Python (PyO3) bindings, and the
+  conformance harness shipped as part of the multi-language roadmap
+  (Phases 0-5).
+
 ## [Unreleased]
 
 ### Breaking changes

@@ -15,6 +15,37 @@ The native stack shares one version and is released together:
 The TypeScript package follows its own semver (currently `2.x`); it is not
 bumped for native-stack releases unless its public API changes.
 
+## How to release
+
+1. Bump versions (TS package + native stack as needed), update
+   `CHANGELOG.md`, commit, and push `master`.
+2. Create a GitHub release tagged `v<ts-version>` (e.g. `v2.4.0`). The release
+   event triggers `.github/workflows/release.yml` and the existing
+   `.github/workflows/publish-npm.yml`.
+
+The release workflow publishes, in order:
+
+- **npm per-platform packages** then the **native wrapper** (`native-publish`
+  builds every addon on a matching runner; `native-package-publish` stages and
+  publishes with npm provenance).
+- **`polypack-core`** to crates.io (`crate-publish`, uses the
+  `CRATES_IO_TOKEN` secret).
+- **Python wheels** to PyPI (`wheel-publish` builds abi3 wheels per OS;
+  `wheel-publish-upload` publishes via OIDC trusted publishing for the
+  `release` environment).
+- **TypeScript package** via the existing `publish-npm.yml`.
+
+## One-time registry setup (required before the first release)
+
+- **npm**: publish once manually with an auth token (or configure trusted
+  publishing) so the packages exist; `NODE_AUTH_TOKEN` is provided by the
+  npmjs registry setup.
+- **crates.io**: add the `CRATES_IO_TOKEN` repo secret, or configure the repo
+  as a trusted publisher and switch `crate-publish` to the OIDC token.
+- **PyPI**: configure trusted publishing for this repository's `release`
+  environment (see [pypa/gh-action-pypi-publish](https://github.com/pypa/gh-action-pypi-publish)),
+  or set a `PYPI_TOKEN` secret.
+
 ## Rules
 
 - **Native packages are built in CI, never on a maintainer workstation.** Each
