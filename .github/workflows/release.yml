@@ -160,12 +160,17 @@ jobs:
           echo "oidc_token=$token" >> "$GITHUB_OUTPUT"
       - name: Publish polypack-core to crates.io
         env:
-          # Prefer a classic CRATES_IO_TOKEN secret (crates.io trusted
-          # publishing is not available to every account); fall back to the
-          # OIDC token when the provider is registered.
+          # Prefer a classic CRATES_IO_TOKEN secret if set; otherwise use the
+          # OIDC token (crates.io trusted publishing for this workflow).
           CARGO_REGISTRIES_CRATES_IO_TOKEN: ${{ secrets.CRATES_IO_TOKEN || steps.oidc.outputs.oidc_token }}
           CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN || steps.oidc.outputs.oidc_token }}
-        run: cargo publish -p polypack-core
+        run: |
+          VERSION=$(cargo metadata --no-deps --format-version 1 --manifest-path crates/polypack-core/Cargo.toml | jq -r '.packages[0].version')
+          if curl -sf -A "polypack-release" "https://crates.io/api/v1/crates/polypack-core/$VERSION" >/dev/null 2>&1; then
+            echo "skip polypack-core@$VERSION (already published)"
+          else
+            cargo publish -p polypack-core
+          fi
         working-directory: crates
 
   wheel-publish:
