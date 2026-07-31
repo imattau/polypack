@@ -74,7 +74,11 @@ jobs:
             triple: x86_64-unknown-linux-gnu
           - os: ubuntu-24.04-arm
             triple: aarch64-unknown-linux-gnu
-          - os: macos-13
+          # macos-13 (Intel-hosted) runners have been chronically stuck
+          # queued for many hours on GitHub's shared pool; cross-compile
+          # darwin-x64 from the arm64 macos-14 runner instead (Xcode's
+          # linker handles this pair natively — no extra SDK needed).
+          - os: macos-14
             triple: x86_64-apple-darwin
           - os: macos-14
             triple: aarch64-apple-darwin
@@ -88,9 +92,11 @@ jobs:
           cache: npm
           registry-url: https://registry.npmjs.org/
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.triple }}
       - run: npm ci
       - name: Build native addon for ${{ matrix.triple }}
-        run: npm run build:binary --prefix packages/node-native
+        run: npm run build:binary --prefix packages/node-native -- --target ${{ matrix.triple }}
       - name: Upload addon
         uses: actions/upload-artifact@v4
         with:
