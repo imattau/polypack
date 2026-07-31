@@ -26,6 +26,7 @@ jobs:
       - run: cargo test --release --manifest-path crates/Cargo.toml
       - run: cargo clippy --all-targets --manifest-path crates/Cargo.toml -- -D warnings
       - name: Python tests against the built wheel
+        shell: bash
         env:
           POLYPACK_FIXTURES: ${{ github.workspace }}/fixtures/conformance
         run: |

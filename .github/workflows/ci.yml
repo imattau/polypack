@@ -76,6 +76,7 @@ jobs:
         run: maturin build --release --out dist
         working-directory: python
       - name: Install wheel
+        shell: bash
         run: pip install dist/*.whl
         working-directory: python
       - name: Run Python tests against the installed wheel
