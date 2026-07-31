@@ -10,6 +10,8 @@ name = "polypack_python"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-pyo3 = { version = "0.24", features = ["abi3-py38"] }
+pyo3 = { version = "0.24", features = ["abi3-py38", "serde"] }
 numpy = "0.24"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
 polypack-core = { path = "../polypack-core" }

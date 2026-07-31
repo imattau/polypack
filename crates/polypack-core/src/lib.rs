@@ -11,10 +11,12 @@ pub mod hnsw;
 pub mod model;
 pub mod query;
 pub mod rng;
+pub mod storage;
 pub mod vector;
 
 pub use error::{PolypackError, Result};
 pub use hnsw::{HnswConfig, HnswIndex};
 pub use model::{ChangeBatch, Edge, Node, VectorEntry};
 pub use query::{QueryPlan, QueryResult};
+pub use storage::{Durability, InMemoryStorage, Storage, Store, StoreConfig, WalEntry};
 pub use vector::{ExactIndex, DistanceFn};

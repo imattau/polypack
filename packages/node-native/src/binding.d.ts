@@ -58,5 +58,25 @@ export interface NativeHnswIndexBinding {
 export interface NativeBinding {
   NativeExactIndex: new (distance?: string) => NativeExactIndexBinding
   NativeHnswIndex: new (config?: NativeHnswConfig, levelSeed?: number) => NativeHnswIndexBinding
+  NativeStore: new (directory: string, compactThreshold?: number) => NativeStoreBinding
   engineInfo(): EngineInfo
+}
+
+export interface NativeChangeBatch {
+  putNodes?: unknown[]
+  deleteNodeIds?: string[]
+  putEdges?: unknown[]
+  deleteEdgeIds?: string[]
+  putVectors?: Array<{ id: string; vector: number[] }>
+  deleteVectorIds?: string[]
+}
+
+export interface NativeStoreBinding {
+  apply(changes: NativeChangeBatch): void
+  nodeIds(): string[]
+  getNode(id: string): Record<string, unknown> | undefined
+  allEdges(): Array<Record<string, unknown>>
+  allVectors(): Array<[string, number[]]>
+  compact(): void
+  close(): void
 }

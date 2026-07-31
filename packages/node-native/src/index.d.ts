@@ -73,3 +73,28 @@ export function createNativeVectorIndex(): (onChange: (id: string) => void) => N
 
 /** Factory returning a native HNSW index. */
 export function createNativeHnswIndex(onChange?: (id: string) => void): NativeHnswIndex
+
+export interface NativeChangeBatch {
+  putNodes?: Array<Record<string, unknown>>
+  deleteNodeIds?: string[]
+  putEdges?: Array<Record<string, unknown>>
+  deleteEdgeIds?: string[]
+  putVectors?: Array<{ id: string; vector: number[] }>
+  deleteVectorIds?: string[]
+}
+
+/**
+ * Directory-backed durable store over the Rust persistence state machine.
+ * Files (`snapshot.msgpack`, `wal.msgpack`) are byte-compatible with the
+ * TypeScript `BinaryStoreAdapter`.
+ */
+export class NativeStore {
+  constructor(directory: string, compactThreshold?: number)
+  apply(changes: NativeChangeBatch): void
+  nodeIds(): string[]
+  getNode(id: string): Record<string, unknown> | undefined
+  allEdges(): Array<Record<string, unknown>>
+  allVectors(): Array<[string, number[]]>
+  compact(): void
+  close(): void
+}

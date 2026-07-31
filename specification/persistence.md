@@ -126,3 +126,14 @@ operations reject.
 Recovery fixtures exercise: clean WAL, snapshot only, partial (truncated) WAL
 tail, and corrupt mid-stream frame. Acknowledged durable batches must survive
 forced termination in every case.
+
+## 12. Implementation status
+
+- The TypeScript reference (`src/persistence/binary-store.ts` +
+  `binary-format.ts`) is the current production implementation.
+- `crates/polypack-core/src/storage` provides a Rust state machine with
+  byte-for-byte compatible v1 codecs. The shared recovery fixtures pass
+  against it, and cross-language round-trip tests confirm the TypeScript and
+  Rust stores read each other's files. Python (`NativeStore`) and Node native
+  (`NativeStore`) bindings expose it; the TypeScript adapter remains pure-TS
+  for now.

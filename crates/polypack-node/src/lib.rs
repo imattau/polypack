@@ -274,3 +274,139 @@ impl NativeHnswIndex {
     self.inner.borrow().size() as u32
   }
 }
+
+// ── Storage / NativeStore ──
+
+use polypack_core::model::ChangeBatch as CoreChangeBatch;
+use polypack_core::storage::{Durability, Store as CoreStore, StoreConfig, Storage};
+use std::path::PathBuf;
+
+/// Filesystem byte storage used by the native store (host adapter for Node).
+struct FsStorage {
+    dir: PathBuf,
+}
+
+impl Storage for FsStorage {
+    fn read(&self, name: &str) -> std::result::Result<Option<Vec<u8>>, polypack_core::PolypackError> {
+        match std::fs::read(self.dir.join(name)) {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(polypack_core::PolypackError::Storage(e.to_string())),
+        }
+    }
+    fn write(
+        &mut self,
+        name: &str,
+        data: &[u8],
+    ) -> std::result::Result<(), polypack_core::PolypackError> {
+        std::fs::create_dir_all(&self.dir)
+            .map_err(|e| polypack_core::PolypackError::Storage(e.to_string()))?;
+        std::fs::write(self.dir.join(name), data)
+            .map_err(|e| polypack_core::PolypackError::Storage(e.to_string()))
+    }
+    fn append(
+        &mut self,
+        name: &str,
+        data: &[u8],
+    ) -> std::result::Result<(), polypack_core::PolypackError> {
+        use std::io::Write;
+        std::fs::create_dir_all(&self.dir)
+            .map_err(|e| polypack_core::PolypackError::Storage(e.to_string()))?;
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(self.dir.join(name))
+            .map_err(|e| polypack_core::PolypackError::Storage(e.to_string()))?;
+        file.write_all(data)
+            .map_err(|e| polypack_core::PolypackError::Storage(e.to_string()))
+    }
+    fn delete(&mut self, name: &str) -> std::result::Result<(), polypack_core::PolypackError> {
+        let _ = std::fs::remove_file(self.dir.join(name));
+        Ok(())
+    }
+    fn exists(&self, name: &str) -> std::result::Result<bool, polypack_core::PolypackError> {
+        Ok(self.dir.join(name).exists())
+    }
+    fn sync(&self, name: &str) -> std::result::Result<(), polypack_core::PolypackError> {
+        let file = std::fs::File::open(self.dir.join(name))
+            .map_err(|e| polypack_core::PolypackError::Storage(e.to_string()))?;
+        file.sync_all()
+            .map_err(|e| polypack_core::PolypackError::Storage(e.to_string()))
+    }
+}
+
+fn to_napi_err(e: polypack_core::PolypackError) -> Error {
+    Error::from_reason(e.to_string())
+}
+
+#[napi]
+pub struct NativeStore {
+    inner: RefCell<CoreStore>,
+}
+
+#[napi]
+impl NativeStore {
+    #[napi(constructor)]
+    pub fn new(dir: String, compact_threshold: Option<u32>) -> Self {
+        let config = StoreConfig {
+            compact_threshold: compact_threshold.unwrap_or(10_000) as usize,
+            durability: Durability::Process,
+        };
+        NativeStore {
+            inner: RefCell::new(CoreStore::new(
+                Box::new(FsStorage { dir: PathBuf::from(dir) }),
+                config,
+            )),
+        }
+    }
+
+    /// Apply a change batch: `{ putNodes, deleteNodeIds, putEdges,
+    /// deleteEdgeIds, putVectors, deleteVectorIds }`.
+    #[napi]
+    pub fn apply(&self, changes: serde_json::Value) -> Result<()> {
+        let batch: CoreChangeBatch = serde_json::from_value(changes)
+            .map_err(|e| Error::from_reason(e.to_string()))?;
+        self.inner.borrow_mut().apply(&batch).map_err(to_napi_err)
+    }
+
+    #[napi]
+    pub fn node_ids(&self) -> Result<Vec<String>> {
+        self.inner.borrow_mut().node_ids().map_err(to_napi_err)
+    }
+
+    #[napi]
+    pub fn get_node(&self, id: String) -> Result<Option<serde_json::Value>> {
+        match self.inner.borrow_mut().get_node(&id).map_err(to_napi_err)? {
+            Some(node) => serde_json::to_value(node)
+                .map(Some)
+                .map_err(|e| Error::from_reason(e.to_string())),
+            None => Ok(None),
+        }
+    }
+
+    #[napi]
+    pub fn all_edges(&self) -> Result<Vec<serde_json::Value>> {
+        let edges = self.inner.borrow_mut().edges_snapshot().map_err(to_napi_err)?;
+        edges
+            .into_iter()
+            .map(|(_, e)| serde_json::to_value(e).map_err(|e| Error::from_reason(e.to_string())))
+            .collect()
+    }
+
+    /// Returns `[[id, vector], ...]` pairs.
+    #[napi]
+    pub fn all_vectors(&self) -> Result<Vec<serde_json::Value>> {
+        let vectors = self.inner.borrow_mut().vectors_snapshot().map_err(to_napi_err)?;
+        Ok(vectors.into_iter().map(|(id, v)| serde_json::json!([id, v])).collect())
+    }
+
+    #[napi]
+    pub fn compact(&self) -> Result<()> {
+        self.inner.borrow_mut().compact().map_err(to_napi_err)
+    }
+
+    #[napi]
+    pub fn close(&self) -> Result<()> {
+        self.inner.borrow_mut().close().map_err(to_napi_err)
+    }
+}

@@ -357,11 +357,12 @@ describe('HNSWIndex', () => {
     it('keeps recall after remove and re-add churn', () => {
       const dims = 8
       const count = 500
+      const rand = mulberry32(1234)
       const exact = new VectorIndex()
       const ann = new HNSWIndex(undefined, undefined, { M: 16, efConstruction: 200, efSearch: 200 })
       const vecs: number[][] = []
       for (let i = 0; i < count; i++) {
-        const v = Array.from({ length: dims }, () => Math.random() * 2 - 1)
+        const v = Array.from({ length: dims }, () => rand() * 2 - 1)
         vecs.push(v)
         exact.add(`v${i}`, v)
         ann.add(`v${i}`, v)
@@ -373,14 +374,14 @@ describe('HNSWIndex', () => {
         ann.remove(`v${i}`)
       }
       for (let i = 0; i < count; i += 2) {
-        const v = Array.from({ length: dims }, () => Math.random() * 2 - 1)
+        const v = Array.from({ length: dims }, () => rand() * 2 - 1)
         vecs[i] = v
         exact.add(`v${i}`, v)
         ann.add(`v${i}`, v)
       }
       // Update a quarter of the remainder in place.
       for (let i = 1; i < count; i += 4) {
-        const v = Array.from({ length: dims }, () => Math.random() * 2 - 1)
+        const v = Array.from({ length: dims }, () => rand() * 2 - 1)
         vecs[i] = v
         exact.add(`v${i}`, v)
         ann.update(`v${i}`, v)
@@ -391,7 +392,7 @@ describe('HNSWIndex', () => {
       let totalRecall = 0
       const trials = 20
       for (let t = 0; t < trials; t++) {
-        const q = Array.from({ length: dims }, () => Math.random() * 2 - 1)
+        const q = Array.from({ length: dims }, () => rand() * 2 - 1)
         const exactIds = new Set(exact.query(q, 10, 0).map(r => r.id))
         const annIds = new Set(ann.query(q, 10, 0).map(r => r.id))
         totalRecall += [...exactIds].filter(id => annIds.has(id)).length / exactIds.size
@@ -414,3 +415,13 @@ describe('HNSWIndex', () => {
     })
   })
 })
+
+function mulberry32(seed: number): () => number {
+  let a = seed >>> 0
+  return () => {
+    a = (a + 0x6d2b79f5) | 0
+    let t = Math.imul(a ^ (a >>> 15), 1 | a)
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296
+  }
+}

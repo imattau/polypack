@@ -17,6 +17,7 @@ import type {
   NativeBinding,
   NativeExactIndexBinding,
   NativeHnswIndexBinding,
+  NativeStoreBinding,
 } from './binding.js'
 
 const require = createRequire(import.meta.url)
@@ -302,6 +303,57 @@ export function createNativeVectorIndex(): (onChange: (id: string) => void) => N
 /** Factory returning a native HNSW index. */
 export function createNativeHnswIndex(onChange?: (id: string) => void): NativeHnswIndex {
   return new NativeHnswIndex(onChange)
+}
+
+export interface NativeChangeBatch {
+  putNodes?: Array<Record<string, unknown>>
+  deleteNodeIds?: string[]
+  putEdges?: Array<Record<string, unknown>>
+  deleteEdgeIds?: string[]
+  putVectors?: Array<{ id: string; vector: number[] }>
+  deleteVectorIds?: string[]
+}
+
+/**
+ * Directory-backed durable store over the Rust persistence state machine.
+ * Files (`snapshot.msgpack`, `wal.msgpack`) are byte-compatible with the
+ * TypeScript `BinaryStoreAdapter`.
+ */
+export class NativeStore {
+  private inner: NativeStoreBinding
+
+  constructor(directory: string, compactThreshold?: number) {
+    assertAvailable()
+    this.inner = new native.NativeStore(directory, compactThreshold)
+  }
+
+  apply(changes: NativeChangeBatch): void {
+    callNative(() => this.inner.apply(changes))
+  }
+
+  nodeIds(): string[] {
+    return callNative(() => this.inner.nodeIds())
+  }
+
+  getNode(id: string): Record<string, unknown> | undefined {
+    return callNative(() => this.inner.getNode(id))
+  }
+
+  allEdges(): Array<Record<string, unknown>> {
+    return callNative(() => this.inner.allEdges())
+  }
+
+  allVectors(): Array<[string, number[]]> {
+    return callNative(() => this.inner.allVectors())
+  }
+
+  compact(): void {
+    callNative(() => this.inner.compact())
+  }
+
+  close(): void {
+    callNative(() => this.inner.close())
+  }
 }
 
 function assertFiniteVector(vector: ArrayLike<number>, name = 'vector'): void {

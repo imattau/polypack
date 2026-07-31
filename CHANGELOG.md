@@ -59,6 +59,19 @@ All notable changes to this project are documented here. This project follows
   query API over the Rust vector core, passing the shared conformance fixtures
   (except hot-cache eviction, deferred) and benchmarked on the same seeded
   matrix.
+- Rust persistence state machine (`crates/polypack-core/src/storage`):
+  byte-compatible v1 snapshot/WAL codecs (verified byte-for-byte against the
+  JS encoder), a host `Storage` byte-stream trait, and a `Store` mirroring
+  `BinaryStoreAdapter` semantics (WAL replay then snapshot-before-delete,
+  generation-boundary compaction, truncated-tail tolerance, durability modes,
+  `format_version` checks). The shared recovery fixtures pass against it in
+  Rust.
+- Python filesystem persistence — `PolyGraph.open`/`save`/`close` over the
+  Rust store via a `NativeStore` PyO3 binding (completing Python v1 scope),
+  with WAL-recovery tests.
+- Node native storage — a `NativeStore` NAPI-RS binding with a filesystem
+  host adapter; cross-language byte round-trip tests prove the Rust store and
+  the TypeScript `BinaryStoreAdapter` read each other's files.
 
 ## [2.3.0] - 2026-07-20
 

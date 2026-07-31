@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator, Optional, Sequence
 
 import numpy as np
@@ -15,6 +16,7 @@ import numpy as np
 from ._core import (
     ExactIndex as _NativeExactIndex,
     HnswIndex as _NativeHnswIndex,
+    NativeStore as _NativeStore,
     engine_info as _engine_info,
 )
 from ._core import (
@@ -34,6 +36,7 @@ __all__ = [
     "HnswIndex",
     "ChangeBatch",
     "engine_info",
+    "DirectoryStorage",
     "PolypackError",
     "PolypackValueError",
     "PolypackDimensionError",
@@ -250,6 +253,37 @@ class HnswIndex:
 # ── Graph ──
 
 
+class DirectoryStorage:
+    """Host byte-storage adapter over a directory (snapshot.msgpack / wal.msgpack)."""
+
+    def __init__(self, directory: str) -> None:
+        self._dir = Path(directory)
+        self._dir.mkdir(parents=True, exist_ok=True)
+
+    def _path(self, name: str) -> Path:
+        return self._dir / name
+
+    def read(self, name: str) -> Optional[bytes]:
+        path = self._path(name)
+        return path.read_bytes() if path.exists() else None
+
+    def write(self, name: str, data: bytes) -> None:
+        self._path(name).write_bytes(bytes(data))
+
+    def append(self, name: str, data: bytes) -> None:
+        with open(self._path(name), "ab") as f:
+            f.write(bytes(data))
+
+    def delete(self, name: str) -> None:
+        try:
+            self._path(name).unlink()
+        except FileNotFoundError:
+            pass
+
+    def exists(self, name: str) -> bool:
+        return self._path(name).exists()
+
+
 def _copy_node(node: Node) -> Node:
     return {
         "id": node["id"],
@@ -280,6 +314,7 @@ class PolyGraph:
         self._incoming: dict[str, set] = {}
         self.vectors = vector_index or ExactIndex()
         self._on_orphan = on_orphan
+        self._store: Optional[_NativeStore] = None
 
     # ── context manager ──
 
@@ -354,6 +389,7 @@ class PolyGraph:
         target: str,
         data: Optional[dict] = None,
         ownership: Optional[Ownership] = None,
+        created_at: Optional[int] = None,
     ) -> None:
         _validate_id(source, "edge source")
         _validate_id(edge_type, "edge type")
@@ -369,6 +405,7 @@ class PolyGraph:
             "type": edge_type,
             "target": target,
             "data": full,
+            "createdAt": created_at if created_at is not None else 0,
         }
         self._incoming.setdefault(target, set()).add(source)
 
@@ -424,6 +461,69 @@ class PolyGraph:
         self._edges.clear()
         self._incoming.clear()
         self.vectors.clear()
+
+    # ── persistence (Rust storage state machine) ──
+
+    @classmethod
+    def open(cls, directory: str) -> "PolyGraph":
+        """Open a directory-backed binary store and load its graph."""
+        graph = cls()
+        graph.open_store(directory)
+        return graph
+
+    def open_store(self, directory: str) -> None:
+        """Attach a directory-backed store and load any existing state."""
+        self._store = _NativeStore(DirectoryStorage(directory))
+        self._load_from_store()
+
+    def close_store(self) -> None:
+        """Compact and close the attached store. Safe to call repeatedly."""
+        if self._store is not None:
+            self._store.close()
+            self._store = None
+
+    def save(self) -> None:
+        """Persist the full current graph state through the attached store."""
+        if self._store is None:
+            raise PolypackStorageError("no store open; call open_store(path) first")
+        nodes = []
+        for node in self._nodes.values():
+            nodes.append(_copy_node(node))
+        edges = []
+        for edge_map in self._edges.values():
+            for e in edge_map.values():
+                edges.append(
+                    {
+                        "id": _edge_key(e["source"], e["type"], e["target"]),
+                        "source": e["source"],
+                        "target": e["target"],
+                        "type": e["type"],
+                        "data": dict(e.get("data") or {}),
+                        "createdAt": e.get("createdAt", 0),
+                    }
+                )
+        vectors = [{"id": id_, "vector": vector} for id_, vector in self.vectors.entries()]
+        self._store.apply(put_nodes=nodes, put_edges=edges, put_vectors=vectors)
+
+    def _load_from_store(self) -> None:
+        if self._store is None:
+            return
+        for id_ in self._store.all_node_ids():
+            node = self._store.get_node(id_)
+            if node:
+                self.add_node(node)
+        for edge in self._store.all_edges():
+            data = dict(edge.get("data") or {})
+            self.add_edge(
+                edge["source"],
+                edge["type"],
+                edge["target"],
+                data,
+                created_at=edge.get("createdAt"),
+            )
+        for id_, vector in self._store.all_vectors():
+            if id_ not in self._nodes:
+                self.vectors.add(id_, vector)
 
     @property
     def size(self) -> int:

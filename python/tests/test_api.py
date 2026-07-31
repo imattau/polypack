@@ -87,3 +87,45 @@ def test_context_manager_and_change_batch():
     batch.validate()
     with pytest.raises(PolypackValueError):
         ChangeBatch(put_nodes=[{"id": "", "type": "t"}]).validate()
+
+
+def _seed_graph(graph):
+    graph.add_node({"id": "n1", "type": "doc", "data": {"title": "Hello"}, "vector": [0.1, 0.2, 0.3], "insertedAt": 1, "updatedAt": 1})
+    graph.add_node({"id": "n2", "type": "doc", "data": {}, "vector": None, "insertedAt": 2, "updatedAt": 2})
+    graph.add_edge("n1", "LINKS", "n2", ownership="reference")
+
+
+def test_persist_round_trip(tmp_path):
+    g = PolyGraph()
+    _seed_graph(g)
+    g.open_store(str(tmp_path))
+    g.save()
+    g.close_store()
+
+    g2 = PolyGraph.open(str(tmp_path))
+    assert g2.get_node("n1")["vector"] == [0.1, 0.2, 0.3]
+    assert g2.get_node("n1")["data"] == {"title": "Hello"}
+    assert g2.get_edge_targets("n1", "LINKS") == ["n2"]
+    g2.close_store()
+
+
+def test_persist_recovers_from_truncated_wal(tmp_path):
+    g = PolyGraph()
+    _seed_graph(g)
+    g.open_store(str(tmp_path))
+    g.save()
+    # No snapshot is written until close/compact.
+    assert not (tmp_path / "snapshot.msgpack").exists()
+    wal = (tmp_path / "wal.msgpack").read_bytes()
+    assert len(wal) > 0
+    # Crash mid-append: the final in-flight frame is partial. Recovery must
+    # still read the acknowledged frames before it.
+    (tmp_path / "wal.msgpack").write_bytes(wal[: len(wal) - 2])
+
+    g2 = PolyGraph.open(str(tmp_path))
+    assert g2.get_node("n1") is not None
+    assert g2.get_node("n2") is not None
+    g2.close_store()
+    # Recovery persisted a snapshot before deleting the WAL.
+    assert (tmp_path / "snapshot.msgpack").exists()
+    assert not (tmp_path / "wal.msgpack").exists()
