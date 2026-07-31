@@ -6,7 +6,10 @@ Semantics mirror `specification/data-model.md` and the TypeScript reference.
 
 from __future__ import annotations
 
+import copy
 import math
+import os
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator, Optional, Sequence
@@ -269,7 +272,16 @@ class DirectoryStorage:
         return path.read_bytes() if path.exists() else None
 
     def write(self, name: str, data: bytes) -> None:
-        self._path(name).write_bytes(bytes(data))
+        # Write-then-rename: a crash mid-write leaves the previous snapshot
+        # intact instead of a torn file, and the tmp file is fsynced first
+        # so the rename can never land ahead of its data on disk.
+        target = self._path(name)
+        tmp_path = self._dir / f"{name}.tmp"
+        with open(tmp_path, "wb") as f:
+            f.write(bytes(data))
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, target)
 
     def append(self, name: str, data: bytes) -> None:
         with open(self._path(name), "ab") as f:
@@ -289,7 +301,7 @@ def _copy_node(node: Node) -> Node:
     return {
         "id": node["id"],
         "type": node["type"],
-        "data": dict(node.get("data") or {}),
+        "data": copy.deepcopy(node.get("data") or {}),
         "vector": None if node.get("vector") is None else list(node.get("vector")),
         "insertedAt": node["insertedAt"],
         "updatedAt": node["updatedAt"],
@@ -312,10 +324,13 @@ class PolyGraph:
     ) -> None:
         self._nodes: dict[str, Node] = {}
         self._edges: dict[str, dict] = {}
-        self._incoming: dict[str, set] = {}
+        self._incoming: dict[str, dict] = {}
         self.vectors = vector_index or ExactIndex()
         self._on_orphan = on_orphan
         self._store: Optional[_NativeStore] = None
+        self._removed_node_ids: set = set()
+        self._removed_edge_ids: set = set()
+        self._removed_vector_ids: set = set()
 
     # ── context manager ──
 
@@ -323,7 +338,10 @@ class PolyGraph:
         return self
 
     def __exit__(self, *exc) -> None:
-        self.clear()
+        if self._store is not None:
+            self.close_store()
+        else:
+            self.clear()
 
     # ── node CRUD ──
 
@@ -345,8 +363,12 @@ class PolyGraph:
             stored["vector"] = None
             self.vectors.remove(stored["id"])
         self._nodes[stored["id"]] = stored
+        self._removed_node_ids.discard(stored["id"])
         if stored["vector"] is not None:
             self.vectors.add(stored["id"], stored["vector"])
+            self._removed_vector_ids.discard(stored["id"])
+        else:
+            self._removed_vector_ids.add(stored["id"])
 
     def update_node(self, id_: str, data: dict, vector: Any = None) -> Optional[Node]:
         node = self._nodes.get(id_)
@@ -356,7 +378,8 @@ class PolyGraph:
         if vector is not None:
             node["vector"] = _validate_vector(vector)
             self.vectors.add(id_, node["vector"])
-        node["updatedAt"] = 0  # conformance does not assert updatedAt values
+            self._removed_vector_ids.discard(id_)
+        node["updatedAt"] = int(time.time() * 1000)
         return _copy_node(node)
 
     def get_node(self, id_: str) -> Optional[Node]:
@@ -380,6 +403,8 @@ class PolyGraph:
         self._cleanup_edges(id_)
         del self._nodes[id_]
         self.vectors.remove(id_)
+        self._removed_node_ids.add(id_)
+        self._removed_vector_ids.add(id_)
 
     # ── edge CRUD ──
 
@@ -396,7 +421,7 @@ class PolyGraph:
         _validate_id(edge_type, "edge type")
         _validate_id(target, "edge target")
         key = _edge_key(source, edge_type, target)
-        if key in self._edges:
+        if key in self._edges.get(source, {}):
             return
         full = dict(data or {})
         if ownership is not None:
@@ -408,7 +433,9 @@ class PolyGraph:
             "data": full,
             "createdAt": created_at if created_at is not None else 0,
         }
-        self._incoming.setdefault(target, set()).add(source)
+        incoming = self._incoming.setdefault(target, {})
+        incoming[source] = incoming.get(source, 0) + 1
+        self._removed_edge_ids.discard(key)
 
     def get_edges(self, source: str, edge_type: Optional[str] = None) -> list:
         edges = self._edges.get(source, {})
@@ -423,7 +450,7 @@ class PolyGraph:
 
     def get_edge_sources(self, target: str, edge_type: str) -> list:
         sources = []
-        for src in self._incoming.get(target, set()):
+        for src in self._incoming.get(target, {}):
             for e in self._edges.get(src, {}).values():
                 if e["type"] == edge_type and e["target"] == target:
                     sources.append(src)
@@ -443,9 +470,12 @@ class PolyGraph:
             if self._ownership(e) == "owned" and not self._has_other_owned_source(e["target"], source):
                 self.remove_node(e["target"])
         for key, e in to_remove:
-            # Cascade deletion may have already removed this edge.
-            self._edges.get(source, {}).pop(key, None)
-            self._incoming.get(e["target"], set()).discard(source)
+            # Cascade deletion may have already removed this edge (and its
+            # incoming-index entry) via remove_node above.
+            removed = self._edges.get(source, {}).pop(key, None)
+            if removed is not None:
+                self._decrement_incoming(e["target"], source)
+                self._removed_edge_ids.add(key)
             if self._ownership(e) == "shared" and not self._has_incoming(e["target"], source):
                 if self._on_orphan:
                     self._on_orphan(e["target"])
@@ -462,6 +492,9 @@ class PolyGraph:
         self._edges.clear()
         self._incoming.clear()
         self.vectors.clear()
+        self._removed_node_ids.clear()
+        self._removed_edge_ids.clear()
+        self._removed_vector_ids.clear()
 
     # ── persistence (Rust storage state machine) ──
 
@@ -484,7 +517,12 @@ class PolyGraph:
             self._store = None
 
     def save(self) -> None:
-        """Persist the full current graph state through the attached store."""
+        """Persist the full current graph state through the attached store.
+
+        Also flushes deletions recorded since the last successful save, so
+        nodes/edges/vectors removed via remove_node/remove_edges do not
+        resurrect on the next open().
+        """
         if self._store is None:
             raise PolypackStorageError("no store open; call open_store(path) first")
         nodes = []
@@ -504,7 +542,17 @@ class PolyGraph:
                     }
                 )
         vectors = [{"id": id_, "vector": vector} for id_, vector in self.vectors.entries()]
-        self._store.apply(put_nodes=nodes, put_edges=edges, put_vectors=vectors)
+        self._store.apply(
+            put_nodes=nodes,
+            delete_node_ids=list(self._removed_node_ids),
+            put_edges=edges,
+            delete_edge_ids=list(self._removed_edge_ids),
+            put_vectors=vectors,
+            delete_vector_ids=list(self._removed_vector_ids),
+        )
+        self._removed_node_ids.clear()
+        self._removed_edge_ids.clear()
+        self._removed_vector_ids.clear()
 
     def _load_from_store(self) -> None:
         if self._store is None:
@@ -536,7 +584,7 @@ class PolyGraph:
         return edge.get("data", {}).get(_OWNERSHIP_KEY, "reference")
 
     def _has_other_owned_source(self, target: str, exclude: str) -> bool:
-        for src in self._incoming.get(target, set()):
+        for src in self._incoming.get(target, {}):
             if src == exclude:
                 continue
             for e in self._edges.get(src, {}).values():
@@ -545,22 +593,40 @@ class PolyGraph:
         return False
 
     def _has_incoming(self, target: str, exclude: str) -> bool:
-        for src in self._incoming.get(target, set()):
+        for src in self._incoming.get(target, {}):
             if src == exclude:
                 continue
             if any(e["target"] == target for e in self._edges.get(src, {}).values()):
                 return True
         return False
 
+    def _decrement_incoming(self, target: str, source: str) -> None:
+        counts = self._incoming.get(target)
+        if not counts or source not in counts:
+            return
+        counts[source] -= 1
+        if counts[source] <= 0:
+            del counts[source]
+        if not counts:
+            self._incoming.pop(target, None)
+
     def _cleanup_edges(self, id_: str) -> None:
-        for src in list(self._incoming.get(id_, set())):
+        # Remove edges where id_ is the target (from every incoming source).
+        for src in list(self._incoming.get(id_, {}).keys()):
             edges = self._edges.get(src, {})
             for key in [k for k, e in edges.items() if e["target"] == id_]:
                 del edges[key]
+                self._removed_edge_ids.add(key)
             if not edges:
                 self._edges.pop(src, None)
-        self._edges.pop(id_, None)
         self._incoming.pop(id_, None)
+        # Remove edges where id_ is the source, and drop id_ from the
+        # incoming index of each of those edges' targets.
+        outgoing = self._edges.pop(id_, None)
+        if outgoing:
+            for key, e in outgoing.items():
+                self._decrement_incoming(e["target"], id_)
+                self._removed_edge_ids.add(key)
 
 
 # ── Query builder ──
@@ -741,7 +807,9 @@ class GraphQuery:
                         }
                     )
             return list(_execute_query_plan(nodes, edges, plan))
-        except Exception:
+        except (TypeError, PolypackValueError):
+            # Expected fallback: e.g. a non-JSON-serialisable filter value.
+            # Other exceptions (native bugs, corrupt state) propagate.
             return None
 
     def _collect(self) -> list:

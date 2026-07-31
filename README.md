@@ -104,9 +104,9 @@ graph.query()
 | `@0xx0lostcause0xx0/polypack/persistence` | Platform-neutral persistence: adapters, `FileIO` types |
 | `@0xx0lostcause0xx0/polypack/persistence/node` | BinaryStoreAdapter + `NodeFileIO` for the filesystem |
 | `@0xx0lostcause0xx0/polypack/persistence/opfs` | BinaryStoreAdapter + `OPFSFileIO` for the browser |
-| `@0xx0lostcause0xx0/polypack/native` | NAPI-RS bindings: native `VectorIndex`/`HNSWIndex` over the Rust core |
 | `@0xx0lostcause0xx0/polypack/react` | React hooks: `useGraphQuery`, `useLiveQuery` |
 | `@0xx0lostcause0xx0/polypack/sync` | Sync layer: OpLog, SyncAdapter, SyncClient, SyncServer |
+| `@0xx0lostcause0xx0/polypack-native` | Separate package: NAPI-RS bindings for native `VectorIndex`/`HNSWIndex` over the Rust core |
 
 See the complete [API reference](docs/API.md), including persistence, React,
 sync, lifecycle, ownership, and error contracts.

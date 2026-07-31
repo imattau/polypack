@@ -265,43 +265,63 @@ impl Store {
 
     /// Apply a change batch: deletions first, then insertions, appended to the
     /// WAL in that order.
+    ///
+    /// The WAL append (and, under `Fsync` durability, the fsync) must
+    /// succeed before in-memory state is mutated. Otherwise a failed append
+    /// would leave memory ahead of disk: the caller sees success reflected
+    /// nowhere on disk, and a crash right after would silently lose it.
     pub fn apply(&mut self, changes: &ChangeBatch) -> Result<()> {
         self.ensure_loaded()?;
         let mut entries: Vec<WalEntry> = Vec::new();
         for id in &changes.delete_node_ids {
-            self.nodes.remove(id);
             entries.push(WalEntry::DeleteNode(id.clone()));
         }
         for id in &changes.delete_edge_ids {
-            self.edges.remove(id);
             entries.push(WalEntry::DeleteEdge(id.clone()));
         }
         for id in &changes.delete_vector_ids {
-            self.vectors.remove(id);
             entries.push(WalEntry::DeleteVector(id.clone()));
         }
         for node in &changes.put_nodes {
-            self.nodes.insert(node.id.clone(), node.clone());
             entries.push(WalEntry::PutNode(node.clone()));
         }
         for edge in &changes.put_edges {
-            self.edges.insert(edge.id.clone(), edge.clone());
             entries.push(WalEntry::PutEdge(edge.clone()));
         }
         for v in &changes.put_vectors {
-            self.vectors.insert(v.id.clone(), v.vector.clone());
             entries.push(WalEntry::PutVector { id: v.id.clone(), vector: v.vector.clone() });
         }
-        if !entries.is_empty() {
-            let encoded = encode_wal(&entries);
-            self.storage.append(WAL_FILE, &encoded)?;
-            if self.config.durability == Durability::Fsync {
-                self.storage.sync(WAL_FILE)?;
-            }
-            self.wal_entry_count += entries.len();
-            if self.wal_entry_count >= self.config.compact_threshold {
-                self.compact()?;
-            }
+        if entries.is_empty() {
+            return Ok(());
+        }
+        let encoded = encode_wal(&entries);
+        self.storage.append(WAL_FILE, &encoded)?;
+        if self.config.durability == Durability::Fsync {
+            self.storage.sync(WAL_FILE)?;
+        }
+        // WAL entries are durable (or at least accepted by the host); it is
+        // now safe to mutate in-memory state to match.
+        for id in &changes.delete_node_ids {
+            self.nodes.remove(id);
+        }
+        for id in &changes.delete_edge_ids {
+            self.edges.remove(id);
+        }
+        for id in &changes.delete_vector_ids {
+            self.vectors.remove(id);
+        }
+        for node in &changes.put_nodes {
+            self.nodes.insert(node.id.clone(), node.clone());
+        }
+        for edge in &changes.put_edges {
+            self.edges.insert(edge.id.clone(), edge.clone());
+        }
+        for v in &changes.put_vectors {
+            self.vectors.insert(v.id.clone(), v.vector.clone());
+        }
+        self.wal_entry_count += entries.len();
+        if self.wal_entry_count >= self.config.compact_threshold {
+            self.compact()?;
         }
         Ok(())
     }

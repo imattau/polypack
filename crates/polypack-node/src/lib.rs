@@ -299,9 +299,21 @@ impl Storage for FsStorage {
         name: &str,
         data: &[u8],
     ) -> std::result::Result<(), polypack_core::PolypackError> {
+        use std::io::Write;
         std::fs::create_dir_all(&self.dir)
             .map_err(|e| polypack_core::PolypackError::Storage(e.to_string()))?;
-        std::fs::write(self.dir.join(name), data)
+        // Write-then-rename: a crash mid-write leaves the previous snapshot
+        // intact instead of a torn file, and the tmp file is fsynced first
+        // so the rename can never land ahead of its data on disk.
+        let tmp_path = self.dir.join(format!("{name}.tmp"));
+        let mut file = std::fs::File::create(&tmp_path)
+            .map_err(|e| polypack_core::PolypackError::Storage(e.to_string()))?;
+        file.write_all(data)
+            .map_err(|e| polypack_core::PolypackError::Storage(e.to_string()))?;
+        file.sync_all()
+            .map_err(|e| polypack_core::PolypackError::Storage(e.to_string()))?;
+        drop(file);
+        std::fs::rename(&tmp_path, self.dir.join(name))
             .map_err(|e| polypack_core::PolypackError::Storage(e.to_string()))
     }
     fn append(
@@ -332,6 +344,19 @@ impl Storage for FsStorage {
             .map_err(|e| polypack_core::PolypackError::Storage(e.to_string()))?;
         file.sync_all()
             .map_err(|e| polypack_core::PolypackError::Storage(e.to_string()))
+    }
+    fn sync_dir(&self) -> std::result::Result<(), polypack_core::PolypackError> {
+        // Needed so a renamed-in snapshot/WAL file is durably linked into the
+        // directory, not just written; directory fsync has no equivalent on
+        // Windows, so this is best-effort there.
+        #[cfg(unix)]
+        {
+            let dir = std::fs::File::open(&self.dir)
+                .map_err(|e| polypack_core::PolypackError::Storage(e.to_string()))?;
+            dir.sync_all()
+                .map_err(|e| polypack_core::PolypackError::Storage(e.to_string()))?;
+        }
+        Ok(())
     }
 }
 
