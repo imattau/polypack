@@ -18,6 +18,7 @@ from ._core import (
     HnswIndex as _NativeHnswIndex,
     NativeStore as _NativeStore,
     engine_info as _engine_info,
+    execute_query_plan as _execute_query_plan,
 )
 from ._core import (
     PolypackClosedError,
@@ -680,7 +681,80 @@ class GraphQuery:
             frontier = nxt
         return visited
 
+    def _to_plan(self) -> dict:
+        """Express this query as the shared query-plan IR."""
+        plan: dict = {}
+        if self._node_types:
+            plan["nodeTypes"] = list(self._node_types)
+        if self._attributes:
+            attrs = []
+            for op, field, value in self._attributes:
+                if op == "eq":
+                    attrs.append({"field": field, "operator": "eq", "value": value})
+                else:
+                    above, below = value
+                    entry = {"field": field, "operator": "range"}
+                    if above is not None:
+                        entry["above"] = above
+                    if below is not None:
+                        entry["below"] = below
+                    attrs.append(entry)
+            plan["attributes"] = attrs
+        if self._traversal:
+            plan["traversal"] = [
+                {"edgeType": et, "direction": d, "depth": dep} for et, dep, d in self._traversal
+            ]
+        if self._joins:
+            plan["joins"] = [{"edgeType": et, "direction": d} for et, d in self._joins]
+        if self._similarity:
+            sim = {
+                "vector": self._similarity["vector"],
+                "threshold": self._similarity["threshold"],
+            }
+            if self._similarity["top_k"] is not None:
+                sim["topK"] = self._similarity["top_k"]
+            plan["similarity"] = sim
+        if self._order_by:
+            field, direction = self._order_by
+            plan["order"] = {"field": field, "direction": direction}
+        if self._offset is not None:
+            plan["offset"] = self._offset
+        if self._limit is not None:
+            plan["limit"] = self._limit
+        return plan
+
+    def _native_ids(self, plan: dict) -> Optional[list]:
+        """Run the plan through the Rust query executor; None on failure."""
+        try:
+            nodes = [dict(n) for n in self._graph._nodes.values()]
+            edges = []
+            for edge_map in self._graph._edges.values():
+                for e in edge_map.values():
+                    edges.append(
+                        {
+                            "id": _edge_key(e["source"], e["type"], e["target"]),
+                            "source": e["source"],
+                            "target": e["target"],
+                            "type": e["type"],
+                            "data": dict(e.get("data") or {}),
+                            "createdAt": e.get("createdAt", 0),
+                        }
+                    )
+            return list(_execute_query_plan(nodes, edges, plan))
+        except Exception:
+            return None
+
     def _collect(self) -> list:
+        plan = self._to_plan()
+        native_ids = self._native_ids(plan)
+        if native_ids is not None:
+            by_id = {n["id"]: n for n in self._graph._nodes.values()}
+            return [by_id[i] for i in native_ids if i in by_id]
+        # Fallback: pure-Python pipeline (only reached if the native path
+        # failed, e.g. a non-JSON-serialisable filter value).
+        return self._collect_python(plan)
+
+    def _collect_python(self, plan: dict) -> list:
         results = [n for n in self._graph._nodes.values() if self._match(n)]
         if self._joins:
             results = [n for n in results if all(self._connected(n, et, d) for et, d in self._joins)]

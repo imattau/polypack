@@ -1,6 +1,31 @@
 import type { PolyNode, DataTransform } from './types.js'
 import { cosineSimilarity } from './vector-index.js'
-import { assertFiniteVector, assertNonNegativeInteger, cloneData, clonePolyNode } from './utils.js'
+import { assertFiniteVector, assertNonNegativeInteger, cloneData, clonePolyNode, edgeId } from './utils.js'
+
+/**
+ * Native query executor hook. Given a query-plan IR, serialized nodes, and
+ * serialized edges, returns ordered node ids or `null` to fall back to the
+ * TypeScript pipeline. Registered explicitly (e.g. by the polypack-native
+ * package) so browsers and packages without the native binary keep the
+ * TypeScript path.
+ */
+export type NativeQueryExecutor = (
+  plan: Record<string, unknown>,
+  nodes: unknown[],
+  edges: unknown[],
+) => string[] | null
+
+let nativeQueryExecutor: NativeQueryExecutor | null = null
+
+/** Register (or clear) the native query executor. */
+export function setNativeQueryExecutor(fn: NativeQueryExecutor | null): void {
+  nativeQueryExecutor = fn
+}
+
+/** Whether a native query executor is currently registered. */
+export function isNativeQueryExecutorActive(): boolean {
+  return nativeQueryExecutor !== null
+}
 
 type EdgeEntry = { target: string; type: string; data?: Record<string, unknown> }
 type EdgeIndex = Map<string, Map<string, EdgeEntry>>
@@ -288,7 +313,103 @@ export class GraphQuery {
     return result
   }
 
+  /**
+   * Express this query as the shared query-plan IR, or `null` when it cannot
+   * be represented (join predicates are host callbacks and not serialisable).
+   */
+  private toPlan(): Record<string, unknown> | null {
+    if (this.opts.joinFilters && this.opts.joinFilters.length > 0) return null
+    if (this.opts.edgeSource && !this.opts.edgeType) return null
+    const plan: Record<string, unknown> = {}
+    if (this.opts.nodeTypes) plan.nodeTypes = [...this.opts.nodeTypes]
+    if (this.opts.attributes) {
+      plan.attributes = Object.entries(this.opts.attributes).map(([field, value]) => ({
+        field,
+        operator: 'eq',
+        value,
+      }))
+    }
+    if (this.opts.attributeRanges) {
+      const ranges = Object.entries(this.opts.attributeRanges).map(([field, r]) => ({
+        field,
+        operator: 'range',
+        above: r.above,
+        below: r.below,
+      }))
+      plan.attributes = [...(plan.attributes as Array<Record<string, unknown>> ?? []), ...ranges]
+    }
+    if (this.opts.edgeType) {
+      const ef: Record<string, unknown> = { type: this.opts.edgeType }
+      if (this.opts.edgeTarget) ef.target = this.opts.edgeTarget
+      if (this.opts.edgeSource) ef.source = this.opts.edgeSource
+      plan.edgeFilter = ef
+    }
+    if (this.opts.afterSteps?.length) {
+      plan.traversal = this.opts.afterSteps.map(s => ({ edgeType: s.edgeType, direction: s.direction, depth: s.depth }))
+    }
+    if (this.opts.similarVector) {
+      const s: Record<string, unknown> = {
+        vector: [...this.opts.similarVector.vector],
+        threshold: this.opts.similarVector.threshold,
+      }
+      if (this.opts.similarVector.topK !== undefined) s.topK = this.opts.similarVector.topK
+      plan.similarity = s
+    }
+    if (this.opts.orderBy) plan.order = { field: this.opts.orderBy.field, direction: this.opts.orderBy.direction }
+    if (this.opts.offset !== undefined) plan.offset = this.opts.offset
+    if (this.opts.limit !== undefined) plan.limit = this.opts.limit
+    return plan
+  }
+
+  private serializeNodes(): unknown[] {
+    return [...this.nodes.values()].map(n => ({
+      id: n.id,
+      type: n.type,
+      data: n.data,
+      vector: n.vector ? [...n.vector] : null,
+      insertedAt: n.insertedAt,
+      updatedAt: n.updatedAt,
+    }))
+  }
+
+  private serializeEdges(): unknown[] {
+    const out: unknown[] = []
+    for (const [source, edgeMap] of this.edges) {
+      for (const e of edgeMap.values()) {
+        out.push({
+          id: edgeId(source, e.type, e.target),
+          source,
+          target: e.target,
+          type: e.type,
+          data: e.data ?? null,
+          createdAt: 0,
+        })
+      }
+    }
+    return out
+  }
+
+  private runNative(): string[] | null {
+    const executor = nativeQueryExecutor
+    if (!executor) return null
+    const plan = this.toPlan()
+    if (!plan) return null
+    try {
+      return executor(plan, this.serializeNodes(), this.serializeEdges())
+    } catch {
+      return null
+    }
+  }
+
   toArray(): PolyNode[] {
+    const nativeIds = this.runNative()
+    if (nativeIds !== null) {
+      return nativeIds
+        .map(id => this.nodes.get(id))
+        .filter((n): n is PolyNode => !!n)
+        .map(node => this.readNode(node))
+    }
+
     let results = this.getSourceNodes().filter(n => this.match(n))
     if (results.length === 0) return []
 

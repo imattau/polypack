@@ -8,7 +8,7 @@ export interface QueryPlan {
   edgeFilter?: { type: string; target?: string; source?: string }
   traversal?: Array<{ edgeType: string; direction: 'out' | 'in'; depth: number }>
   joins?: Array<{ edgeType: string; direction: 'out' | 'in' }>
-  similarity?: { vector: number[]; threshold: number; topK?: number }
+  similarity?: { vector: number[]; threshold: number; topK?: number; engine?: 'exact' | 'hnsw' }
   order?: { field: string; direction: 'asc' | 'desc' }
   offset?: number
   limit?: number

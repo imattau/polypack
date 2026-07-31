@@ -12,6 +12,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { cosineSimilarity as cosine } from '../../../src/vector-index.js'
 import type { DistanceFunction } from '../../../src/vector-index.js'
+import { setNativeQueryExecutor, isNativeQueryExecutorActive } from '../../../src/query.js'
 import type {
   EngineInfo as BindingEngineInfo,
   NativeBinding,
@@ -59,6 +60,7 @@ const native: NativeBinding | null = loadNative()
 
 export interface EngineInfo extends BindingEngineInfo {
   available: boolean
+  query: 'rust-native' | 'typescript'
 }
 
 /** True when the native addon for this platform is loadable. */
@@ -68,13 +70,23 @@ export function isNativeAvailable(): boolean {
 
 /**
  * Report which engine is active: `rust-native` when the addon loaded,
- * otherwise the TypeScript fallback.
+ * otherwise the TypeScript fallback. `query` reflects the GraphQuery path.
  */
 export function engineInfo(): EngineInfo {
   if (!native) {
-    return { graph: 'typescript', vector: 'typescript', storage: 'host', available: false }
+    return {
+      graph: 'typescript',
+      vector: 'typescript',
+      storage: 'host',
+      available: false,
+      query: 'typescript',
+    }
   }
-  return { ...native.engineInfo(), available: true }
+  return {
+    ...native.engineInfo(),
+    available: true,
+    query: isNativeQueryExecutorActive() ? 'rust-native' : 'typescript',
+  }
 }
 
 /** Detect the engine currently used for a graph, for diagnostics. */
@@ -303,6 +315,46 @@ export function createNativeVectorIndex(): (onChange: (id: string) => void) => N
 /** Factory returning a native HNSW index. */
 export function createNativeHnswIndex(onChange?: (id: string) => void): NativeHnswIndex {
   return new NativeHnswIndex(onChange)
+}
+
+/**
+ * Execute a query plan over serialized nodes/edges with the Rust query
+ * executor, returning ordered node ids. `plan` follows the shared
+ * query-plan IR (`specification/query-plan.schema.json`).
+ */
+export function executeQueryPlan(
+  nodes: Array<Record<string, unknown>>,
+  edges: Array<Record<string, unknown>>,
+  plan: Record<string, unknown>,
+): string[] {
+  assertAvailable()
+  return callNative(() => native.executeQueryPlan(nodes, edges, plan))
+}
+
+/**
+ * Route `GraphQuery` (in-memory) through the Rust query executor when the
+ * binary is present. Queries with join predicates fall back to TypeScript.
+ */
+export function installNativeQueryExecutor(): void {
+  setNativeQueryExecutor((plan, nodes, edges) => {
+    try {
+      return native ? native.executeQueryPlan(nodes, edges, plan) : null
+    } catch {
+      return null
+    }
+  })
+}
+
+/** Aggregate a numeric field over the nodes matched by a query plan. */
+export function aggregateQueryPlan(
+  nodes: Array<Record<string, unknown>>,
+  edges: Array<Record<string, unknown>>,
+  plan: Record<string, unknown>,
+  field: string,
+  op: string,
+): { value: number; count: number } {
+  assertAvailable()
+  return callNative(() => native.aggregateQueryPlan(nodes, edges, plan, field, op))
 }
 
 export interface NativeChangeBatch {

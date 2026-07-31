@@ -69,7 +69,8 @@
       "properties": {
         "vector": { "type": "array", "items": { "type": "number" } },
         "threshold": { "type": "number" },
-        "topK": { "type": "integer", "minimum": 0 }
+        "topK": { "type": "integer", "minimum": 0 },
+        "engine": { "enum": ["exact", "hnsw"] }
       }
     },
     "order": {

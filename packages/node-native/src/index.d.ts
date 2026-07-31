@@ -17,6 +17,7 @@ export interface EngineInfo {
   vector: string
   storage: string
   available: boolean
+  query: 'rust-native' | 'typescript'
 }
 
 /** True when the native addon for this platform loaded successfully. */
@@ -73,6 +74,31 @@ export function createNativeVectorIndex(): (onChange: (id: string) => void) => N
 
 /** Factory returning a native HNSW index. */
 export function createNativeHnswIndex(onChange?: (id: string) => void): NativeHnswIndex
+
+/**
+ * Execute a query plan over serialized nodes/edges with the Rust query
+ * executor, returning ordered node ids.
+ */
+export function executeQueryPlan(
+  nodes: Array<Record<string, unknown>>,
+  edges: Array<Record<string, unknown>>,
+  plan: Record<string, unknown>,
+): string[]
+
+/** Aggregate a numeric field over the nodes matched by a query plan. */
+export function aggregateQueryPlan(
+  nodes: Array<Record<string, unknown>>,
+  edges: Array<Record<string, unknown>>,
+  plan: Record<string, unknown>,
+  field: string,
+  op: string,
+): { value: number; count: number }
+
+/**
+ * Route `GraphQuery` (in-memory) through the Rust query executor when the
+ * binary is present. Queries with join predicates fall back to TypeScript.
+ */
+export function installNativeQueryExecutor(): void
 
 export interface NativeChangeBatch {
   putNodes?: Array<Record<string, unknown>>

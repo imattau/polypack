@@ -72,6 +72,19 @@ All notable changes to this project are documented here. This project follows
 - Node native storage — a `NativeStore` NAPI-RS binding with a filesystem
   host adapter; cross-language byte round-trip tests prove the Rust store and
   the TypeScript `BinaryStoreAdapter` read each other's files.
+- Rust query executor (`crates/polypack-core/src/query_exec.rs`): runs the
+  shared query-plan IR over node/edge snapshots (filters, ranges, ordering,
+  traversal, joins, pagination, exact cosine similarity, and opt-in HNSW via
+  `similarity.engine`). The query-plan conformance fixtures pass against it in
+  Rust.
+- Query bindings — napi `executeQueryPlan`/`aggregateQueryPlan` and PyO3
+  equivalents; Python `GraphQuery` delegates to the Rust executor.
+- Deep TypeScript integration (gated): `GraphQuery.toArray` can route through
+  the native executor via `installNativeQueryExecutor()` (opt-in; falls back
+  for join predicates and without the binary). The measurement gate
+  (`benchmarks/query-gate.md`) shows per-query FFI serialization makes native
+  in-memory delegation ~46× slower at 50K nodes, so in-memory GraphQuery stays
+  on TypeScript; the Rust executor serves Python and whole-store queries.
 
 ## [2.3.0] - 2026-07-20
 

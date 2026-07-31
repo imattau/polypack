@@ -275,12 +275,73 @@ fn engine_info() -> (String, String, String) {
     ("python".to_string(), "rust-native".to_string(), "host".to_string())
 }
 
+
+// ── Query execution ──
+
+use polypack_core::model::{Edge as CoreEdge, Node as CoreNode};
+use polypack_core::query::QueryPlan as CoreQueryPlan;
+use polypack_core::query_exec::{aggregate as core_aggregate, execute as core_execute, GraphSnapshot};
+
+fn nodes_from_py(values: Vec<Bound<'_, PyAny>>) -> PyResult<Vec<CoreNode>> {
+    let mut out = Vec::with_capacity(values.len());
+    for v in values {
+        out.push(py_to_polypack(&v)?);
+    }
+    Ok(out)
+}
+
+#[pyfunction]
+fn execute_query_plan(
+    py: Python<'_>,
+    nodes: Vec<Bound<'_, PyAny>>,
+    edges: Vec<Bound<'_, PyAny>>,
+    plan: Bound<'_, PyAny>,
+) -> PyResult<Py<PyList>> {
+    let nodes = nodes_from_py(nodes)?;
+    let mut edges_out: Vec<CoreEdge> = Vec::with_capacity(edges.len());
+    for e in edges {
+        edges_out.push(py_to_polypack(&e)?);
+    }
+    let plan_json = py_to_json(&plan)?;
+    let plan: CoreQueryPlan =
+        serde_json::from_value(plan_json).map_err(|e| PolypackValueError::new_err(e.to_string()))?;
+    let snap = GraphSnapshot::new(nodes, edges_out);
+    let ids = core_execute(&snap, &plan, None).map_err(to_pyerr)?;
+    let list = PyList::empty(py);
+    for id in ids {
+        list.append(id)?;
+    }
+    Ok(list.unbind())
+}
+
+#[pyfunction]
+fn aggregate_query_plan(
+    nodes: Vec<Bound<'_, PyAny>>,
+    edges: Vec<Bound<'_, PyAny>>,
+    plan: Bound<'_, PyAny>,
+    field: String,
+    op: String,
+) -> PyResult<(f64, usize)> {
+    let nodes = nodes_from_py(nodes)?;
+    let mut edges_out: Vec<CoreEdge> = Vec::with_capacity(edges.len());
+    for e in edges {
+        edges_out.push(py_to_polypack(&e)?);
+    }
+    let plan_json = py_to_json(&plan)?;
+    let plan: CoreQueryPlan =
+        serde_json::from_value(plan_json).map_err(|e| PolypackValueError::new_err(e.to_string()))?;
+    let snap = GraphSnapshot::new(nodes, edges_out);
+    core_aggregate(&snap, &plan, &field, &op).map_err(to_pyerr)
+}
+
 #[pymodule]
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<ExactIndex>()?;
     m.add_class::<HnswIndex>()?;
     m.add_class::<NativeStore>()?;
     m.add_function(wrap_pyfunction!(engine_info, m)?)?;
+    m.add_function(wrap_pyfunction!(execute_query_plan, m)?)?;
+    m.add_function(wrap_pyfunction!(aggregate_query_plan, m)?)?;
     m.add("PolypackError", m.py().get_type::<PolypackError>())?;
     m.add("PolypackValueError", m.py().get_type::<PolypackValueError>())?;
     m.add("PolypackDimensionError", m.py().get_type::<PolypackDimensionError>())?;

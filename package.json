@@ -73,6 +73,7 @@
     "bench:ts": "tsx benchmarks/run-ts.ts",
     "bench:rust": "cargo run --release -p polypack-core --bin compare -- --out benchmarks/results/rust-all.json",
     "bench:compare": "tsx benchmarks/compare.ts",
+    "bench:query": "tsx benchmarks/query-gate.ts",
     "bench:conformance": "npm run test:conformance"
   },
   "engines": {

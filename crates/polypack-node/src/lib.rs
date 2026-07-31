@@ -410,3 +410,49 @@ impl NativeStore {
         self.inner.borrow_mut().close().map_err(to_napi_err)
     }
 }
+
+// ── Query execution ──
+
+use polypack_core::model::{Edge as CoreEdge, Node as CoreNode};
+use polypack_core::query::QueryPlan as CoreQueryPlan;
+use polypack_core::query_exec::{aggregate as core_aggregate, execute as core_execute, GraphSnapshot};
+
+fn json_vec<T: serde::de::DeserializeOwned>(items: Vec<serde_json::Value>, what: &str) -> Result<Vec<T>> {
+    items
+        .into_iter()
+        .map(|v| serde_json::from_value(v).map_err(|e| Error::from_reason(format!("{what}: {e}"))))
+        .collect()
+}
+
+/// Execute a query plan over a snapshot of nodes/edges, returning ordered ids.
+#[napi]
+pub fn execute_query_plan(
+    nodes: Vec<serde_json::Value>,
+    edges: Vec<serde_json::Value>,
+    plan: serde_json::Value,
+) -> Result<Vec<String>> {
+    let nodes: Vec<CoreNode> = json_vec(nodes, "node")?;
+    let edges: Vec<CoreEdge> = json_vec(edges, "edge")?;
+    let plan: CoreQueryPlan =
+        serde_json::from_value(plan).map_err(|e| Error::from_reason(e.to_string()))?;
+    let snap = GraphSnapshot::new(nodes, edges);
+    core_execute(&snap, &plan, None).map_err(to_napi_err)
+}
+
+/// Aggregate a numeric field across the nodes matched by a query plan.
+#[napi]
+pub fn aggregate_query_plan(
+    nodes: Vec<serde_json::Value>,
+    edges: Vec<serde_json::Value>,
+    plan: serde_json::Value,
+    field: String,
+    op: String,
+) -> Result<serde_json::Value> {
+    let nodes: Vec<CoreNode> = json_vec(nodes, "node")?;
+    let edges: Vec<CoreEdge> = json_vec(edges, "edge")?;
+    let plan: CoreQueryPlan =
+        serde_json::from_value(plan).map_err(|e| Error::from_reason(e.to_string()))?;
+    let snap = GraphSnapshot::new(nodes, edges);
+    let (value, count) = core_aggregate(&snap, &plan, &field, &op).map_err(to_napi_err)?;
+    Ok(serde_json::json!({ "value": value, "count": count }))
+}

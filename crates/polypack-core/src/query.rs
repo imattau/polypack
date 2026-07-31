@@ -72,6 +72,17 @@ pub struct Similarity {
     pub threshold: f64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub top_k: Option<usize>,
+    /// Similarity engine. `exact` (default) mirrors the reference cosine
+    /// ranking; `hnsw` uses an approximate index supplied to the executor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engine: Option<SimilarityEngine>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum SimilarityEngine {
+    Exact,
+    Hnsw,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -112,7 +123,7 @@ mod tests {
                 direction: Direction::Out,
                 depth: 2,
             }]),
-            similarity: Some(Similarity { vector: vec![0.1, 0.2], threshold: 0.5, top_k: Some(20) }),
+            similarity: Some(Similarity { vector: vec![0.1, 0.2], threshold: 0.5, top_k: Some(20), engine: None }),
             order: Some(Order { field: "updatedAt".into(), direction: OrderDirection::Desc }),
             offset: Some(0),
             limit: Some(20),

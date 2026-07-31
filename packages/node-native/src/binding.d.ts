@@ -60,6 +60,14 @@ export interface NativeBinding {
   NativeHnswIndex: new (config?: NativeHnswConfig, levelSeed?: number) => NativeHnswIndexBinding
   NativeStore: new (directory: string, compactThreshold?: number) => NativeStoreBinding
   engineInfo(): EngineInfo
+  executeQueryPlan(nodes: unknown[], edges: unknown[], plan: Record<string, unknown>): string[]
+  aggregateQueryPlan(
+    nodes: unknown[],
+    edges: unknown[],
+    plan: Record<string, unknown>,
+    field: string,
+    op: string,
+  ): { value: number; count: number }
 }
 
 export interface NativeChangeBatch {
