@@ -39,6 +39,25 @@ jobs:
           python -m pytest "$WS/python/tests" -q
         working-directory: python
 
+  ts-publish:
+    needs: release-candidate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org/
+          cache: npm
+      - name: Verify release tag matches package version
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          node --input-type=module --eval "const pkg = (await import('./package.json', { with: { type: 'json' } })).default; const expected = 'v' + pkg.version; if (process.env.RELEASE_TAG !== expected) { console.error('Release tag ' + process.env.RELEASE_TAG + ' does not match ' + expected); process.exit(1) }"
+      - run: npm ci
+      - name: Publish TypeScript package
+        run: npm publish --access public --provenance
+
   native-publish:
     needs: release-candidate
     runs-on: ${{ matrix.os }}

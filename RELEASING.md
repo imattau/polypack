@@ -20,11 +20,11 @@ bumped for native-stack releases unless its public API changes.
 1. Bump versions (TS package + native stack as needed), update
    `CHANGELOG.md`, commit, and push `master`.
 2. Create a GitHub release tagged `v<ts-version>` (e.g. `v2.4.1`). The release
-   event triggers `.github/workflows/release.yml` and the existing
-   `.github/workflows/publish-npm.yml`.
+   event triggers `.github/workflows/release.yml`.
 
 The release workflow publishes, in order:
 
+- **TypeScript package** (`ts-publish`, npm provenance).
 - **npm per-platform packages** then the **native wrapper** (`native-publish`
   builds every addon on a matching runner; `native-package-publish` stages and
   publishes with npm provenance).
@@ -33,19 +33,20 @@ The release workflow publishes, in order:
 - **Python wheels** to PyPI (`wheel-publish` builds abi3 wheels per OS;
   `wheel-publish-upload` publishes via OIDC trusted publishing for the
   `release` environment).
-- **TypeScript package** via the existing `publish-npm.yml`.
+- **TypeScript package** (`ts-publish`).
 
 ## One-time registry setup (required before the first release)
 
 ### npm
 
-The npm publish jobs use the npm registry auth from `actions/setup-node`
-(`NODE_AUTH_TOKEN`). The packages must exist on npm before they can be
-published, so either:
+All npm publishing happens in `release.yml` and uses npm OIDC trusted
+publishing (audience `npm`; `id-token: write` is set at the workflow level).
+In your npm account settings, add trusted publishers for the workflow file
+`release.yml` for each package (or the `@0xx0lostcause0xx0` scope):
 
-- publish each package once manually (`npm publish --access public` from
-  `packages/node-native` and each `packages/node-native/npm/*/`), or
-- configure npm trusted publishing for the repository.
+- `@0xx0lostcause0xx0/polypack`
+- `@0xx0lostcause0xx0/polypack-native` + the 5 `polypack-native-*` platform
+  packages
 
 ### crates.io
 
