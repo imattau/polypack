@@ -3,7 +3,7 @@ import { PolyGraph } from '../src/graph'
 import { VectorIndex, euclideanSimilarity } from '../src/vector-index'
 import { MemoryAdapter } from '../src/persistence/memory'
 import { BinaryStoreAdapter } from '../src/persistence/binary-store'
-import { MemoryFileIO } from '../src/persistence/binary-file-io'
+import { MemoryFileIO } from '../src/persistence/file-io'
 
 describe('PolyGraph', () => {
   let graph: PolyGraph

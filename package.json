@@ -27,6 +27,18 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
     },
+    "./persistence": {
+      "types": "./dist/persistence/index.d.ts",
+      "import": "./dist/persistence/index.js"
+    },
+    "./persistence/node": {
+      "types": "./dist/persistence/node.d.ts",
+      "import": "./dist/persistence/node.js"
+    },
+    "./persistence/opfs": {
+      "types": "./dist/persistence/opfs.d.ts",
+      "import": "./dist/persistence/opfs.js"
+    },
     "./react": {
       "types": "./dist/react.d.ts",
       "import": "./dist/react.js"
@@ -45,8 +57,10 @@
   ],
   "scripts": {
     "build": "tsc",
-    "check": "npm test && npm run build && npm run check:exports",
-    "check:exports": "node --input-type=module --eval \"const core = await import('./dist/index.js'); const sync = await import('./dist/sync/index.js'); const react = await import('./dist/react.js'); if (!core.PolyGraph || !core.PersistedGraphQuery || !core.FeatureHashEmbedding || !sync.SyncClient || !sync.SyncServer || !react.useGraphQuery) process.exit(1)\"",
+    "check": "npm test && npm run build && npm run check:exports && npm run check:browser && npm run check:build:browser",
+    "check:exports": "node --input-type=module --eval \"const core = await import('./dist/index.js'); const persistence = await import('./dist/persistence/index.js'); const node = await import('./dist/persistence/node.js'); const opfs = await import('./dist/persistence/opfs.js'); const sync = await import('./dist/sync/index.js'); const react = await import('./dist/react.js'); if (!core.PolyGraph || !core.PersistedGraphQuery || !core.FeatureHashEmbedding || !persistence.MemoryAdapter || !node.BinaryStoreAdapter || !node.NodeFileIO || !opfs.BinaryStoreAdapter || !opfs.OPFSFileIO || !sync.SyncClient || !sync.SyncServer || !react.useGraphQuery) process.exit(1)\"",
+    "check:browser": "node scripts/check-browser-safe.mjs",
+    "check:build:browser": "node scripts/browser-build-check.mjs",
     "prepack": "npm run build",
     "prepublishOnly": "npm test && npm run build",
     "test": "vitest run --exclude 'tests/stress.test.ts'",
@@ -78,6 +92,7 @@
     "@types/node": "^26.1.1",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
+    "esbuild": "^0.28.1",
     "jsdom": "^26.1.0",
     "react": "^19.2.6",
     "react-dom": "^19.2.7",

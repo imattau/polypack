@@ -143,7 +143,7 @@ describe('VectorIndex edge cases', () => {
     expect(entries).toHaveLength(2)
   })
 
-  it('owns inserted input and shares the internal Float64Array', () => {
+  it('owns inserted input and returns detached copies', () => {
     const idx = new VectorIndex()
     const input = [1, 0]
     idx.add('a', input)
@@ -151,7 +151,7 @@ describe('VectorIndex edge cases', () => {
     const read = idx.get('a')!
     expect([...read]).toEqual([1, 0])
     read[0] = 99
-    expect([...idx.get('a')!]).toEqual([99, 0])
+    expect([...idx.get('a')!]).toEqual([1, 0])
   })
 
   it('validates IDs, vector values, and query parameters', () => {

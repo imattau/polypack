@@ -17,13 +17,19 @@ describe('HNSWIndex', () => {
       expect(index.has('missing')).toBe(false)
     })
 
-    it('shares the internal Float64Array reference', () => {
+    it('returns detached copies from get and entries', () => {
       const index = new HNSWIndex()
       const vec = [1, 2, 3]
       index.add('v1', vec)
-      const got = index.get('v1')
-      got![0] = 999
-      expect([...index.get('v1')!]).toEqual([999, 2, 3])
+      const got = index.get('v1')!
+      got[0] = 999
+      expect([...index.get('v1')!]).toEqual([1, 2, 3])
+      vec[0] = 42
+      expect([...index.get('v1')!]).toEqual([1, 2, 3])
+      const [entryId, entryVec] = [...index.entries()][0]
+      expect(entryId).toBe('v1')
+      entryVec[1] = 123
+      expect([...index.get('v1')!]).toEqual([1, 2, 3])
     })
 
     it('removes a vector', () => {
@@ -307,6 +313,104 @@ describe('HNSWIndex', () => {
 
       const results = index.query([0, 0], 2, 0)
       expect(results[0].id).toBe('a')
+    })
+  })
+
+  describe('ID reuse and replacement', () => {
+    it('re-adds a removed id and serves it from query and entries', () => {
+      const index = new HNSWIndex()
+      index.add('a', [1, 0, 0])
+      index.add('b', [0, 1, 0])
+      index.remove('a')
+      expect(index.size).toBe(1)
+      expect(index.has('a')).toBe(false)
+      index.add('a', [1, 0, 0])
+      expect(index.size).toBe(2)
+      expect(index.has('a')).toBe(true)
+      expect([...index.entries()].map(([id]) => id).sort()).toEqual(['a', 'b'])
+      const results = index.query([1, 0, 0], 5)
+      expect(results[0].id).toBe('a')
+    })
+
+    it('update replaces a vector without stale topology', () => {
+      const index = new HNSWIndex(undefined, undefined, { M: 16, efConstruction: 200, efSearch: 200 })
+      index.add('a', [1, 0, 0])
+      index.add('b', [0, 1, 0])
+      index.add('c', [0, 0, 1])
+      index.add('d', [0.5, 0.5, 0])
+      index.update('b', [1, 0, 0])
+      const results = index.query([0, 1, 0], 5)
+      expect(results[0].id).not.toBe('b')
+      expect(index.get('b')).toBeDefined()
+      expect(index.size).toBe(4)
+    })
+
+    it('update does not duplicate an id', () => {
+      const index = new HNSWIndex()
+      index.add('a', [1, 0])
+      index.add('b', [0, 1])
+      index.update('a', [1, 0])
+      expect(index.size).toBe(2)
+      expect([...index.entries()].map(([id]) => id).sort()).toEqual(['a', 'b'])
+    })
+
+    it('keeps recall after remove and re-add churn', () => {
+      const dims = 8
+      const count = 500
+      const exact = new VectorIndex()
+      const ann = new HNSWIndex(undefined, undefined, { M: 16, efConstruction: 200, efSearch: 200 })
+      const vecs: number[][] = []
+      for (let i = 0; i < count; i++) {
+        const v = Array.from({ length: dims }, () => Math.random() * 2 - 1)
+        vecs.push(v)
+        exact.add(`v${i}`, v)
+        ann.add(`v${i}`, v)
+      }
+
+      // Remove half, then re-add them with new vectors.
+      for (let i = 0; i < count; i += 2) {
+        exact.remove(`v${i}`)
+        ann.remove(`v${i}`)
+      }
+      for (let i = 0; i < count; i += 2) {
+        const v = Array.from({ length: dims }, () => Math.random() * 2 - 1)
+        vecs[i] = v
+        exact.add(`v${i}`, v)
+        ann.add(`v${i}`, v)
+      }
+      // Update a quarter of the remainder in place.
+      for (let i = 1; i < count; i += 4) {
+        const v = Array.from({ length: dims }, () => Math.random() * 2 - 1)
+        vecs[i] = v
+        exact.add(`v${i}`, v)
+        ann.update(`v${i}`, v)
+      }
+      void vecs
+      expect(ann.size).toBe(exact.size)
+
+      let totalRecall = 0
+      const trials = 20
+      for (let t = 0; t < trials; t++) {
+        const q = Array.from({ length: dims }, () => Math.random() * 2 - 1)
+        const exactIds = new Set(exact.query(q, 10, 0).map(r => r.id))
+        const annIds = new Set(ann.query(q, 10, 0).map(r => r.id))
+        totalRecall += [...exactIds].filter(id => annIds.has(id)).length / exactIds.size
+      }
+      expect(totalRecall / trials).toBeGreaterThanOrEqual(0.9)
+    })
+
+    it('clears topology after removing every node', () => {
+      const index = new HNSWIndex()
+      for (let i = 0; i < 200; i++) {
+        index.add(`n${i}`, [Math.random(), Math.random()])
+      }
+      for (let i = 0; i < 200; i++) {
+        index.remove(`n${i}`)
+      }
+      expect(index.size).toBe(0)
+      index.add('fresh', [1, 0])
+      const results = index.query([1, 0], 5)
+      expect(results[0].id).toBe('fresh')
     })
   })
 })

@@ -3,7 +3,40 @@
 All notable changes to this project are documented here. This project follows
 [Semantic Versioning](https://semver.org/).
 
-## [2.1.0] - 2026-07-18
+## [Unreleased]
+
+### Breaking changes
+
+- `BinaryStoreAdapter` and `BinaryStoreConfig` are no longer exported from the
+  core root (`@0xx0lostcause0xx0/polypack`). They now live behind platform
+  persistence subpaths so the root entry stays free of `node:` built-ins:
+  `@0xx0lostcause0xx0/polypack/persistence/node` and
+  `@0xx0lostcause0xx0/polypack/persistence/opfs`.
+- `VectorIndex.get()` / `entries()` and `HNSWIndex.get()` / `entries()` now
+  return detached copies instead of sharing the internal `Float64Array`.
+  Mutate vectors through the index methods only.
+
+### Added
+
+- `FileIO` abstraction with `NodeFileIO` (filesystem), `OPFSFileIO` (browser
+  File System Access API), and `MemoryFileIO` (tests / custom storage). Pass a
+  `fileIO` into `BinaryStoreAdapter` to plug in any backing store.
+- `BinaryStoreAdapter` option `syncWrites` for fsync-guaranteed durability.
+- `HNSWIndex.update()` for in-place vector replacement, plus physical node
+  unlinking so removed ids can be re-added without stale topology.
+- `npm run check:browser` and `npm run check:build:browser` verify that all
+  root-reachable browser entry points are free of `node:` built-ins and bundle
+  cleanly, while the node-only persistence subpath is rejected.
+- `tests/browser-entry.test.ts` smoke-testing the browser-safe entry points
+  under a browser-like environment.
+
+### Fixed
+
+- `BinaryStoreAdapter` now serialises startup, mutations, compaction, and
+  shutdown through an internal queue, preventing lost writes during recovery
+  or compaction and making `close()` idempotent.
+- WAL recovery now persists a snapshot before deleting the replayed WAL, and
+  tolerates a truncated WAL tail from a mid-append crash.
 
 ### Breaking changes
 

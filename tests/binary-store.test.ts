@@ -1,7 +1,25 @@
 import { describe, it, expect, beforeEach } from 'vitest'
 import { BinaryStoreAdapter } from '../src/persistence/binary-store'
-import { MemoryFileIO } from '../src/persistence/binary-file-io'
+import { MemoryFileIO } from '../src/persistence/file-io'
+import { NodeFileIO } from '../src/persistence/node-file-io'
+import { encodeWalEntries } from '../src/persistence/binary-format'
+import type { WalEntry } from '../src/persistence/binary-format'
 import type { SerializedNode, SerializedEdge } from '../src/types'
+
+function serNode(id: string, n = 1): SerializedNode {
+  return { id, type: 't', data: { v: n }, vector: null, insertedAt: n, updatedAt: n }
+}
+
+class DelayedMemoryFileIO extends MemoryFileIO {
+  constructor(private delayMs: number, private slowFile: (name: string) => boolean = () => true) {
+    super()
+  }
+
+  override async writeFile(name: string, data: Uint8Array): Promise<void> {
+    if (this.slowFile(name)) await new Promise(r => setTimeout(r, this.delayMs))
+    return super.writeFile(name, data)
+  }
+}
 
 function createAdapter() {
   return new BinaryStoreAdapter({
@@ -243,20 +261,135 @@ describe('BinaryStoreAdapter', () => {
       await a.close()
     })
 
-    it('bulk vector ops persist across restarts', async () => {
+  describe('concurrency and crash safety', () => {
+    it('serialises concurrent startup with immediate reads and writes', async () => {
       const io = new MemoryFileIO()
       const a = new BinaryStoreAdapter({ storeDir: 'test', fileIO: io })
-      await a.bulkPutVectors([
-        { id: 'x', vector: [9, 8, 7] },
-        { id: 'y', vector: [6, 5, 4] },
-      ])
+      const writes = Promise.all([a.putNode(serNode('n1')), a.putNode(serNode('n2'))])
+      const reads = Promise.all([a.getNode('n1'), a.getNode('n2'), a.allNodeIds()])
+      await Promise.all([writes, reads])
+      expect((await a.allNodeIds()).sort()).toEqual(['n1', 'n2'])
+      await a.close()
+    })
+
+    it('applies concurrent mutations serially without loss', async () => {
+      const io = new MemoryFileIO()
+      const a = new BinaryStoreAdapter({ storeDir: 'test', compactThreshold: 1_000_000, fileIO: io })
+      await Promise.all(Array.from({ length: 50 }, (_, i) => a.putNode(serNode(`n${i}`, i))))
+      const ids = await a.allNodeIds()
+      expect(ids).toHaveLength(50)
+      await a.close()
+    })
+
+    it('does not lose writes that arrive during compaction', async () => {
+      const io = new DelayedMemoryFileIO(60, name => name === 'snapshot.msgpack')
+      const a = new BinaryStoreAdapter({ storeDir: 'test', compactThreshold: 2, fileIO: io })
+      await a.putNode(serNode('n1'))
+      await a.bulkPutNodes([serNode('n2'), serNode('n3'), serNode('n4')])
+      // Wait for the debounced compact to start; the snapshot write is slowed.
+      await new Promise(r => setTimeout(r, 120))
+      const pending = a.bulkPutNodes([serNode('n5')])
+      await new Promise(r => setTimeout(r, 10))
+      const pending2 = a.bulkPutNodes([serNode('n6')])
+      await Promise.all([pending, pending2])
       await a.close()
 
-      const b = new BinaryStoreAdapter({ storeDir: 'test', fileIO: io })
-      const all = await b.getAllVectors()
-      expect(all).toHaveLength(2)
-      expect(all.find(v => v.id === 'x')!.vector).toEqual([9, 8, 7])
+      const b = new BinaryStoreAdapter({ storeDir: 'test', compactThreshold: 2, fileIO: io })
+      const ids = await b.allNodeIds()
+      expect(ids.sort()).toEqual(['n1', 'n2', 'n3', 'n4', 'n5', 'n6'])
       await b.close()
     })
+
+    it('recovers when a WAL exists but the snapshot is stale', async () => {
+      const io = new MemoryFileIO()
+      const a = new BinaryStoreAdapter({ storeDir: 'test', compactThreshold: 1_000_000, fileIO: io })
+      await a.bulkPutNodes([serNode('a'), serNode('b')])
+      // Simulate a crash before the snapshot was written: the WAL holds the
+      // changes and no snapshot exists yet.
+      expect(await io.fileExists('snapshot.msgpack')).toBe(false)
+      await a.close()
+
+      const b = new BinaryStoreAdapter({ storeDir: 'test', compactThreshold: 1_000_000, fileIO: io })
+      expect((await b.allNodeIds()).sort()).toEqual(['a', 'b'])
+      await b.close()
+      // Recovery compacted the WAL into a snapshot.
+      expect(await io.fileExists('snapshot.msgpack')).toBe(true)
+    })
+
+    it('recovers when the WAL tail is truncated mid-append', async () => {
+      const io = new MemoryFileIO()
+      const entries: WalEntry[] = [
+        { kind: 'putNode', node: serNode('a') },
+        { kind: 'putNode', node: serNode('b') },
+      ]
+      const walData = encodeWalEntries(entries)
+      // Corrupt tail: simulate a crash during an append of a third entry.
+      const corrupted = new Uint8Array(walData.length + 7)
+      corrupted.set(walData)
+      corrupted.set([0x00, 0x00, 0x00, 0x14, 0x81], walData.length)
+      await io.writeFile('wal.msgpack', corrupted)
+
+      const a = new BinaryStoreAdapter({ storeDir: 'test', fileIO: io })
+      expect((await a.allNodeIds()).sort()).toEqual(['a', 'b'])
+      await a.close()
+    })
+
+    it('recovers cleanly when only a WAL exists after a crash during recovery', async () => {
+      const io = new MemoryFileIO()
+      const a = new BinaryStoreAdapter({ storeDir: 'test', compactThreshold: 1_000_000, fileIO: io })
+      await a.putNode(serNode('x'))
+      // Crash between WAL append and anything else.
+      await a.close()
+
+      const b = new BinaryStoreAdapter({ storeDir: 'test', compactThreshold: 1_000_000, fileIO: io })
+      expect((await b.allNodeIds())).toEqual(['x'])
+      await b.close()
+    })
+
+    it('throws when used after close', async () => {
+      const io = new MemoryFileIO()
+      const a = new BinaryStoreAdapter({ storeDir: 'test', fileIO: io })
+      await a.close()
+      await expect(a.putNode(serNode('late'))).rejects.toThrow(/closed/)
+      await expect(a.getNode('late')).rejects.toThrow(/closed/)
+    })
+
+    it('close is idempotent', async () => {
+      const io = new MemoryFileIO()
+      const a = new BinaryStoreAdapter({ storeDir: 'test', fileIO: io })
+      await a.putNode(serNode('n'))
+      await a.close()
+      await a.close()
+    })
+
+    it('survives a real filesystem round-trip with syncWrites', async () => {
+      const dir = await import('node:fs/promises').then(fsp => fsp.mkdtemp('polypack-sync-'))
+      try {
+        const a = new BinaryStoreAdapter({ storeDir: dir, syncWrites: true })
+        await a.bulkPutNodes([serNode('p1'), serNode('p2')])
+        await a.putVector('v1', [1, 2, 3])
+        await a.close()
+
+        const b = new BinaryStoreAdapter({ storeDir: dir, syncWrites: true })
+        expect((await b.allNodeIds()).sort()).toEqual(['p1', 'p2'])
+        expect(await b.getVectors(['v1'])).toEqual([{ id: 'v1', vector: [1, 2, 3] }])
+        await b.close()
+      } finally {
+        await import('node:fs/promises').then(fsp => fsp.rm(dir, { recursive: true, force: true }))
+      }
+    })
+
+    it('NodeFileIO leaves no temp file behind after a snapshot write', async () => {
+      const dir = await import('node:fs/promises').then(fsp => fsp.mkdtemp('polypack-nodeio-'))
+      try {
+        const io = new NodeFileIO(dir)
+        await io.writeFile('snapshot.msgpack', new Uint8Array([1, 2, 3]))
+        expect([...(await io.readFile('snapshot.msgpack'))!]).toEqual([1, 2, 3])
+        expect(await io.fileExists('snapshot.msgpack.tmp')).toBe(false)
+      } finally {
+        await import('node:fs/promises').then(fsp => fsp.rm(dir, { recursive: true, force: true }))
+      }
+    })
+  })
   })
 })

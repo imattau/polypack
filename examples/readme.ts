@@ -11,18 +11,20 @@ import {
   PolyGraph,
   VectorIndex,
   MemoryAdapter,
-  BinaryStoreAdapter,
   cosineSimilarity,
   euclideanSimilarity,
 } from '../src/index'
 import type { PolyNode, EdgeOwnership, GraphChangeEvent, DistanceFunction } from '../src/index'
+// On-disk binary persistence lives behind a platform subpath:
+//   import { BinaryStoreAdapter, NodeFileIO } from '../src/persistence/node'
+//   import { BinaryStoreAdapter, OPFSFileIO } from '../src/persistence/opfs'
 
 // ────────────────────────────────────────────────────────────
 // 1. CREATE A GRAPH
 // ────────────────────────────────────────────────────────────
 //
 // PolyGraph with no adapter = in-memory only (ephemeral).
-// Pass a MemoryAdapter for testable persistence, or
+// Pass a MemoryAdapter for testable persistence, or a
 // BinaryStoreAdapter for on-disk binary persistence.
 
 const graph = new PolyGraph(new MemoryAdapter())

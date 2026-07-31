@@ -1,7 +1,8 @@
 # API reference
 
-Polypack is ESM-only and requires Node.js 18 or newer. The browser adapter also
-requires IndexedDB. React is optional and only loaded by `@0xx0lostcause0xx0/polypack/react`.
+Polypack is ESM-only and requires Node.js 18 or newer. The browser persistence
+adapter additionally requires the File System Access API (OPFS). React is
+optional and only loaded by `@0xx0lostcause0xx0/polypack/react`.
 
 ## `@0xx0lostcause0xx0/polypack`
 
@@ -154,8 +155,8 @@ storage-level execution, plus `getEdgesBySources(ids, type?)` and
 Polypack falls back to the original node and edge methods, preserving
 compatibility with existing custom adapters.
 
-For node-only queries, offset and limit are delegated to the adapter. IndexedDB
-uses an early-stopping cursor when ordering and query shape permit it. Queries
+For node-only queries, offset and limit are delegated to the adapter.
+`BinaryStoreAdapter` uses an in-memory snapshot for persisted queries. Queries
 with similarity or graph post-processing retain pagination in the query layer so
 that filtering, traversal, and ranking occur before the page is selected.
 
@@ -208,14 +209,25 @@ comparisons reject vectors with mismatched dimensions.
 ### Persistence
 
 - `MemoryAdapter` stores serialized records in memory.
-- `IndexedDBAdapter({ name?, version?, nodeIndexes? })` persists browser data. Defaults to
-  database `polypack`, version `2`. Its node-type index accelerates persisted
-  type queries; existing default databases are upgraded automatically.
-- `nodeIndexes` is an array of node data fields, such as `['score', 'createdAt']`.
-  Constrained range queries ordered by one of these fields use the corresponding
-  IndexedDB index for ordered cursor paging. Fields must be valid dotted
-  IndexedDB key paths. When adding indexes to an existing custom-named database,
-  increment its configured schema `version` so IndexedDB runs the upgrade.
+- `BinaryStoreAdapter({ storeDir, compactThreshold?, fileIO?, syncWrites? })`
+  persists data as a MessagePack snapshot plus an append-only write-ahead log
+  (WAL). Nodes, edges, and vectors are committed atomically per batch; the WAL
+  is compacted into a snapshot once it passes `compactThreshold` (default 10,000
+  entries) and on `close()`. Startup replays the WAL, then persists a snapshot
+  before deleting it so a crash between those steps loses nothing. Recovery
+  also tolerates a truncated WAL tail from a mid-append crash.
+- `syncWrites: true` fsyncs WAL appends and snapshot writes (including the
+  containing directory) for crash durability at a throughput cost.
+- `BinaryStoreAdapter` lives behind platform subpaths so the core entry point
+  stays free of `node:` built-ins:
+  - `@0xx0lostcause0xx0/polypack/persistence/node` — `NodeFileIO` (filesystem).
+  - `@0xx0lostcause0xx0/polypack/persistence/opfs` — `OPFSFileIO` (browser
+    File System Access API).
+  - `@0xx0lostcause0xx0/polypack/persistence` — `MemoryFileIO` and the `FileIO`
+    type for tests and custom storage. When `fileIO` is omitted, a platform
+    default is created at first use.
+- `FileIO` is the storage contract: `readFile`, `writeFile`, `appendFile`,
+  `deleteFile`, `fileExists`. Implement it to plug in any backing store.
 - `PersistenceAdapter` is the contract for custom storage. It contains node,
   edge, and vector single/bulk operations plus `clearAll()` and `close()`.
 - `PersistenceChanges` describes one logical node/edge/vector commit. Adapters
@@ -224,15 +236,17 @@ comparisons reject vectors with mismatched dimensions.
 
 Adapter methods should reject on storage errors. Bulk methods should be atomic
 where the backing store permits it. `MemoryAdapter` applies changes through
-copy-on-commit maps, while `IndexedDBAdapter` uses one read-write transaction
-across all three stores. Existing custom adapters without `applyChanges` remain
-compatible but cannot guarantee cross-store atomicity through the fallback path.
+copy-on-commit maps, while `BinaryStoreAdapter` appends one WAL batch covering
+all three record kinds. Existing custom adapters without `applyChanges` remain
+compatible but cannot guarantee cross-record atomicity through the fallback
+path.
 
 ### Types and utilities
 
 The root exports `PolyNode`, `PolyEdge`, `EdgeOwnership`, `GraphChangeEvent`,
 `SerializedNode`, `SerializedEdge`, `VectorQuery`, `EdgeTypes`, `DataTransform`,
-aggregate types, `DistanceFunction`, `IndexedDBConfig`, and `PersistenceAdapter`.
+aggregate types, `DistanceFunction`, and `PersistenceAdapter`. Persistence
+types and adapters beyond `MemoryAdapter` live under the `persistence` subpaths.
 
 `edgeId(source, type, target)` produces the persistence edge key. Source IDs and
 edge types must not contain `::`; target IDs may contain it.

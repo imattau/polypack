@@ -4,7 +4,7 @@
 [![GitHub release](https://img.shields.io/github/v/release/imattau/polypack?logo=github)](https://github.com/imattau/polypack/releases/latest)
 [![CI](https://github.com/imattau/polypack/actions/workflows/ci.yml/badge.svg)](https://github.com/imattau/polypack/actions/workflows/ci.yml)
 
-Generic property graph engine with vector similarity search, edge ownership semantics, relational queries, and real-time sync. Runs in browser (IndexedDB) and Node.js (MemoryAdapter).
+Generic property graph engine with vector similarity search, edge ownership semantics, relational queries, and real-time sync. Runs in Node.js and the browser with pluggable persistence (in-memory, filesystem, or OPFS).
 
 ## Install
 
@@ -37,7 +37,7 @@ before the corresponding package is submitted to npm with provenance. See the
 - **Relational extensions** — `pluck`, `aggregate`, `groupAggregate`, `join`, `groupByVector` (clustering)
 - **Edge ownership** — `owned` (cascade delete), `shared` (orphan detection), `reference` (no-op)
 - **Reactive** — RxJS change events, batching, React hooks
-- **Pluggable persistence** — MemoryAdapter, IndexedDBAdapter, build your own
+- **Pluggable persistence** — MemoryAdapter, BinaryStoreAdapter (MessagePack + WAL), build your own
 - **Persisted queries** — asynchronous filtering and similarity across the full backing store
 - **Real-time sync** — acknowledgements, retry, deduplication, reconnect recovery, and echo suppression
 
@@ -100,7 +100,10 @@ graph.query()
 
 | Subpath | Contents |
 |---------|----------|
-| `@0xx0lostcause0xx0/polypack` | Core: PolyGraph, VectorIndex, GraphQuery, persistence adapters |
+| `@0xx0lostcause0xx0/polypack` | Core: PolyGraph, VectorIndex, GraphQuery, MemoryAdapter |
+| `@0xx0lostcause0xx0/polypack/persistence` | Platform-neutral persistence: adapters, `FileIO` types |
+| `@0xx0lostcause0xx0/polypack/persistence/node` | BinaryStoreAdapter + `NodeFileIO` for the filesystem |
+| `@0xx0lostcause0xx0/polypack/persistence/opfs` | BinaryStoreAdapter + `OPFSFileIO` for the browser |
 | `@0xx0lostcause0xx0/polypack/react` | React hooks: `useGraphQuery`, `useLiveQuery` |
 | `@0xx0lostcause0xx0/polypack/sync` | Sync layer: OpLog, SyncAdapter, SyncClient, SyncServer |
 
@@ -110,7 +113,8 @@ sync, lifecycle, ownership, and error contracts.
 ## Requirements
 
 - Node.js 18 or newer when used in Node.js.
-- A browser with IndexedDB when using `IndexedDBAdapter`.
+- A browser with the File System Access API (OPFS) when using
+  `@0xx0lostcause0xx0/polypack/persistence/opfs`.
 - Equal vector dimensions for similarity operations; mismatches throw `RangeError`.
 
 Polypack is distributed as native ES modules.

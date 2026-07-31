@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach } from 'vitest'
 import { MemoryAdapter } from '../src/persistence/memory'
 import { BinaryStoreAdapter } from '../src/persistence/binary-store'
-import { MemoryFileIO } from '../src/persistence/binary-file-io'
+import { MemoryFileIO } from '../src/persistence/file-io'
 import type { PersistenceAdapter } from '../src/persistence/adapter'
 import type { SerializedNode, SerializedEdge } from '../src/types'
 

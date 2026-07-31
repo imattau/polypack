@@ -27,7 +27,6 @@ export class HNSWIndex {
   private adjacency = new Map<number, Map<string, Set<string>>>()
   private entryPoint: string | null = null
   private maxLayer = -1
-  private removed = new Set<string>()
   private onChange?: (id: string) => void
   private distanceFn: DistanceFunction
   private config: Required<HNSWConfig>
@@ -49,8 +48,22 @@ export class HNSWIndex {
   add(id: string, vector: number[] | Float64Array): void {
     if (!id) throw new TypeError('Vector id must not be empty')
     assertFiniteVector(vector)
+    if (this.nodes.has(id)) this.remove(id)
+    const stored = new Float64Array(vector)
     const level = this.assignLevel()
-    this.nodes.set(id, vector instanceof Float64Array ? vector : new Float64Array(vector))
+    this.nodes.set(id, stored)
+    this.insertIntoGraph(id, level)
+    this.onChange?.(id)
+  }
+
+  /** Replace the vector and topology of an existing id (same as add). */
+  update(id: string, vector: number[] | Float64Array): void {
+    if (!id) throw new TypeError('Vector id must not be empty')
+    assertFiniteVector(vector)
+    if (this.nodes.has(id)) this.remove(id)
+    const stored = new Float64Array(vector)
+    const level = this.assignLevel()
+    this.nodes.set(id, stored)
     this.insertIntoGraph(id, level)
     this.onChange?.(id)
   }
@@ -58,8 +71,10 @@ export class HNSWIndex {
   hydrate(id: string, vector: number[] | Float64Array): void {
     if (!id) throw new TypeError('Vector id must not be empty')
     assertFiniteVector(vector)
+    if (this.nodes.has(id)) this.remove(id)
+    const stored = new Float64Array(vector)
     const level = this.assignLevel()
-    this.nodes.set(id, vector instanceof Float64Array ? vector : new Float64Array(vector))
+    this.nodes.set(id, stored)
     this.insertIntoGraph(id, level)
   }
 
@@ -67,8 +82,10 @@ export class HNSWIndex {
     for (const { id, vector } of entries) {
       if (!id) throw new TypeError('Vector id must not be empty')
       assertFiniteVector(vector)
+      if (this.nodes.has(id)) this.remove(id)
+      const stored = new Float64Array(vector)
       const level = this.assignLevel()
-      this.nodes.set(id, vector instanceof Float64Array ? vector : new Float64Array(vector))
+      this.nodes.set(id, stored)
       this.insertIntoGraph(id, level)
       this.onChange?.(id)
     }
@@ -76,12 +93,8 @@ export class HNSWIndex {
 
   remove(id: string): void {
     if (!this.nodes.has(id)) return
-    this.removed.add(id)
     this.nodes.delete(id)
-    this.nodeLevel.delete(id)
-    if (this.entryPoint === id) {
-      this.entryPoint = this.pickNewEntryPoint()
-    }
+    this.unlinkNode(id)
   }
 
   removeMany(ids: string[]): void {
@@ -119,7 +132,6 @@ export class HNSWIndex {
     this.nodes.clear()
     this.nodeLevel.clear()
     this.adjacency.clear()
-    this.removed.clear()
     this.entryPoint = null
     this.maxLayer = -1
   }
@@ -129,9 +141,7 @@ export class HNSWIndex {
   }
 
   *entries(): IterableIterator<[string, Float64Array]> {
-    for (const [id, vector] of this.nodes) {
-      if (!this.removed.has(id)) yield [id, vector]
-    }
+    for (const [id, vector] of this.nodes) yield [id, new Float64Array(vector)]
   }
 
   has(id: string): boolean {
@@ -139,7 +149,8 @@ export class HNSWIndex {
   }
 
   get(id: string): Float64Array | undefined {
-    return this.nodes.get(id)
+    const vector = this.nodes.get(id)
+    return vector ? new Float64Array(vector) : undefined
   }
 
   // ── Internal helpers ──
@@ -166,7 +177,37 @@ export class HNSWIndex {
     if (!layerAdj) return []
     const neighbors = layerAdj.get(nodeId)
     if (!neighbors) return []
-    return [...neighbors].filter(nid => !this.removed.has(nid) && this.nodes.has(nid))
+    return [...neighbors].filter(nid => this.nodes.has(nid))
+  }
+
+  /**
+   * Physically remove `id` from the graph topology: drop its adjacency entry
+   * at every layer and remove it from every neighbour's neighbour set. This
+   * keeps adjacency memory bounded under churn and leaves no tombstones.
+   */
+  private unlinkNode(id: string): void {
+    for (const layerAdj of this.adjacency.values()) {
+      const neighbors = layerAdj.get(id)
+      if (!neighbors) continue
+      for (const nid of neighbors) {
+        const nSet = layerAdj.get(nid)
+        if (nSet) {
+          nSet.delete(id)
+          if (nSet.size === 0) layerAdj.delete(nid)
+        }
+      }
+      layerAdj.delete(id)
+    }
+    this.nodeLevel.delete(id)
+    if (this.entryPoint === id) {
+      this.entryPoint = this.pickNewEntryPoint()
+    }
+    while (this.maxLayer >= 0) {
+      const layerAdj = this.adjacency.get(this.maxLayer)
+      if (layerAdj && layerAdj.size > 0) break
+      this.adjacency.delete(this.maxLayer)
+      this.maxLayer--
+    }
   }
 
   private pickNewEntryPoint(): string | null {
@@ -174,7 +215,7 @@ export class HNSWIndex {
       const layerAdj = this.adjacency.get(lc)
       if (!layerAdj) continue
       for (const nid of layerAdj.keys()) {
-        if (!this.removed.has(nid) && this.nodes.has(nid)) return nid
+        if (this.nodes.has(nid)) return nid
       }
     }
     return null

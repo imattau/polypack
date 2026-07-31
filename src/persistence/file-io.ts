@@ -1,7 +1,3 @@
-import * as fs from 'node:fs'
-import * as fsp from 'node:fs/promises'
-import * as path from 'node:path'
-
 export interface FileIO {
   readFile(name: string): Promise<Uint8Array | null>
   writeFile(name: string, data: Uint8Array): Promise<void>
@@ -14,71 +10,23 @@ export function isNode(): boolean {
   return typeof process !== 'undefined' && process.versions != null && (process.versions as Record<string, string>).node != null
 }
 
-export async function createFileIO(storeDir: string): Promise<FileIO> {
+/**
+ * Create a platform-appropriate {@link FileIO}. The Node.js implementation is
+ * imported dynamically so browser bundles never resolve `node:` built-ins. The
+ * specifier is kept non-literal so bundlers leave the import for runtime
+ * resolution instead of statically bundling `node-file-io` (and its `node:`
+ * built-ins) into browser output.
+ */
+export async function createFileIO(storeDir: string, syncWrites = false): Promise<FileIO> {
   if (isNode()) {
-    return new NodeFileIO(storeDir)
+    const nodeFileIoSpec = './node-file-io.js'
+    const mod = (await import(nodeFileIoSpec)) as { NodeFileIO: new (dir: string, syncWrites: boolean) => FileIO }
+    return new mod.NodeFileIO(storeDir, syncWrites)
   }
   if (typeof navigator !== 'undefined' && typeof (navigator as unknown as Record<string, unknown>).storage !== 'undefined') {
     return OPFSFileIO.create(storeDir)
   }
   throw new Error('No filesystem available (not Node.js and no OPFS support)')
-}
-
-export class NodeFileIO implements FileIO {
-  private dir: string
-
-  constructor(dir: string) {
-    this.dir = dir
-  }
-
-  private resolve(name: string): string {
-    return path.join(this.dir, name)
-  }
-
-  async readFile(name: string): Promise<Uint8Array | null> {
-    try {
-      return await fsp.readFile(this.resolve(name))
-    } catch (err: unknown) {
-      if ((err as { code?: string }).code === 'ENOENT') return null
-      throw err
-    }
-  }
-
-  async writeFile(name: string, data: Uint8Array): Promise<void> {
-    await fsp.mkdir(this.dir, { recursive: true })
-    const filePath = this.resolve(name)
-    const tmpPath = filePath + '.tmp'
-    await fsp.writeFile(tmpPath, data)
-    await fsp.rename(tmpPath, filePath)
-  }
-
-  async appendFile(name: string, data: Uint8Array): Promise<void> {
-    await fsp.mkdir(this.dir, { recursive: true })
-    const filePath = this.resolve(name)
-    const handle = await fsp.open(filePath, 'a')
-    try {
-      await handle.write(data)
-    } finally {
-      await handle.close()
-    }
-  }
-
-  async deleteFile(name: string): Promise<void> {
-    try {
-      await fsp.unlink(this.resolve(name))
-    } catch (err: unknown) {
-      if ((err as { code?: string }).code !== 'ENOENT') throw err
-    }
-  }
-
-  async fileExists(name: string): Promise<boolean> {
-    try {
-      await fsp.access(this.resolve(name), fs.constants.F_OK)
-      return true
-    } catch {
-      return false
-    }
-  }
 }
 
 export class OPFSFileIO implements FileIO {

@@ -48,7 +48,7 @@ export class VectorIndex {
   add(id: string, vector: number[] | Float64Array): void {
     if (!id) throw new TypeError('Vector id must not be empty')
     assertFiniteVector(vector)
-    this.vectors.set(id, vector instanceof Float64Array ? vector : new Float64Array(vector))
+    this.vectors.set(id, new Float64Array(vector))
     this.onChange?.(id)
   }
 
@@ -56,14 +56,14 @@ export class VectorIndex {
   hydrate(id: string, vector: number[] | Float64Array): void {
     if (!id) throw new TypeError('Vector id must not be empty')
     assertFiniteVector(vector)
-    this.vectors.set(id, vector instanceof Float64Array ? vector : new Float64Array(vector))
+    this.vectors.set(id, new Float64Array(vector))
   }
 
   addMany(entries: Array<{ id: string; vector: number[] | Float64Array }>): void {
     for (const { id, vector } of entries) {
       if (!id) throw new TypeError('Vector id must not be empty')
       assertFiniteVector(vector)
-      this.vectors.set(id, vector instanceof Float64Array ? vector : new Float64Array(vector))
+      this.vectors.set(id, new Float64Array(vector))
       this.onChange?.(id)
     }
   }
@@ -139,7 +139,7 @@ export class VectorIndex {
   }
 
   *entries(): IterableIterator<[string, Float64Array]> {
-    for (const [id, vector] of this.vectors) yield [id, vector]
+    for (const [id, vector] of this.vectors) yield [id, new Float64Array(vector)]
   }
 
   has(id: string): boolean {
@@ -147,7 +147,8 @@ export class VectorIndex {
   }
 
   get(id: string): Float64Array | undefined {
-    return this.vectors.get(id)
+    const vector = this.vectors.get(id)
+    return vector ? new Float64Array(vector) : undefined
   }
 }
 import { assertFiniteVector, assertNonNegativeInteger } from './utils.js'
