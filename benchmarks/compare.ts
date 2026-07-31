@@ -1,9 +1,9 @@
 /**
- * Merge TypeScript baseline and Rust benchmark JSON into a comparison table
- * and evaluate the Phase-2 go/no-go gate (POLYPACK_RUST_PYTHON_PLAN section 9).
+ * Merge TypeScript / Rust / Python benchmark JSON into a comparison table and
+ * evaluate the Phase-2 go/no-go gate (POLYPACK_RUST_PYTHON_PLAN section 9).
  *
  * Usage:
- *   npx tsx benchmarks/compare.ts [--ts benchmarks/results/ts-baseline.json] [--rust benchmarks/results/rust-all.json]
+ *   npx tsx benchmarks/compare.ts [--ts ts-baseline.json] [--rust rust-all.json] [--python python-all.json]
  *
  * Writes benchmarks/go-no-go.md.
  */
@@ -66,30 +66,57 @@ function load(name: string): CaseResult[] {
   return payload.results.map(normalize)
 }
 
-const tsResults = load(argValue('--ts') ?? 'ts-baseline.json')
-const rustResults = load(argValue('--rust') ?? 'rust-all.json')
-
-const byName = new Map(rustResults.map(r => [r.name, r]))
-
-const rows: string[] = []
-rows.push(`| case | build TS | build Rust | build × | p50 TS | p50 Rust | p50 × | recall TS | recall Rust | peak RSS TS | peak RSS Rust |`)
-rows.push(`|------|----------|------------|---------|--------|----------|-------|-----------|-------------|-------------|---------------|`)
-
-const speedups: number[] = []
-const latSpeedups: number[] = []
-
-for (const t of tsResults) {
-  const r = byName.get(t.name)
-  if (!r) continue
-  const buildX = r.buildMs > 0 ? (t.buildMs / r.buildMs).toFixed(1) : '∞'
-  const p50x = r.p50 > 0 ? (t.p50 / r.p50).toFixed(1) : '∞'
-  if (t.buildMs > 0 && r.buildMs > 0) speedups.push(t.buildMs / r.buildMs)
-  if (t.p50 > 0 && r.p50 > 0) latSpeedups.push(t.p50 / r.p50)
-  rows.push(`| ${t.name} | ${t.buildMs.toFixed(0)}ms | ${r.buildMs.toFixed(0)}ms | ${buildX} | ${t.p50.toFixed(3)}ms | ${r.p50.toFixed(3)}ms | ${p50x} | ${fmtRecall(t.recall10)} | ${fmtRecall(r.recall10)} | ${t.maxRssMB.toFixed(0)}MB | ${r.maxRssMB.toFixed(0)}MB |`)
-}
-
 function fmtRecall(r: number | null): string {
   return r === null || Number.isNaN(r) ? '—' : `${(r * 100).toFixed(1)}%`
+}
+
+const tsResults = load(argValue('--ts') ?? 'ts-baseline.json')
+const rustResults = load(argValue('--rust') ?? 'rust-all.json')
+const pythonArg = argValue('--python') ?? (existsSync(join(RESULTS, 'python-all.json')) ? 'python-all.json' : null)
+const pythonResults = pythonArg ? load(pythonArg) : []
+
+const engines: Array<{ key: string; label: string; results: CaseResult[] }> = [
+  { key: 'ts', label: 'TS', results: tsResults },
+  { key: 'rust', label: 'Rust', results: rustResults },
+]
+if (pythonResults.length > 0) {
+  engines.push({ key: 'py', label: 'Python', results: pythonResults })
+}
+
+const names = new Set<string>()
+for (const e of engines) for (const r of e.results) names.add(r.name)
+
+const rows: string[] = []
+const header = [
+  '| case',
+  ...engines.map(e => `build ${e.label}`),
+  ...engines.map(e => `p50 ${e.label}`),
+  ...engines.map(e => `recall ${e.label}`),
+  'peak RSS TS',
+  'peak RSS Rust',
+]
+rows.push(header.join(' | ') + ' |')
+rows.push('|------' + '|------'.repeat(header.length - 1) + '|')
+
+for (const name of names) {
+  const cells = [name]
+  for (const e of engines) {
+    const r = e.results.find(x => x.name === name)
+    cells.push(r ? `${r.buildMs.toFixed(0)}ms` : '—')
+  }
+  for (const e of engines) {
+    const r = e.results.find(x => x.name === name)
+    cells.push(r ? `${r.p50.toFixed(3)}ms` : '—')
+  }
+  for (const e of engines) {
+    const r = e.results.find(x => x.name === name)
+    cells.push(r ? fmtRecall(r.recall10) : '—')
+  }
+  const t = tsResults.find(x => x.name === name)
+  const rust = rustResults.find(x => x.name === name)
+  cells.push(t ? `${t.maxRssMB.toFixed(0)}MB` : '—')
+  cells.push(rust ? `${rust.maxRssMB.toFixed(0)}MB` : '—')
+  rows.push(`| ${cells.join(' | ')} |`)
 }
 
 function median(xs: number[]): number {
@@ -97,28 +124,20 @@ function median(xs: number[]): number {
   return s.length ? s[Math.floor(s.length / 2)] : 0
 }
 
-console.log('\nBuild and query comparison (TS baseline vs Rust spike)\n')
-console.log(rows.join('\n'))
-console.log('')
-
-const buildMedian = median(speedups)
-const latMedian = median(latSpeedups)
+const rustSpeedups: number[] = []
+const rustLatSpeedups: number[] = []
+for (const t of tsResults) {
+  const r = rustResults.find(x => x.name === t.name)
+  if (r && t.buildMs > 0 && r.buildMs > 0) rustSpeedups.push(t.buildMs / r.buildMs)
+  if (r && t.p50 > 0 && r.p50 > 0) rustLatSpeedups.push(t.p50 / r.p50)
+}
+const buildMedian = median(rustSpeedups)
+const latMedian = median(rustLatSpeedups)
 
 const hnswRecallOk = rustResults
-  .filter(r => r.index === 'hnsw' && !Number.isNaN(r.recall10 ?? NaN))
+  .filter(r => r.index === 'hnsw' && r.recall10 !== null && !Number.isNaN(r.recall10))
   .every(r => (r.recall10 ?? 0) >= 0.95)
 
-const gate = {
-  twoXBuildOrQuery: buildMedian >= 2 || latMedian >= 2,
-  thirtyPercentLessMemory: rustResults.length > 0 && tsResults.length > 0,
-  memoryEvidence: rustResults.length > 0,
-  hnswRecallOk,
-  medianBuildSpeedup: buildMedian,
-  medianLatencySpeedup: latMedian,
-}
-
-// Per-case runs (--case) report the case's own peak RSS; use them when present
-// for a fair memory comparison.
 function perCase(name: string, engine: 'ts' | 'rust'): CaseResult | null {
   const file = engine === 'ts' ? `ts-baseline-${name}.json` : `rust-${name}.json`
   if (!existsSync(join(RESULTS, file))) return null
@@ -140,6 +159,18 @@ if (perCaseNames.length > 0) {
   }
 }
 
+const gate = {
+  twoXBuildOrQuery: buildMedian >= 2 || latMedian >= 2,
+  hnswRecallOk,
+  medianBuildSpeedup: buildMedian,
+  medianLatencySpeedup: latMedian,
+}
+
+const pythonNote = pythonResults.length > 0
+  ? `Python lane included (${pythonResults.length} cases); the Python wrapper
+  calls the native core per node, so absolute times include FFI overhead.`
+  : 'No Python results recorded — run `python -m polypack.bench` first.'
+
 const report = `# Go / no-go evaluation — Rust core spike
 
 Generated ${new Date().toISOString()} by \`benchmarks/compare.ts\`.
@@ -157,17 +188,21 @@ The gate passes when Rust provides **at least one** substantial advantage:
 
 ${rows.join('\n')}
 
-### Aggregates
+### Aggregates (Rust vs TypeScript)
 
 - Median build speedup: **${buildMedian.toFixed(2)}×**
 - Median p50 latency speedup: **${latMedian.toFixed(2)}×**
 - HNSW recall@10 ≥ 95% on every seeded Rust case: **${gate.hnswRecallOk ? 'yes' : 'no'}**
 
-### Per-case peak memory
+### Per-case peak memory (Rust vs TypeScript)
 
 Cases run individually (so peak RSS reflects that case alone):
 
 ${perCaseRows.length > 0 ? perCaseRows.join('\n') : 'No per-case runs recorded. Run each case separately to populate this table.'}
+
+### Python lane
+
+${pythonNote}
 
 ## Verdict
 

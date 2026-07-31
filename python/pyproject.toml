@@ -1,0 +1,21 @@
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "polypack"
+version = "0.1.0"
+description = "Embedded local-first property graph with vector search"
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "MIT" }
+dependencies = ["numpy>=1.20"]
+
+[tool.maturin]
+python-source = "."
+module-name = "polypack._core"
+manifest-path = "../crates/polypack-python/Cargo.toml"
+features = ["pyo3/extension-module"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

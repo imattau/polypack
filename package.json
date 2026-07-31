@@ -67,6 +67,7 @@
     "test:all": "vitest run",
     "test:gc": "NODE_OPTIONS=\"--expose-gc\" vitest run tests/cache-growth.test.ts",
     "test:conformance": "vitest run tests/conformance",
+    "test:native": "vitest run tests/native",
     "test:stress": "NODE_OPTIONS=\"--expose-gc\" vitest run tests/stress.test.ts",
     "test:watch": "vitest",
     "bench:ts": "tsx benchmarks/run-ts.ts",
@@ -93,6 +94,7 @@
     }
   },
   "devDependencies": {
+    "@napi-rs/cli": "^3.8.1",
     "@testing-library/react": "^16.3.2",
     "@types/node": "^26.1.1",
     "@types/react": "^19.2.17",

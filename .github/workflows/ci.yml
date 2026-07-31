@@ -23,3 +23,43 @@ jobs:
       - run: npm ci
       - run: npm run check
       - run: npm pack --dry-run
+
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --release --manifest-path crates/Cargo.toml
+      - run: cargo clippy --all-targets --manifest-path crates/Cargo.toml -- -D warnings
+
+  native:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - run: npm ci
+      - run: npm run build:binary --prefix packages/node-native
+      - run: npm run test:native
+      - run: npm run test:conformance
+
+  python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install maturin
+        run: pip install maturin numpy pytest
+      - name: Build extension
+        run: maturin develop --manifest-path crates/polypack-python/Cargo.toml
+        working-directory: python
+      - name: Run Python tests
+        run: python -m pytest -q
+        working-directory: python
+

@@ -45,6 +45,21 @@ All notable changes to this project are documented here. This project follows
   p50/p95/p99 query latencies, and runs with `--expose-gc` so heap numbers are
   accurate.
 
+### Added
+
+- `crates/polypack-node` — NAPI-RS bindings exposing the Rust vector core
+  (exact + HNSW) to Node, with a `packages/node-native` wrapper that provides
+  drop-in `NativeVectorIndex`/`NativeHnswIndex` classes, a `createNativeVectorIndex`
+  factory for `PolyGraph`'s non-breaking `createVectorIndex` hook, and
+  `engineInfo()`/`isNativeAvailable()` diagnostics. Verified by
+  `npm run test:native` against the same conformance fixtures.
+- `crates/polypack-python` — PyO3 bindings (`polypack._core`) with NumPy
+  input, GIL release around long operations, and the `errors.md` exception
+  hierarchy. `python/polypack` ships a Python-native `PolyGraph` + fluent
+  query API over the Rust vector core, passing the shared conformance fixtures
+  (except hot-cache eviction, deferred) and benchmarked on the same seeded
+  matrix.
+
 ## [2.3.0] - 2026-07-20
 
 ### Breaking changes

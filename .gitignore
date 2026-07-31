@@ -2,3 +2,11 @@ node_modules/
 dist/
 *.tgz
 target/
+
+# Python
+python/.venv/
+__pycache__/
+*.pyc
+*.so
+*.egg-info/
+*.node

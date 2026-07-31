@@ -100,6 +100,16 @@ impl ExactIndex {
         self.entries.len()
     }
 
+    pub fn clear(&mut self) {
+        self.entries.clear();
+        self.positions.clear();
+    }
+
+    /// (id, vector) pairs in insertion order.
+    pub fn entries(&self) -> Vec<(String, Vec<f64>)> {
+        self.entries.clone()
+    }
+
     pub fn query(&self, vector: &[f64], top_k: usize, threshold: f64) -> Result<Vec<ScoredId>> {
         if !vector.iter().all(|x| x.is_finite()) {
             return Err(PolypackError::InvalidArgument("query vector must contain finite values".into()));

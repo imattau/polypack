@@ -142,6 +142,10 @@ impl HnswIndex {
         self.nodes.len()
     }
 
+    pub fn nodes(&self) -> &HashMap<String, Vec<f64>> {
+        &self.nodes
+    }
+
     pub fn has(&self, id: &str) -> bool {
         self.nodes.contains_key(id)
     }
