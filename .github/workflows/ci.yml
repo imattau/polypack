@@ -80,11 +80,14 @@ jobs:
         run: pip install dist/*.whl
         working-directory: python
       - name: Run Python tests against the installed wheel
+        shell: bash
         env:
           POLYPACK_FIXTURES: ${{ github.workspace }}/fixtures/conformance
         run: |
-          cd "$RUNNER_TEMP"
-          python -m pytest "$GITHUB_WORKSPACE/python/tests" -q --rootdir="$GITHUB_WORKSPACE/python"
+          WS="${GITHUB_WORKSPACE//\\//}"
+          TMP="${RUNNER_TEMP//\\//}"
+          cd "$TMP"
+          python -m pytest "$WS/python/tests" -q
       - name: Upload wheel
         uses: actions/upload-artifact@v4
         with:
