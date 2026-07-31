@@ -195,3 +195,6 @@ jobs:
           mv "$GITHUB_WORKSPACE"/*.whl dist/
       - name: Publish wheels to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          # allow re-running a release without failing on already-uploaded files
+          skip-existing: true
