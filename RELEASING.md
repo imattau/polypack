@@ -10,7 +10,7 @@ The native stack shares one version and is released together:
 |---|---|
 | `polypack-core` crate (`crates/polypack-core`) | `0.1.0` |
 | `@0xx0lostcause0xx0/polypack-native` + per-platform packages | `0.1.0` |
-| `polypack` Python wheel | `0.1.0` |
+| `polypack-db` Python wheel | `0.1.0` |
 
 The TypeScript package follows its own semver (currently `2.x`); it is not
 bumped for native-stack releases unless its public API changes.
@@ -82,11 +82,11 @@ publisher you register.
 2. Fill in:
    - **Workflow name**: `release.yml`
    - **Environment name**: `release`
-   - **Project name**: `polypack`
+   - **Project name**: `polypack-db`
    - **Owner**: `imattau`
    - **Repository**: `polypack`
-3. Save. The `polypack` project name is available (verified); the first
-   trusted publish creates it.
+3. Save. The `polypack-db` project name matches the wheel's
+   `[project] name`; the first trusted publish creates it.
 
 The `release` GitHub environment is referenced by the workflow; create it in
 **Settings → Environments → New environment → `release`** (no deployment

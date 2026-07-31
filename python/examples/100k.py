@@ -2,7 +2,7 @@
 
 Run against the built wheel (no Rust toolchain required):
 
-    pip install polypack-0.1.0-*.whl
+    pip install polypack_db-0.1.0-*.whl
     python examples/100k.py
 """
 
