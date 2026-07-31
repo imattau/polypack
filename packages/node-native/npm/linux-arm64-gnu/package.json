@@ -1,0 +1,19 @@
+{
+  "name": "@0xx0lostcause0xx0/polypack-native-linux-arm64-gnu",
+  "version": "0.1.0",
+  "cpu": [
+    "arm64"
+  ],
+  "main": "polypack-native.linux-arm64-gnu.node",
+  "files": [
+    "polypack-native.linux-arm64-gnu.node"
+  ],
+  "description": "NAPI-RS bindings exposing the polypack-core vector engine to Node.js",
+  "license": "MIT",
+  "os": [
+    "linux"
+  ],
+  "libc": [
+    "glibc"
+  ]
+}

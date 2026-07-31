@@ -85,6 +85,13 @@ All notable changes to this project are documented here. This project follows
   (`benchmarks/query-gate.md`) shows per-query FFI serialization makes native
   in-memory delegation ~46× slower at 50K nodes, so in-memory GraphQuery stays
   on TypeScript; the Rust executor serves Python and whole-store queries.
+- Release hardening: per-platform native npm packages
+  (`polypack-native-<triple>`) with `optionalDependencies`, an abi3 Python
+  wheel build, a clean-venv 100K-vector example, cross-platform CI
+  (macOS/Windows) for Rust, native, and Python, a `package` job running the
+  release-candidate suite (clean Rust-free native install + clean-venv wheel
+  install), and `RELEASING.md` documenting the coordinated versioning and
+  release rules.
 
 ## [2.3.0] - 2026-07-20
 

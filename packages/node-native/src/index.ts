@@ -32,13 +32,30 @@ const TRIPLES: Record<string, string> = {
   'win32-x64': 'win32-x64-msvc',
 }
 
+/** Published per-platform package names (optionalDependencies). */
+const PLATFORM_PACKAGES: Record<string, string> = {
+  'linux-x64-gnu': '@0xx0lostcause0xx0/polypack-native-linux-x64-gnu',
+  'linux-arm64-gnu': '@0xx0lostcause0xx0/polypack-native-linux-arm64-gnu',
+  'darwin-x64': '@0xx0lostcause0xx0/polypack-native-darwin-x64',
+  'darwin-arm64': '@0xx0lostcause0xx0/polypack-native-darwin-arm64',
+  'win32-x64-msvc': '@0xx0lostcause0xx0/polypack-native-win32-x64-msvc',
+}
+
 function loadNative(): NativeBinding | null {
   try {
     const triple = TRIPLES[`${process.platform}-${process.arch}`]
     if (!triple) return null
     const name = `polypack-native.${triple}.node`
-    // Bundled build resolves from dist/; source usage (vitest) resolves from
-    // src/ with the binaries in ../dist.
+    // 1. Installed platform package (published distribution).
+    const platformPkg = PLATFORM_PACKAGES[triple]
+    if (platformPkg) {
+      try {
+        return require(platformPkg) as NativeBinding
+      } catch {
+        // not installed — fall through to the local monorepo build
+      }
+    }
+    // 2. Local monorepo build.
     const candidates = [
       join(THIS_DIR, '..', 'dist', name),
       join(THIS_DIR, name),

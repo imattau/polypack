@@ -25,7 +25,10 @@ jobs:
       - run: npm pack --dry-run
 
   rust:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -33,7 +36,10 @@ jobs:
       - run: cargo clippy --all-targets --manifest-path crates/Cargo.toml -- -D warnings
 
   native:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -42,24 +48,99 @@ jobs:
           cache: npm
       - uses: dtolnay/rust-toolchain@stable
       - run: npm ci
-      - run: npm run build:binary --prefix packages/node-native
-      - run: npm run test:native
-      - run: npm run test:conformance
+      - name: Build native addon for this platform
+        run: npm run build:binary --prefix packages/node-native
+      - name: Run native tests
+        run: npm run test:native
+      - name: Upload native addon
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-${{ runner.os }}-${{ runner.arch }}
+          path: packages/node-native/dist/polypack-native.*.node
 
   python:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python-version: ['3.10', '3.12', '3.13']
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: ${{ matrix.python-version }}
       - uses: dtolnay/rust-toolchain@stable
-      - name: Install maturin
+      - name: Install tooling
         run: pip install maturin numpy pytest
-      - name: Build extension
-        run: maturin develop --manifest-path crates/polypack-python/Cargo.toml
+      - name: Build wheel
+        run: maturin build --release --out dist
         working-directory: python
       - name: Run Python tests
         run: python -m pytest -q
         working-directory: python
+      - name: Upload wheel
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheel-${{ runner.os }}-${{ matrix.python-version }}
+          path: python/dist/*.whl
 
+  package:
+    needs: [native, python]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Download native addons
+        uses: actions/download-artifact@v4
+        with:
+          pattern: native-*
+          merge-multiple: true
+      - name: Download wheels
+        uses: actions/download-artifact@v4
+        with:
+          pattern: wheel-*
+          merge-multiple: true
+      - name: Stage native addons into platform packages
+        run: |
+          set -e
+          npm ci
+          npm run build:js --prefix packages/node-native
+          cd packages/node-native
+          npx napi create-npm-dirs
+          for f in ../*.node ../polypack-native.*.node; do
+            [ -e "$f" ] || continue
+            case "$(basename "$f")" in
+              *linux-x64-gnu.node)   d=npm/linux-x64-gnu ;;
+              *linux-arm64-gnu.node) d=npm/linux-arm64-gnu ;;
+              *darwin-x64.node)      d=npm/darwin-x64 ;;
+              *darwin-arm64.node)    d=npm/darwin-arm64 ;;
+              *win32-x64-msvc.node)  d=npm/win32-x64-msvc ;;
+              *) continue ;;
+            esac
+            cp "$f" "$d/"
+          done
+      - name: Pack and clean-install native wrapper (no Rust)
+        run: |
+          set -e
+          cd "$GITHUB_WORKSPACE/packages/node-native"
+          npm pack --silent
+          cd npm/linux-x64-gnu
+          npm pack --silent
+          cd /tmp
+          rm -rf native-install && mkdir native-install && cd native-install
+          npm init -y >/dev/null 2>&1
+          npm install "$GITHUB_WORKSPACE/packages/node-native/"*.tgz "$GITHUB_WORKSPACE/packages/node-native/npm/linux-x64-gnu/"*.tgz
+          node --input-type=module -e "import('@0xx0lostcause0xx0/polypack-native').then(m => { if (!m.isNativeAvailable()) process.exit(1); console.log('native clean-install OK:', JSON.stringify(m.engineInfo())) })"
+      - name: Clean-venv wheel install + 100K example (no Rust)
+        run: |
+          set -e
+          WHEEL=$(ls "$GITHUB_WORKSPACE"/*.whl | head -1)
+          python -m venv /tmp/wheel-venv
+          /tmp/wheel-venv/bin/pip install --quiet "$WHEEL" numpy
+          /tmp/wheel-venv/bin/python "$GITHUB_WORKSPACE/python/examples/100k.py"

@@ -1,0 +1,16 @@
+{
+  "name": "@0xx0lostcause0xx0/polypack-native-win32-x64-msvc",
+  "version": "0.1.0",
+  "cpu": [
+    "x64"
+  ],
+  "main": "polypack-native.win32-x64-msvc.node",
+  "files": [
+    "polypack-native.win32-x64-msvc.node"
+  ],
+  "description": "NAPI-RS bindings exposing the polypack-core vector engine to Node.js",
+  "license": "MIT",
+  "os": [
+    "win32"
+  ]
+}

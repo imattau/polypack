@@ -15,15 +15,31 @@
     "dist",
     "src"
   ],
+  "optionalDependencies": {
+    "@0xx0lostcause0xx0/polypack-native-darwin-x64": "0.1.0",
+    "@0xx0lostcause0xx0/polypack-native-darwin-arm64": "0.1.0",
+    "@0xx0lostcause0xx0/polypack-native-linux-x64-gnu": "0.1.0",
+    "@0xx0lostcause0xx0/polypack-native-linux-arm64-gnu": "0.1.0",
+    "@0xx0lostcause0xx0/polypack-native-win32-x64-msvc": "0.1.0"
+  },
   "napi": {
-    "name": "polypack-native",
-    "triples": {}
+    "binaryName": "polypack-native",
+    "packageName": "@0xx0lostcause0xx0/polypack-native",
+    "targets": [
+      "x86_64-apple-darwin",
+      "aarch64-apple-darwin",
+      "x86_64-pc-windows-msvc",
+      "x86_64-unknown-linux-gnu",
+      "aarch64-unknown-linux-gnu"
+    ]
   },
   "scripts": {
     "build": "npm run build:binary && npm run build:js",
     "build:binary": "napi build --platform --release --manifest-path ../../crates/polypack-node/Cargo.toml --output-dir dist --no-js && rm -f dist/index.d.ts",
     "build:debug": "napi build --platform --manifest-path ../../crates/polypack-node/Cargo.toml --output-dir dist --no-js && rm -f dist/index.d.ts && npm run build:js",
-    "build:js": "esbuild src/index.ts --bundle --format=esm --platform=node --outfile=dist/index.js"
+    "build:js": "esbuild src/index.ts --bundle --format=esm --platform=node --outfile=dist/index.js",
+    "create-npm-dirs": "napi create-npm-dirs",
+    "pre-publish": "napi pre-publish"
   },
   "devDependencies": {
     "@napi-rs/cli": "^3.8.1",

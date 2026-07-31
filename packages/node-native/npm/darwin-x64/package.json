@@ -1,0 +1,16 @@
+{
+  "name": "@0xx0lostcause0xx0/polypack-native-darwin-x64",
+  "version": "0.1.0",
+  "cpu": [
+    "x64"
+  ],
+  "main": "polypack-native.darwin-x64.node",
+  "files": [
+    "polypack-native.darwin-x64.node"
+  ],
+  "description": "NAPI-RS bindings exposing the polypack-core vector engine to Node.js",
+  "license": "MIT",
+  "os": [
+    "darwin"
+  ]
+}
