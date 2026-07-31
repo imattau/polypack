@@ -31,16 +31,19 @@ export class HNSWIndex {
   private distanceFn: DistanceFunction
   private config: Required<HNSWConfig>
   private mL: number
+  private levelRng: () => number
 
   constructor(
     onChange?: (id: string) => void,
     distanceFn?: DistanceFunction,
     config?: HNSWConfig,
+    rng?: () => number,
   ) {
     this.onChange = onChange
     this.distanceFn = distanceFn ?? cosineSimilarity
     this.config = { ...DEF, ...config }
     this.mL = 1 / Math.log(Math.max(this.config.M, 2))
+    this.levelRng = rng ?? Math.random
   }
 
   // ── Public API ──
@@ -163,7 +166,7 @@ export class HNSWIndex {
   }
 
   private assignLevel(): number {
-    return Math.floor(-Math.log(Math.random()) * this.mL)
+    return Math.floor(-Math.log(this.levelRng()) * this.mL)
   }
 
   private ensureLayer(layer: number): void {

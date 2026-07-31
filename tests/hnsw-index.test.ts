@@ -359,7 +359,8 @@ describe('HNSWIndex', () => {
       const count = 500
       const rand = mulberry32(1234)
       const exact = new VectorIndex()
-      const ann = new HNSWIndex(undefined, undefined, { M: 16, efConstruction: 200, efSearch: 200 })
+      // Level assignment must be deterministic too, so pass a seeded RNG.
+      const ann = new HNSWIndex(undefined, undefined, { M: 16, efConstruction: 200, efSearch: 200 }, mulberry32(999))
       const vecs: number[][] = []
       for (let i = 0; i < count; i++) {
         const v = Array.from({ length: dims }, () => rand() * 2 - 1)
