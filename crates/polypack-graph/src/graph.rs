@@ -160,6 +160,11 @@ impl Graph {
         Ok(())
     }
 
+    /// Alias for `warm`. Mirrors `PolyGraph.load`.
+    pub fn load(&mut self) -> Result<()> {
+        self.warm()
+    }
+
     /// Rebuild the in-memory edge index from every persisted edge. Mirrors
     /// `PolyGraph.rebuildEdgeIndex`.
     fn rebuild_edge_index(&mut self) -> Result<()> {
@@ -508,6 +513,40 @@ impl Graph {
         Ok(self.nodes.get(id))
     }
 
+    /// Remove a node's vector while keeping the node and its data. A no-op
+    /// (returns `None`) if the node isn't loaded. Mirrors
+    /// `PolyGraph.removeNodeVector`.
+    pub fn remove_node_vector(&mut self, id: &str) -> Option<&Node> {
+        if !self.nodes.contains_key(id) {
+            return None;
+        }
+        self.hnsw.remove(id);
+        self.dirty_vectors.remove(id);
+        self.removed_vector_ids.insert(id.to_string());
+
+        let node_type = {
+            let node = self.nodes.get_mut(id).unwrap();
+            node.vector = None;
+            node.updated_at = now_millis();
+            node.node_type.clone()
+        };
+
+        self.touch_hot_cache(id);
+        self.mark_dirty(id);
+        self.emit(GraphChangeEvent::NodeUpdated { node_id: id.to_string(), node_type });
+        self.nodes.get(id)
+    }
+
+    /// Restore `id` from the `Store` if necessary, then remove its vector.
+    /// `None` if no such node exists anywhere. Mirrors
+    /// `PolyGraph.removeNodeVectorSafe`.
+    pub fn remove_node_vector_safe(&mut self, id: &str) -> Result<Option<&Node>> {
+        if self.get_node_safe(id)?.is_none() {
+            return Ok(None);
+        }
+        Ok(self.remove_node_vector(id))
+    }
+
     /// Remove `id` and cascade through 'owned' edges. Targets of 'owned'
     /// edges are also removed unless they have another 'owned' source
     /// keeping them alive. Cyclic owned edges (A -> B -> A) are detected and
@@ -694,6 +733,32 @@ impl Graph {
             target: target.to_string(),
         });
         Ok(())
+    }
+
+    /// Direct access to the vector index. Mutating it directly (rather than
+    /// through `add_node`/`update_node`, which handle this themselves)
+    /// bypasses dirty-tracking — call `mark_vector_dirty` afterwards so the
+    /// change actually gets flushed. Mirrors the public `vectors` field on
+    /// `PolyGraph`.
+    pub fn vectors(&self) -> &HnswIndex {
+        &self.hnsw
+    }
+
+    /// Mutable access to the vector index — see `vectors`'s docs on
+    /// dirty-tracking.
+    pub fn vectors_mut(&mut self) -> &mut HnswIndex {
+        &mut self.hnsw
+    }
+
+    /// Mark `id`'s vector for persistence after it was mutated directly
+    /// through `vectors_mut` (e.g. `graph.vectors_mut().add(...)`) rather
+    /// than via `add_node`/`update_node`, which mark it themselves. A no-op
+    /// if `id` isn't currently in the vector index. Mirrors
+    /// `PolyGraph.markVectorDirty`.
+    pub fn mark_vector_dirty(&mut self, id: &str) {
+        if self.hnsw.has(id) {
+            self.dirty_vectors.insert(id.to_string());
+        }
     }
 
     /// `source`'s outgoing edges, optionally filtered by type. Mirrors
@@ -919,8 +984,20 @@ impl Graph {
         self.nodes.len()
     }
 
+    /// Number of nodes in the loaded working set. Alias for `size`. Mirrors
+    /// `PolyGraph.loadedSize`.
+    pub fn loaded_size(&self) -> usize {
+        self.nodes.len()
+    }
+
     pub fn has_loaded_node(&self, id: &str) -> bool {
         self.nodes.contains_key(id)
+    }
+
+    /// Number of nodes currently stored by the `Store`, independent of what's
+    /// in the hot working set. Mirrors `PolyGraph.persistedSize`.
+    pub fn persisted_size(&mut self) -> Result<usize> {
+        self.store.node_count()
     }
 
     // ── internal ──
@@ -2054,5 +2131,135 @@ mod tests {
             "cascade-removed along with old, even though it wasn't directly targeted"
         );
         assert!(g.has_loaded_node("newest"));
+    }
+
+    #[test]
+    fn remove_node_vector_strips_the_vector_but_keeps_the_node() {
+        let mut g = test_graph();
+        let mut a = node("a");
+        a.vector = Some(vec![1.0, 0.0]);
+        g.add_node(a).unwrap();
+        g.flush().unwrap();
+
+        let updated = g.remove_node_vector("a").unwrap();
+
+        assert!(updated.vector.is_none());
+        assert!(!g.hnsw.has("a"));
+        assert!(g.has_loaded_node("a"));
+        assert!(g.removed_vector_ids.contains("a"));
+        assert!(g.dirty_nodes.contains("a"));
+    }
+
+    #[test]
+    fn remove_node_vector_returns_none_for_a_node_not_in_the_hot_cache() {
+        let mut g = test_graph();
+        assert!(g.remove_node_vector("missing").is_none());
+    }
+
+    #[test]
+    fn remove_node_vector_then_flush_deletes_the_persisted_vector() {
+        let mut g = test_graph();
+        let mut a = node("a");
+        a.vector = Some(vec![1.0, 0.0]);
+        g.add_node(a).unwrap();
+        g.flush().unwrap();
+        assert!(g.store.get_vector("a").unwrap().is_some());
+
+        g.remove_node_vector("a").unwrap();
+        g.flush().unwrap();
+
+        assert!(g.store.get_vector("a").unwrap().is_none());
+        assert!(g.store.get_node("a").unwrap().is_some(), "node itself remains persisted");
+    }
+
+    #[test]
+    fn mark_vector_dirty_marks_a_vector_added_directly_through_vectors_mut() {
+        let mut g = test_graph();
+        g.add_node(node("a")).unwrap();
+        g.flush().unwrap();
+
+        g.vectors_mut().add("a", &[1.0, 0.0]).unwrap();
+        assert!(!g.dirty_vectors.contains("a"), "direct mutation bypasses dirty-tracking");
+
+        g.mark_vector_dirty("a");
+        assert!(g.dirty_vectors.contains("a"));
+
+        g.flush().unwrap();
+        assert_eq!(g.store.get_vector("a").unwrap().unwrap(), vec![1.0, 0.0]);
+    }
+
+    #[test]
+    fn mark_vector_dirty_is_a_noop_for_an_id_not_in_the_vector_index() {
+        let mut g = test_graph();
+        g.mark_vector_dirty("missing");
+        assert!(g.dirty_vectors.is_empty());
+    }
+
+    #[test]
+    fn remove_node_vector_safe_restores_an_evicted_node_then_removes_its_vector() {
+        let mut g = test_graph();
+        let mut a = node("a");
+        a.vector = Some(vec![1.0, 0.0]);
+        g.add_node(a).unwrap();
+        g.flush().unwrap();
+        evict(&mut g, "a");
+
+        let updated = g.remove_node_vector_safe("a").unwrap().unwrap();
+
+        assert!(updated.vector.is_none());
+        assert!(g.has_loaded_node("a"), "restored into the hot cache along the way");
+        assert!(!g.hnsw.has("a"));
+    }
+
+    #[test]
+    fn remove_node_vector_safe_returns_none_for_a_missing_node() {
+        let mut g = test_graph();
+        assert!(g.remove_node_vector_safe("missing").unwrap().is_none());
+    }
+
+    #[test]
+    fn remove_node_vector_safe_returns_none_for_a_removed_node() {
+        let mut g = test_graph();
+        g.add_node(node("a")).unwrap();
+        g.flush().unwrap();
+        g.remove_node("a").unwrap();
+        g.flush().unwrap();
+
+        assert!(g.remove_node_vector_safe("a").unwrap().is_none());
+    }
+
+    #[test]
+    fn loaded_size_matches_size() {
+        let mut g = test_graph();
+        g.add_nodes(vec![node("a"), node("b")]).unwrap();
+
+        assert_eq!(g.loaded_size(), g.size());
+        assert_eq!(g.loaded_size(), 2);
+    }
+
+    #[test]
+    fn persisted_size_counts_the_store_independent_of_the_hot_cache() {
+        let mut g = small_cache_graph(1);
+        g.add_node(node("a")).unwrap();
+        g.add_node(node("b")).unwrap();
+        g.flush().unwrap(); // evicts down to 1 hot node, but both are persisted
+
+        assert_eq!(g.size(), 1);
+        assert_eq!(g.persisted_size().unwrap(), 2);
+    }
+
+    #[test]
+    fn load_is_an_alias_for_warm() {
+        let storage = shared_storage();
+        {
+            let mut g = graph_on(&storage, GraphConfig::default());
+            g.add_node(node("a")).unwrap();
+            g.flush().unwrap();
+        }
+
+        let mut g2 = graph_on(&storage, GraphConfig::default());
+        g2.load().unwrap();
+
+        assert!(g2.has_loaded_node("a"));
     }
 }
