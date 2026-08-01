@@ -3,6 +3,32 @@
 All notable changes to this project are documented here. This project follows
 [Semantic Versioning](https://semver.org/).
 
+## [2.4.7] - 2026-08-01
+
+### Added
+
+- New `polypack-graph` crate: a pure-Rust port of `PolyGraph`'s public API
+  on top of `polypack-core`, for applications that need the graph engine
+  without a JS runtime. Covers node/edge CRUD with owned/shared
+  cascade-delete semantics, the flush/warm/save/clear/dispose/prune
+  persistence lifecycle, hot-cache eviction backed by an O(1) LRU list,
+  the `GraphQuery`/`PersistedGraphQuery` fluent query builders (including
+  joins, traversal, similarity ranking, and grouping/aggregation), and
+  pluggable text embeddings (`EmbeddingProvider`, `FeatureHashEmbedding`,
+  verified bit-for-bit identical to the TypeScript implementation) with
+  `add_node_with_embedding`/`query_text`/`search_nodes` wired through.
+  Published to crates.io alongside `polypack-core`.
+
+### Fixed
+
+- Resolved `cargo clippy --all-targets -D warnings` failures in the new
+  `polypack-graph` crate that were blocking CI: type-complexity on several
+  `dyn Fn` closure fields (factored into type aliases), a needless
+  `.clone()` on the `Copy` `HnswConfig`, two `sort_by` calls better
+  expressed as `sort_by_key`, an `if`/`else` with identical bodies in
+  `remove_edges`'s edge-index cleanup, and a manual modulo check now
+  expressed as `u64::is_multiple_of`. No behavior changes.
+
 ## [2.4.6] - 2026-08-01
 
 ### Fixed
