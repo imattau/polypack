@@ -3,6 +3,15 @@
 All notable changes to this project are documented here. This project follows
 [Semantic Versioning](https://semver.org/).
 
+## [2.4.5] - 2026-08-01
+
+### Fixed
+
+- `get_edges_by_sources`/`get_edges_by_targets` in the Rust `Store` tripped
+  clippy's `unnecessary_map_or` lint (`edge_type.map_or(true, |t| ...)` →
+  `edge_type.is_none_or(|t| ...)`), which CI enforces as a hard error. No
+  behavior change.
+
 ## [2.4.4] - 2026-08-01
 
 ### Added
