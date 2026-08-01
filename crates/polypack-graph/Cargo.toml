@@ -1,0 +1,15 @@
+[package]
+name = "polypack-graph"
+description = "Stateful property-graph orchestration (hot cache, edge index, vector search, persistence) built on polypack-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "polypack_graph"
+
+[dependencies]
+polypack-core = { path = "../polypack-core" }
+serde_json = { version = "1", features = ["preserve_order"] }
+
+[dev-dependencies]

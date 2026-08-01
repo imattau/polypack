@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["polypack-core", "polypack-node", "polypack-python"]
+members = ["polypack-core", "polypack-node", "polypack-python", "polypack-graph"]
 
 [workspace.package]
 edition = "2021"

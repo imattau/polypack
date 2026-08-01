@@ -260,6 +260,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "polypack-graph"
+version = "2.4.6"
+dependencies = [
+ "polypack-core",
+ "serde_json",
+]
+
+[[package]]
 name = "polypack-node"
 version = "2.4.6"
 dependencies = [
