@@ -20,6 +20,13 @@ export interface NativeHnswConfig {
   efSearch?: number
 }
 
+export interface NativeNodeActivation {
+  score: number
+  importance: number
+  reinforcementCount: number
+  lastMeaningfulActivation: number
+}
+
 export interface EngineInfo {
   graph: string
   vector: string
@@ -68,6 +75,18 @@ export interface NativeBinding {
     field: string,
     op: string,
   ): { value: number; count: number }
+  decayFactor(elapsedMs: number, halfLifeMs: number): number
+  mergeActivation(
+    existing: NativeNodeActivation,
+    incoming: NativeNodeActivation,
+    now?: number,
+  ): NativeNodeActivation
+  reinforceActivation(
+    previous: NativeNodeActivation | undefined,
+    delta: number,
+    now: number,
+  ): NativeNodeActivation
+  activationScoreOf(score: number, lastMeaningfulActivation: number, now: number, halfLifeMs: number): number
 }
 
 export interface NativeChangeBatch {

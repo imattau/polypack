@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
 import type { PolyGraph } from './graph.js'
+import type { PolyNode } from './types.js'
 
 /** Run a reactive graph query and optionally return a value before its first result. */
 export function useLiveQuery<T>(
@@ -135,4 +136,20 @@ export function useGraphQuery<T>(
   }, [runQuery, graph])
 
   return result
+}
+
+/**
+ * Live view of the current "working memory": the `limit` most-activated loaded
+ * nodes, re-queried after graph mutations (including `activation_updated`).
+ * `deps` controls re-runs and must include `limit` when it can change.
+ */
+export function useWorkingMemory<T = PolyNode>(
+  graph: PolyGraph,
+  limit = 10,
+  deps: unknown[] = [],
+  delay = 200,
+  nodeTypes?: string[],
+): T[] | undefined {
+  const result = useGraphQuery(graph, () => graph.topActivated(limit), deps, delay, nodeTypes)
+  return result as T[] | undefined
 }

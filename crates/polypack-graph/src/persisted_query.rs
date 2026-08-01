@@ -11,11 +11,13 @@
 
 use std::collections::{HashMap, HashSet};
 
+use polypack_core::activation::{activation_score_of, DEFAULT_ACTIVATION};
 use polypack_core::query::Direction;
 use polypack_core::storage::{NodeQuery, OrderBy, RangeQuery};
 use polypack_core::vector::cosine;
 use polypack_core::{Node, Result, Store};
 
+use crate::graph::now_millis;
 use crate::query::OrderDirection;
 
 /// A `join`/`join`-predicate closure: `Some` to filter by the connected
@@ -47,6 +49,8 @@ pub struct PersistedGraphQuery<'a> {
     edge_source: Option<String>,
     joins: Vec<(String, Direction, Option<JoinPredicate<'a>>)>,
     traversals: Vec<(String, usize, Direction)>,
+    activation_above: Option<f64>,
+    activation_order: Option<OrderDirection>,
 }
 
 impl<'a> PersistedGraphQuery<'a> {
@@ -65,6 +69,8 @@ impl<'a> PersistedGraphQuery<'a> {
             edge_source: None,
             joins: Vec::new(),
             traversals: Vec::new(),
+            activation_above: None,
+            activation_order: None,
         }
     }
 
@@ -117,6 +123,20 @@ impl<'a> PersistedGraphQuery<'a> {
 
     pub fn order_by(mut self, field: &str, direction: OrderDirection) -> Self {
         self.order_by = Some((field.to_string(), direction));
+        self
+    }
+
+    /// Keep only nodes whose current (decay-corrected) activation exceeds
+    /// `above`. Mirrors `PersistedGraphQuery.whereActivated`.
+    pub fn where_activated(mut self, above: f64) -> Self {
+        self.activation_above = Some(above);
+        self
+    }
+
+    /// Order results by current (decay-corrected) activation instead of a data
+    /// field. Mirrors `PersistedGraphQuery.orderByActivation`.
+    pub fn order_by_activation(mut self, direction: OrderDirection) -> Self {
+        self.activation_order = Some(direction);
         self
     }
 
@@ -255,7 +275,8 @@ impl<'a> PersistedGraphQuery<'a> {
     pub fn to_array(&mut self) -> Result<Vec<Node>> {
         let has_traversal = !self.traversals.is_empty();
         let adapter_can_paginate =
-            self.similarity.is_none() && self.edge_type.is_none() && self.edge_source.is_none() && self.joins.is_empty() && !has_traversal;
+            self.similarity.is_none() && self.edge_type.is_none() && self.edge_source.is_none() && self.joins.is_empty() && !has_traversal
+                && self.activation_above.is_none() && self.activation_order.is_none();
 
         let query = self.base_query(!has_traversal, adapter_can_paginate);
         let mut nodes = self.store.query_nodes(&query)?;
@@ -264,6 +285,24 @@ impl<'a> PersistedGraphQuery<'a> {
         nodes = self.apply_joins(nodes)?;
         if has_traversal {
             nodes = self.apply_traversals(nodes)?;
+        }
+
+        if let Some(above) = self.activation_above {
+            let now = now_millis();
+            nodes.retain(|n| activation_score_of(n, now, DEFAULT_ACTIVATION.score_half_life_ms) >= above);
+        }
+        if let Some(direction) = self.activation_order {
+            let now = now_millis();
+            nodes.sort_by(|a, b| {
+                let av = activation_score_of(a, now, DEFAULT_ACTIVATION.score_half_life_ms);
+                let bv = activation_score_of(b, now, DEFAULT_ACTIVATION.score_half_life_ms);
+                let ord = av.partial_cmp(&bv).unwrap_or(std::cmp::Ordering::Equal);
+                if direction == OrderDirection::Desc {
+                    ord.reverse()
+                } else {
+                    ord
+                }
+            });
         }
 
         if has_traversal {
@@ -321,7 +360,9 @@ impl<'a> PersistedGraphQuery<'a> {
             || self.edge_type.is_some()
             || self.edge_source.is_some()
             || !self.joins.is_empty()
-            || !self.traversals.is_empty();
+            || !self.traversals.is_empty()
+            || self.activation_above.is_some()
+            || self.activation_order.is_some();
         if needs_materialization {
             return Ok(self.to_array()?.len());
         }

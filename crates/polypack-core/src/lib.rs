@@ -9,6 +9,7 @@
 //! [repository README](https://github.com/imattau/polypack#readme) for the
 //! project overview and `docs/API.md` for cross-language semantics.
 
+pub mod activation;
 pub mod error;
 pub mod hnsw;
 pub mod model;
@@ -18,9 +19,13 @@ pub mod rng;
 pub mod storage;
 pub mod vector;
 
+pub use activation::{
+    activation_score_of, clamp01, decay_activation_state, decay_factor, merge_activation,
+    reinforce_activation, ActivationCurves, DEFAULT_ACTIVATION,
+};
 pub use error::{PolypackError, Result};
 pub use hnsw::{HnswConfig, HnswIndex};
-pub use model::{ChangeBatch, Edge, Node, VectorEntry};
+pub use model::{ChangeBatch, Edge, Node, NodeActivation, VectorEntry};
 pub use query::{QueryPlan, QueryResult};
 pub use query_exec::{aggregate, execute, GraphSnapshot};
 pub use storage::{Durability, InMemoryStorage, Storage, Store, StoreConfig, WalEntry};

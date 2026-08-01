@@ -1,10 +1,20 @@
 import { Subject } from 'rxjs'
-import type { PolyNode, EdgeOwnership, GraphChangeEvent, SerializedNode, SerializedEdge, DataTransform } from './types.js'
+import type { PolyNode, EdgeOwnership, GraphChangeEvent, SerializedNode, SerializedEdge, DataTransform, NodeActivation } from './types.js'
 import { VectorIndex } from './vector-index.js'
 import type { VectorIndexLike } from './vector-index.js'
 import { GraphQuery } from './query.js'
 import { PersistedGraphQuery } from './persisted-query.js'
-import { assertFiniteVector, cloneData, clonePolyNode, edgeId, yieldToUI } from './utils.js'
+import {
+  ACTIVATION_DEFAULTS,
+  activationScoreOf,
+  assertFiniteVector,
+  cloneData,
+  clonePolyNode,
+  decayActivationState,
+  edgeId,
+  reinforceActivation,
+  yieldToUI,
+} from './utils.js'
 import type { PersistenceAdapter, PersistenceChanges } from './persistence/adapter.js'
 import { MemoryAdapter } from './persistence/memory.js'
 import { createEmbedding, defaultEmbedding } from './embedding.js'
@@ -109,6 +119,21 @@ export class PolyGraph {
     this.schedulePersist()
   }
 
+  /** Validate a {@link NodeActivation} record: finite, in [0,1], non-negative count. */
+  protected assertActivation(activation: NodeActivation): void {
+    for (const key of ['score', 'importance'] as const) {
+      if (!Number.isFinite(activation[key]) || activation[key] < 0 || activation[key] > 1) {
+        throw new RangeError(`activation.${key} must be a finite number in [0, 1]`)
+      }
+    }
+    if (!Number.isInteger(activation.reinforcementCount) || activation.reinforcementCount < 0) {
+      throw new RangeError('activation.reinforcementCount must be a non-negative integer')
+    }
+    if (!Number.isFinite(activation.lastMeaningfulActivation) || activation.lastMeaningfulActivation < 0) {
+      throw new RangeError('activation.lastMeaningfulActivation must be a finite non-negative number')
+    }
+  }
+
   protected schedulePersist(): void {
     if (this.persistTimer) clearTimeout(this.persistTimer)
     this.persistTimer = setTimeout(() => {
@@ -166,6 +191,7 @@ export class PolyGraph {
           vector: node.vector ? [...node.vector] : null,
           insertedAt: node.insertedAt,
           updatedAt: node.updatedAt,
+          activation: node.activation ? { ...node.activation } : undefined,
         })
       } else {
         const snapshot = this.evictedDirtyNodes.get(id)
@@ -271,6 +297,7 @@ export class PolyGraph {
       throw new RangeError('Node timestamps must be finite non-negative numbers')
     }
     if (node.vector) assertFiniteVector(node.vector)
+    if (node.activation) this.assertActivation(node.activation)
     const serializedData = this.applySerialize(node.id, node.data as Record<string, unknown>)
     return clonePolyNode({ ...node, data: serializedData })
   }
@@ -374,6 +401,7 @@ export class PolyGraph {
       vector: serialized.vector ? new Float64Array(serialized.vector) : undefined,
       insertedAt: serialized.insertedAt,
       updatedAt: serialized.updatedAt,
+      activation: serialized.activation ? { ...serialized.activation } : undefined,
     }
     this.nodes.set(id, restored)
     this.evictedDirtyNodes.delete(id)
@@ -385,8 +413,13 @@ export class PolyGraph {
     return this.applyDeserialize(clonePolyNode(restored))
   }
 
-  /** Shallow-merge `data` into a loaded node and optionally replace its vector. No-op (returns `undefined`) if the node isn't loaded; see {@link updateNodeSafe}. */
-  updateNode(id: string, data: Partial<Record<string, unknown>>, vector?: Float64Array): PolyNode | undefined {
+  /** Shallow-merge `data` into a loaded node and optionally replace its vector or activation. No-op (returns `undefined`) if the node isn't loaded; see {@link updateNodeSafe}. */
+  updateNode(
+    id: string,
+    data: Partial<Record<string, unknown>>,
+    vector?: Float64Array,
+    activation?: NodeActivation,
+  ): PolyNode | undefined {
     const node = this.nodes.get(id)
     if (!node) return undefined
     const serialized = this.applySerialize(id, data as Record<string, unknown>)
@@ -397,6 +430,10 @@ export class PolyGraph {
       this.removedVectorIds.delete(id)
       this.vectors.add(id, [...vector])
       this.dirtyVectors.add(id)
+    }
+    if (activation !== undefined) {
+      this.assertActivation(activation)
+      node.activation = { ...activation }
     }
     node.updatedAt = Date.now()
     this.touchHotCache(id)
@@ -756,6 +793,7 @@ export class PolyGraph {
           vector: node.vector ? [...node.vector] : null,
           insertedAt: node.insertedAt,
           updatedAt: node.updatedAt,
+          activation: node.activation ? { ...node.activation } : undefined,
         })
       }
       this.hotCacheOrder.delete(evict)
@@ -781,6 +819,7 @@ export class PolyGraph {
         vector: node.vector ? [...node.vector] : null,
         insertedAt: node.insertedAt,
         updatedAt: node.updatedAt,
+        activation: node.activation ? { ...node.activation } : undefined,
       })
     }
 
@@ -852,6 +891,7 @@ export class PolyGraph {
           vector: sn.vector ? new Float64Array(sn.vector) : undefined,
           insertedAt: sn.insertedAt,
           updatedAt: sn.updatedAt,
+          activation: sn.activation ? { ...sn.activation } : undefined,
         })
         this.indexNode(this.nodes.get(sn.id)!)
         this.hotCacheOrder.delete(sn.id)
@@ -965,6 +1005,89 @@ export class PolyGraph {
   async persistedSize(): Promise<number> {
     if (this.persistence.countNodes) return this.persistence.countNodes({})
     return (await this.persistence.allNodeIds()).length
+  }
+
+  // ── Activation ──
+
+  /**
+   * Current decayed activation score of a loaded node, or 0 when it has none.
+   * Decay is a pure function of elapsed time from `lastMeaningfulActivation`,
+   * so this is deterministic across replicas with the same stored state.
+   * `halfLifeMs` defaults to the standard 24h score curve.
+   */
+  getActivation(id: string, halfLifeMs: number = ACTIVATION_DEFAULTS.scoreHalfLifeMs): number {
+    const node = this.nodes.get(id)
+    return node ? activationScoreOf(node, Date.now(), halfLifeMs) : 0
+  }
+
+  /** Decay-corrected view of a loaded node's durable activation, or `undefined`. */
+  getActivationState(id: string): NodeActivation | undefined {
+    const node = this.nodes.get(id)
+    if (!node?.activation) return undefined
+    return decayActivationState(node.activation, Date.now())
+  }
+
+  /**
+   * Apply a durable reinforcement delta to a loaded node's activation. The
+   * prior state is decay-corrected to now, `amount` is added to `score`, a
+   * fraction is folded into `importance`, the reinforcement counter increments,
+   * and the decay anchor re-sets to now. Persists and emits an
+   * `activation_updated` change event. Returns the updated node or `undefined`
+   * if the node isn't loaded (see {@link reinforceNodeSafe}).
+   */
+  reinforceNode(id: string, amount: number, reason?: string): PolyNode | undefined {
+    if (!Number.isFinite(amount)) throw new RangeError('Reinforcement amount must be finite')
+    const node = this.nodes.get(id)
+    if (!node) return undefined
+    const now = Date.now()
+    node.activation = reinforceActivation(node.activation, amount, now, ACTIVATION_DEFAULTS)
+    node.updatedAt = now
+    this.touchHotCache(id)
+    this.markDirty(id)
+    this.emitChange({ type: 'activation_updated', nodeId: id, nodeType: node.type, delta: amount, reason })
+    return this.applyDeserialize(clonePolyNode(node))
+  }
+
+  /** Restore an evicted node when necessary, then reinforce it. */
+  async reinforceNodeSafe(id: string, amount: number, reason?: string): Promise<PolyNode | undefined> {
+    if (!Number.isFinite(amount)) throw new RangeError('Reinforcement amount must be finite')
+    if (!await this.getNodeSafe(id)) return undefined
+    return this.reinforceNode(id, amount, reason)
+  }
+
+  /** Loaded nodes with the highest current activation, descending. The working-memory primitive. */
+  topActivated(limit: number, minScore = 0): PolyNode[] {
+    if (!Number.isInteger(limit) || limit < 0) throw new RangeError('limit must be a non-negative integer')
+    if (limit === 0) return []
+    const now = Date.now()
+    const scored: Array<{ node: PolyNode; score: number }> = []
+    for (const node of this.nodes.values()) {
+      const score = activationScoreOf(node, now)
+      if (score > minScore) scored.push({ node, score })
+    }
+    scored.sort((a, b) => b.score - a.score)
+    return scored.slice(0, limit).map(({ node }) => this.applyDeserialize(clonePolyNode(node)))
+  }
+
+  /**
+   * Materialize decay for every loaded node with activation: rewrite each
+   * node's stored values to their current decayed state and re-anchor to
+   * `now`. Reads already decay lazily, so this only matters for persisting
+   * fresh values (e.g. before eviction-driven lifecycle events).
+   */
+  decay(now: number = Date.now()): void {
+    for (const node of this.nodes.values()) {
+      if (!node.activation) continue
+      const corrected = decayActivationState(node.activation, now)
+      node.activation = {
+        score: corrected.score,
+        importance: corrected.importance,
+        reinforcementCount: node.activation.reinforcementCount,
+        lastMeaningfulActivation: now,
+      }
+      node.updatedAt = now
+      this.markDirty(node.id)
+    }
   }
 
   // ── Graph traversal ──

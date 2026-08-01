@@ -5,6 +5,10 @@ import {
   engineInfo,
   isNativeAvailable,
   createNativeVectorIndex,
+  mergeActivation,
+  decayFactor,
+  reinforceActivation,
+  activationScoreOf,
 } from '../../packages/node-native/src/index'
 import { PolyGraph, VectorIndex } from '../../src/index'
 import { loadFixtures, runFixture } from '../conformance/runner'
@@ -127,6 +131,33 @@ describe('PolyGraph with native vector index', () => {
     for (const fixture of loadFixtures()) {
       expect(() => runFixture(fixture, createNativeVectorIndex())).not.toThrow()
     }
+  })
+})
+
+describe('native activation helpers', () => {
+  it('computes decay and merge matching the TypeScript semantics', () => {
+    if (!available) return
+    const DAY = 86_400_000
+    expect(decayFactor(DAY, DAY)).toBeCloseTo(0.5, 10)
+    expect(decayFactor(2 * DAY, DAY)).toBeCloseTo(0.25, 10)
+    expect(decayFactor(DAY, 0)).toBe(1)
+
+    const merged = mergeActivation(
+      { score: 0.6, importance: 0.3, reinforcementCount: 2, lastMeaningfulActivation: 0 },
+      { score: 0.9, importance: 0.1, reinforcementCount: 1, lastMeaningfulActivation: 0 },
+      0,
+    )
+    expect(merged.score).toBeCloseTo(0.9, 10)
+    expect(merged.importance).toBeCloseTo(0.3, 10)
+    expect(merged.reinforcementCount).toBe(2)
+
+    const reinforced = reinforceActivation(undefined, 0.5, 1000)
+    expect(reinforced.score).toBeCloseTo(0.5, 10)
+    expect(reinforced.importance).toBeCloseTo(0.025, 10)
+    expect(reinforced.reinforcementCount).toBe(1)
+    expect(reinforced.lastMeaningfulActivation).toBe(1000)
+
+    expect(activationScoreOf(1, 0, DAY, DAY)).toBeCloseTo(0.5, 10)
   })
 })
 

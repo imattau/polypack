@@ -56,6 +56,54 @@ fn msg_to_json(msg: &Msg) -> serde_json::Value {
     }
 }
 
+fn activation_to_msg(activation: &Option<crate::model::NodeActivation>) -> Msg {
+    match activation {
+        Some(a) => Msg::map(vec![
+            ("score", Msg::Float(a.score)),
+            ("importance", Msg::Float(a.importance)),
+            ("reinforcementCount", Msg::Int(a.reinforcement_count as i64)),
+            ("lastMeaningfulActivation", Msg::Int(a.last_meaningful_activation)),
+        ]),
+        // Match the TypeScript reference, which encodes `activation: undefined`
+        // as an explicit nil key, so bytes stay identical across languages.
+        None => Msg::Nil,
+    }
+}
+
+fn msg_to_activation(msg: &Msg) -> Result<Option<crate::model::NodeActivation>> {
+    let entries = match msg.get("activation") {
+        Some(Msg::Map(map)) => map,
+        Some(Msg::Nil) | None => return Ok(None),
+        _ => return Err(PolypackError::CorruptData("activation must be a map or null".into())),
+    };
+    let find = |key: &str| {
+        entries.iter().find(|(k, _)| matches!(k, Msg::Str(s) if s == key)).map(|(_, v)| v)
+    };
+    let get_f64 = |key: &str| -> Result<f64> {
+        match find(key) {
+            Some(Msg::Float(f)) => Ok(*f),
+            Some(Msg::Int(i)) => Ok(*i as f64),
+            _ => Err(PolypackError::CorruptData(format!("activation missing or invalid {key}"))),
+        }
+    };
+    let score = get_f64("score")?;
+    let importance = get_f64("importance")?;
+    let reinforcement_count = match find("reinforcementCount") {
+        Some(Msg::Int(i)) if *i >= 0 => *i as u64,
+        _ => return Err(PolypackError::CorruptData("activation missing or invalid reinforcementCount".into())),
+    };
+    let last_meaningful_activation = match find("lastMeaningfulActivation") {
+        Some(Msg::Int(i)) => *i,
+        _ => return Err(PolypackError::CorruptData("activation missing or invalid lastMeaningfulActivation".into())),
+    };
+    Ok(Some(crate::model::NodeActivation {
+        score,
+        importance,
+        reinforcement_count,
+        last_meaningful_activation,
+    }))
+}
+
 fn node_to_msg(node: &Node) -> Msg {
     let vector = node
         .vector
@@ -69,6 +117,7 @@ fn node_to_msg(node: &Node) -> Msg {
         ("vector", vector),
         ("insertedAt", Msg::Int(node.inserted_at)),
         ("updatedAt", Msg::Int(node.updated_at)),
+        ("activation", activation_to_msg(&node.activation)),
     ])
 }
 
@@ -94,6 +143,7 @@ fn msg_to_node(msg: &Msg) -> Result<Node> {
     };
     let inserted_at = msg_int_field(msg, "insertedAt")?;
     let updated_at = msg_int_field(msg, "updatedAt")?;
+    let activation = msg_to_activation(msg)?;
     Ok(Node {
         id,
         node_type,
@@ -101,6 +151,7 @@ fn msg_to_node(msg: &Msg) -> Result<Node> {
         vector,
         inserted_at,
         updated_at,
+        activation,
     })
 }
 
@@ -390,13 +441,14 @@ mod tests {
             vector: Some(vec![0.1, 0.2, 0.3]),
             inserted_at: 7,
             updated_at: 8,
+            activation: None,
         }
     }
 
     #[test]
     fn snapshot_bytes_match_javascript_reference() {
         // Captured from TS encodeSnapshot() on the same data.
-        let expected = "84a776657273696f6e01a56e6f6465739192a26e3186a26964a26e31a474797065a3646f63a46461746182a57469746c65a548656c6c6fa573636f726503a6766563746f7293cb3fb999999999999acb3fc999999999999acb3fd3333333333333aa696e736572746564417407a975706461746564417408a565646765739192a9613a3a52454c3a3a6286a26964a9613a3a52454c3a3a62a6736f75726365a161a6746172676574a162a474797065a352454ca464617461c0a963726561746564417409a7766563746f72739192a2763192cb3fe0000000000000cb3fd0000000000000";
+        let expected = "84a776657273696f6e01a56e6f6465739192a26e3187a26964a26e31a474797065a3646f63a46461746182a57469746c65a548656c6c6fa573636f726503a6766563746f7293cb3fb999999999999acb3fc999999999999acb3fd3333333333333aa696e736572746564417407a975706461746564417408aa61637469766174696f6ec0a565646765739192a9613a3a52454c3a3a6286a26964a9613a3a52454c3a3a62a6736f75726365a161a6746172676574a162a474797065a352454ca464617461c0a963726561746564417409a7766563746f72739192a2763192cb3fe0000000000000cb3fd0000000000000";
         let mut n = node("n1");
         n.data = serde_json::json!({ "title": "Hello", "score": 3 }).as_object().unwrap().clone();
         let edge = Edge {
@@ -416,8 +468,27 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_with_activation_bytes_match_javascript_reference() {
+        // Captured from TS encodeSnapshot() with an activation payload.
+        let expected = "84a776657273696f6e01a56e6f6465739192a26e3187a26964a26e31a474797065a3646f63a46461746180a6766563746f72c0aa696e736572746564417401a975706461746564417401aa61637469766174696f6e84a573636f7265cb3fe0000000000000aa696d706f7274616e6365cb3fb999999999999ab27265696e666f7263656d656e74436f756e7402b86c6173744d65616e696e6766756c41637469766174696f6e01a5656467657390a7766563746f72739192a2763192cb3fe0000000000000cb3fd0000000000000";
+        let mut n = node("n1");
+        n.data = serde_json::Map::new();
+        n.vector = None;
+        n.inserted_at = 1;
+        n.updated_at = 1;
+        n.activation = Some(crate::model::NodeActivation {
+            score: 0.5,
+            importance: 0.1,
+            reinforcement_count: 2,
+            last_meaningful_activation: 1,
+        });
+        let bytes = encode_snapshot(&[("n1".to_string(), n)], &[], &[("v1".to_string(), vec![0.5, 0.25])]);
+        assert_eq!(hex(&bytes), expected);
+    }
+
+    #[test]
     fn wal_bytes_match_javascript_reference() {
-        let expected = "0000004882a46b696e64a77075744e6f6465a46e6f646586a26964a26e31a474797065a3646f63a46461746180a6766563746f72c0aa696e736572746564417401a9757064617465644174010000001782a46b696e64aa64656c6574654e6f6465a26964a26e32";
+        let expected = "0000005482a46b696e64a77075744e6f6465a46e6f646587a26964a26e31a474797065a3646f63a46461746180a6766563746f72c0aa696e736572746564417401a975706461746564417401aa61637469766174696f6ec00000001782a46b696e64aa64656c6574654e6f6465a26964a26e32";
         let mut n = node("n1");
         n.vector = None;
         n.data = serde_json::Map::new();
@@ -442,6 +513,26 @@ mod tests {
         let decoded = decode_snapshot(&bytes).unwrap();
         assert_eq!(decoded.nodes[0].1, n);
         assert_eq!(decoded.vectors[0].1, vec![0.5]);
+    }
+
+    #[test]
+    fn activation_snapshot_round_trips_and_absent_defaults_to_none() {
+        let mut n = node("n1");
+        n.vector = None;
+        n.activation = Some(crate::model::NodeActivation {
+            score: 0.7,
+            importance: 0.2,
+            reinforcement_count: 3,
+            last_meaningful_activation: 42,
+        });
+        let bytes = encode_snapshot(&[("n1".to_string(), n.clone())], &[], &[]);
+        let decoded = decode_snapshot(&bytes).unwrap();
+        assert_eq!(decoded.nodes[0].1, n);
+
+        // A legacy snapshot without the activation key decodes to None.
+        let legacy_bytes = encode_snapshot(&[("n2".to_string(), node("n2"))], &[], &[]);
+        let decoded = decode_snapshot(&legacy_bytes).unwrap();
+        assert_eq!(decoded.nodes[0].1.activation, None);
     }
 
     #[test]

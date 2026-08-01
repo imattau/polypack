@@ -8,6 +8,7 @@ const browserEntries = [
   'src/persistence/index.ts',
   'src/persistence/opfs.ts',
   'src/react.ts',
+  'src/activation.ts',
   'src/sync/index.ts',
 ]
 

@@ -8,6 +8,24 @@ fn is_finite_vec(v: &[f64]) -> bool {
     v.iter().all(|x| x.is_finite())
 }
 
+/// Durable activation state for a node (see `crate::activation`). All fields
+/// are persisted and replicated; transient, runtime-only attention is held by
+/// the `ActivationEngine` in `polypack-graph` and never serialized. Decay is a
+/// pure function of elapsed time anchored at `last_meaningful_activation`, so
+/// replicas with the same stored state compute identical current scores.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct NodeActivation {
+    /// Current learned activation, decay-corrected on read. Clamped to [0, 1].
+    pub score: f64,
+    /// Long-term relevance that decays far slower than `score` (or never). Clamped to [0, 1].
+    pub importance: f64,
+    /// How many times this node has been meaningfully reinforced.
+    pub reinforcement_count: u64,
+    /// Epoch-ms anchor for decay. Both `score` and `importance` decay from here.
+    pub last_meaningful_activation: i64,
+}
+
 /// A typed property-graph node. Serializes as camelCase JSON matching the
 /// TypeScript `PolyNode`/`SerializedNode` shape (`type` on the wire, `node_type` in Rust).
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -22,6 +40,9 @@ pub struct Node {
     pub vector: Option<Vec<f64>>,
     pub inserted_at: i64,
     pub updated_at: i64,
+    /// Durable, syncable activation. Optional — absent until first reinforced.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activation: Option<NodeActivation>,
 }
 
 /// A directed property-graph edge. `id` is expected to be [`edge_id`] of
@@ -86,6 +107,30 @@ pub fn validate_node(n: &Node) -> Result<()> {
             return Err(PolypackError::InvalidArgument("vector must contain finite values".into()));
         }
     }
+    if let Some(a) = &n.activation {
+        validate_activation(a)?;
+    }
+    Ok(())
+}
+
+/// Validate a durable activation record: score/importance in [0, 1], finite,
+/// and a non-negative anchor.
+pub fn validate_activation(a: &NodeActivation) -> Result<()> {
+    if !a.score.is_finite() || !(0.0..=1.0).contains(&a.score) {
+        return Err(PolypackError::RangeOutOfBounds(
+            "activation.score must be a finite number in [0, 1]".into(),
+        ));
+    }
+    if !a.importance.is_finite() || !(0.0..=1.0).contains(&a.importance) {
+        return Err(PolypackError::RangeOutOfBounds(
+            "activation.importance must be a finite number in [0, 1]".into(),
+        ));
+    }
+    if a.last_meaningful_activation < 0 {
+        return Err(PolypackError::RangeOutOfBounds(
+            "activation.lastMeaningfulActivation must be a finite non-negative number".into(),
+        ));
+    }
     Ok(())
 }
 
@@ -146,6 +191,7 @@ mod tests {
             vector: None,
             inserted_at: 1,
             updated_at: 1,
+            activation: None,
         }
     }
 
@@ -169,6 +215,27 @@ mod tests {
         let mut n = node("a");
         n.vector = Some(vec![0.0, f64::NAN]);
         assert!(matches!(validate_node(&n), Err(PolypackError::InvalidArgument(_))));
+    }
+
+    #[test]
+    fn rejects_invalid_activation() {
+        let mut n = node("a");
+        n.activation = Some(NodeActivation {
+            score: 2.0,
+            importance: 0.0,
+            reinforcement_count: 0,
+            last_meaningful_activation: 0,
+        });
+        assert!(matches!(validate_node(&n), Err(PolypackError::RangeOutOfBounds(_))));
+
+        let mut n = node("a");
+        n.activation = Some(NodeActivation {
+            score: 0.0,
+            importance: 0.0,
+            reinforcement_count: 0,
+            last_meaningful_activation: -1,
+        });
+        assert!(matches!(validate_node(&n), Err(PolypackError::RangeOutOfBounds(_))));
     }
 
     #[test]
@@ -197,6 +264,7 @@ mod tests {
             vector: Some(vec![0.1, 0.2]),
             inserted_at: 7,
             updated_at: 8,
+            activation: None,
         };
         let s = serde_json::to_string(&n).unwrap();
         let back: Node = serde_json::from_str(&s).unwrap();

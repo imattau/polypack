@@ -63,7 +63,8 @@ Nodes:
   the whole batch. Prefer this over a loop of `addNode` for large inserts.
 - `getNode(id)` returns a detached snapshot of a loaded node synchronously.
 - `getNodeSafe(id)` restores an evicted node from persistence when necessary.
-- `updateNode(id, data, vector?)` shallow-merges data and optionally replaces its vector.
+- `updateNode(id, data, vector?, activation?)` shallow-merges data and optionally
+  replaces its vector or durable activation.
 - `updateNodeSafe(id, data, vector?)` restores an evicted node before updating it.
 - `removeNodeVector(id)` and `removeNodeVectorSafe(id)` explicitly clear a
   loaded or potentially evicted node's vector while retaining the node.
@@ -84,6 +85,26 @@ Nodes:
   similarity search. Mutating it directly (rather than through `addNode`/
   `updateNode`) does not schedule persistence; call `markVectorDirty(id)`
   afterwards so the change is picked up on the next flush.
+
+Activation — durable primitives (see the `activation` subpath for the engine):
+
+- `reinforceNode(id, amount, reason?)` applies a durable reinforcement delta to
+  a loaded node: the prior state is decay-corrected to now, `amount` is added to
+  `score`, a fraction is folded into `importance`, `reinforcementCount`
+  increments, and `lastMeaningfulActivation` re-anchors to now. Persists and
+  emits an `activation_updated` change event (with `delta`/`reason`). Returns
+  the updated node, or `undefined` when the node isn't loaded.
+- `reinforceNodeSafe(id, amount, reason?)` restores an evicted node first.
+- `getActivation(id, halfLifeMs?)` returns the current decay-corrected score
+  (0 when the node has none). Decay is a pure function of elapsed time from
+  `lastMeaningfulActivation`, so replicas with the same stored state converge.
+- `getActivationState(id)` returns the decay-corrected durable record or
+  `undefined`.
+- `topActivated(limit, minScore?)` returns loaded nodes ranked by current
+  activation descending — the working-memory primitive.
+- `decay(now?)` materializes decayed values for all loaded nodes and re-anchors
+  them. Reads already decay lazily, so this only matters for persisting fresh
+  values (e.g. before eviction-driven lifecycle events).
 
 Convenience — graph traversal:
 
@@ -117,7 +138,9 @@ Ownership is stored on the edge:
 
 Reactivity and batching:
 
-- `changes` is an RxJS `Subject<GraphChangeEvent>`.
+- `changes` is an RxJS `Subject<GraphChangeEvent>` — emits `node_added`,
+  `node_updated`, `node_removed`, `edge_added`, `edge_removed`, and
+  `activation_updated` (the last carries optional `delta`/`reason`).
 - `startBatch()` queues notifications until the matching `endBatch()`.
 - `endBatch()` throws if no batch is open.
 
@@ -149,6 +172,10 @@ Filter methods are chainable:
   includes the seed nodes.
 - `similarTo(vector, threshold?, topK?)` ranks vector-bearing nodes by cosine similarity.
 - `orderBy(field, direction?)`, `offset(n)`, and `limit(n)` shape results.
+- `whereActivated(above)` keeps only nodes whose current (decay-corrected)
+  activation exceeds `above`.
+- `orderByActivation(direction?)` orders results by current activation instead of
+  a data field (default `desc`).
 
 Limits, offsets, traversal depths, and top-K values must be non-negative
 integers. Timestamps must be finite and non-negative; vectors and numeric range
@@ -174,8 +201,10 @@ the final ordering before offset and limit.
 
 Chainable filters are `where`, `whereAttribute`, `whereAttributeRange`,
 `whereNodeType`, `whereEdge`, `whereEdgeSource`, `join`, `traverse`, `orderBy`,
-`similarTo`, `offset`, and `limit`. The asynchronous terminal methods are
-`toArray()`, `first()`, `count()`, `ids()`, and `collect()`.
+`similarTo`, `whereActivated`, `orderByActivation`, `offset`, and `limit`. The
+asynchronous terminal methods are `toArray()`, `first()`, `count()`, `ids()`,
+and `collect()`. Activation filters/ordering are applied post-load (like
+similarity), so they disable adapter-side pagination.
 
 Adapters may implement `queryNodes(query)` and `countNodes(query)` for optimized
 storage-level execution, plus `getEdgesBySources(ids, type?)` and
@@ -292,8 +321,9 @@ path.
 
 The root exports `PolyNode`, `PolyEdge`, `EdgeOwnership`, `GraphChangeEvent`,
 `SerializedNode`, `SerializedEdge`, `VectorQuery`, `EdgeTypes`, `DataTransform`,
-aggregate types, `DistanceFunction`, and `PersistenceAdapter`. Persistence
-types and adapters beyond `MemoryAdapter` live under the `persistence` subpaths.
+`NodeActivation`, aggregate types, `DistanceFunction`, `PersistenceAdapter`,
+`ActivationEngine`, and `mergeActivation`. Persistence types and adapters beyond
+`MemoryAdapter` live under the `persistence` subpaths.
 
 `edgeId(source, type, target)` produces the persistence edge key. Source IDs and
 edge types must not contain `::`; target IDs may contain it.
@@ -382,6 +412,73 @@ without requiring dependency-list changes. In-flight queries are serialized;
 stale results are discarded after dependency changes or unmounting, and one
 follow-up run is retained when mutations arrive during an asynchronous query.
 React 18 and 19 are supported as an optional peer dependency.
+
+`useWorkingMemory(graph, limit?, deps?, delay?, nodeTypes?)` is a live view of
+the current working memory: the `limit` most-activated loaded nodes, re-queried
+after any graph change (including `activation_updated`). `deps` controls re-runs
+and must include `limit` when it can change.
+
+## `@0xx0lostcause0xx0/polypack/activation`
+
+The adaptive-memory layer. It splits activation into two tiers:
+
+- **Durable** — `NodeActivation` (`score`, `importance`, `reinforcementCount`,
+  `lastMeaningfulActivation`) rides as an optional field on every node, so it
+  persists through the snapshot/WAL and adapters and replicates through sync.
+- **Transient** — runtime-only attention held by `ActivationEngine`, never
+  serialized or synced.
+
+```ts
+import { PolyGraph, ActivationEngine } from '@0xx0lostcause0xx0/polypack'
+
+const graph = new PolyGraph()
+const engine = new ActivationEngine(graph)
+
+graph.reinforceNode('article', 1.0, 'user_read')      // durable + synced
+engine.bumpAttention('article', 0.2)                  // local only
+engine.effective('article')                           // durable + attention
+
+const spread = engine.spread(['article'], { depth: 2, decay: 0.5 })  // neighbours warm up
+const scores = await engine.pulse('vector search')    // semantic region scoring
+await engine.absorb('vector search')                  // pulse + reinforce above threshold
+
+engine.workingMemory(5)                               // current "mental state"
+```
+
+- `new ActivationEngine(graph, config?)` composes the scoring layer. `config`
+  options: `scoreHalfLifeMs` (24 h default), `importanceHalfLifeMs` (30 days),
+  `importanceGain` (0.05), `spreadDecay` (0.5), `spreadDepth` (2),
+  `recencyHalfLifeMs` (7 days), `weights` (all 1), `minReinforceDelta` (0.05),
+  `pulseThreshold` (0), `absorbThreshold` (0.3), `absorbGain` (0.05).
+- `reinforce(id, amount, reason?)` / `reinforceAll(entries)` call through to
+  `PolyGraph.reinforceNode` (durable).
+- `bumpAttention(id, amount)`, `attentionOf(id)`, and `effective(id)` manage the
+  transient tier. `bumpAttention` accumulates locally and is promoted to durable
+  reinforcement once it clears `minReinforceDelta`, so tiny events (scrolls,
+  focus) stay local while meaningful ones become persisted and synced.
+- `spread(seeds, { depth?, decay?, edgeTypes? })` implements spreading
+  activation: each hop attenuates the contribution by `decay`; multiple paths to
+  a node sum. Returns `{ nodeId: contribution }`.
+- `pulse(text | vector, { topK?, semanticThreshold?, pulseThreshold?, ... })`
+  scores the activated region around a query — semantic seeds via vector
+  similarity (nodes with zero similarity never seed the region) plus outward
+  spreading, folded with recency and usage. Read-only.
+- `absorb(input, options?)` runs `pulse` and durably reinforces every node whose
+  composite clears `absorbThreshold` by `absorbGain * score`.
+- `workingMemory(limit?, minScore?)` returns loaded nodes ranked by `effective`
+  activation descending.
+- `dispose()` unsubscribes from graph changes and drops transient attention.
+- `mergeActivation(existing, incoming, now?)` merges two durable total-state
+  records: decay-corrects both to `now`, keeps the stronger component of each,
+  and re-anchors to `now`. Used by the sync layer (max-merge, idempotent for
+  re-delivered snapshots).
+
+Decay is a pure function of elapsed time anchored at
+`lastMeaningfulActivation` (`0.5 ** (elapsed / halfLife)`), so two replicas
+with the same stored state compute identical current scores. Synchronization is
+**additive for deltas** (the `activationUpdate` op, coalesced and gated by
+`activationSyncThreshold`, default 0.05) and **max for total-state node
+payloads** — activation is accumulated knowledge, not last-write-wins data.
 
 ## `@0xx0lostcause0xx0/polypack/sync`
 

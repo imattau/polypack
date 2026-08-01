@@ -3,7 +3,7 @@ export interface SyncOp {
   seq: number
   timestamp: number
   clientId: string
-  kind: 'addNode' | 'updateNode' | 'removeNode' | 'addEdge' | 'removeEdges'
+  kind: 'addNode' | 'updateNode' | 'removeNode' | 'addEdge' | 'removeEdges' | 'activationUpdate'
   payload: Record<string, unknown>
 }
 

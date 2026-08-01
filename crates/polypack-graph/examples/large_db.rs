@@ -312,6 +312,7 @@ fn seed(graph: &mut Graph, args: &Args, centroids: &HashMap<&'static str, Vec<f6
         vector: None,
         inserted_at: now,
         updated_at: now,
+        activation: None,
     })?;
     add_nodes_in_chunks(graph, docs, |i| {
         let topic = TOPICS[(rng.next() * TOPICS.len() as f64) as usize];
@@ -325,6 +326,7 @@ fn seed(graph: &mut Graph, args: &Args, centroids: &HashMap<&'static str, Vec<f6
             vector: Some(doc_vector(&mut rng, &centroids[topic])),
             inserted_at: now,
             updated_at: now,
+        activation: None,
         }
     })?;
     add_nodes_in_chunks(graph, sections, |i| Node {
@@ -334,6 +336,7 @@ fn seed(graph: &mut Graph, args: &Args, centroids: &HashMap<&'static str, Vec<f6
         vector: None,
         inserted_at: now,
         updated_at: now,
+        activation: None,
     })?;
     add_nodes_in_chunks(graph, chunks, |i| {
         let r = rng.next();
@@ -348,6 +351,7 @@ fn seed(graph: &mut Graph, args: &Args, centroids: &HashMap<&'static str, Vec<f6
             vector: None,
             inserted_at: now,
             updated_at: now,
+        activation: None,
         }
     })?;
     let node_ms = t0.elapsed().as_secs_f64() * 1000.0;

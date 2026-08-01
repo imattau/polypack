@@ -18,6 +18,7 @@ import type {
   NativeBinding,
   NativeExactIndexBinding,
   NativeHnswIndexBinding,
+  NativeNodeActivation,
   NativeStoreBinding,
 } from './binding.js'
 
@@ -455,6 +456,61 @@ function assertFiniteVector(vector: ArrayLike<number>, name = 'vector'): void {
   for (let i = 0; i < vector.length; i++) {
     if (!Number.isFinite(vector[i])) throw new RangeError(`${name} must contain finite values`)
   }
+}
+
+export interface NodeActivationLike {
+  score: number
+  importance: number
+  reinforcementCount: number
+  lastMeaningfulActivation: number
+}
+
+function toNativeActivation(a: NodeActivationLike): NativeNodeActivation {
+  return {
+    score: a.score,
+    importance: a.importance,
+    reinforcementCount: a.reinforcementCount,
+    lastMeaningfulActivation: a.lastMeaningfulActivation,
+  }
+}
+
+/** Exponential-decay multiplier `0.5 ** (elapsed / halfLife)`. */
+export function decayFactor(elapsedMs: number, halfLifeMs: number): number {
+  assertAvailable()
+  return callNative(() => native.decayFactor(elapsedMs, halfLifeMs))
+}
+
+/** Merge two durable activation totals (max-merge, re-anchored to `now`). */
+export function mergeActivation(
+  existing: NodeActivationLike,
+  incoming: NodeActivationLike,
+  now?: number,
+): NativeNodeActivation {
+  assertAvailable()
+  return callNative(() => native.mergeActivation(toNativeActivation(existing), toNativeActivation(incoming), now))
+}
+
+/** Apply a reinforcement delta to a durable activation record. */
+export function reinforceActivation(
+  previous: NodeActivationLike | undefined,
+  delta: number,
+  now: number,
+): NativeNodeActivation {
+  assertAvailable()
+  return callNative(() =>
+    native.reinforceActivation(previous ? toNativeActivation(previous) : undefined, delta, now)
+  )
+}
+
+/** Current decayed activation score for a stored `score`/anchor pair. */
+export function activationScoreOf(
+  score: number,
+  lastMeaningfulActivation: number,
+  now: number,
+  halfLifeMs: number,
+): number {
+  assertAvailable()
+  return callNative(() => native.activationScoreOf(score, lastMeaningfulActivation, now, halfLifeMs))
 }
 
 function assertNonNegativeInteger(n: number, name: string): void {

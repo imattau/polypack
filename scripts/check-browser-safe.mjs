@@ -10,6 +10,7 @@ const roots = [
   'dist/persistence/opfs.js',
   'dist/react.js',
   'dist/sync/index.js',
+  'dist/activation.js',
 ]
 
 const fromRe = /\bfrom\s*['"]([^'"]+)['"]/g

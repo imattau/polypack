@@ -38,7 +38,10 @@ __all__ = [
     "GraphQuery",
     "ExactIndex",
     "HnswIndex",
+    "ActivationEngine",
     "ChangeBatch",
+    "merge_activation",
+    "decay_factor",
     "engine_info",
     "DirectoryStorage",
     "PolypackError",
@@ -100,6 +103,114 @@ def _cosine(a: Sequence[float], b: Sequence[float]) -> float:
     if na == 0 or nb == 0:
         return 0.0
     return dot / (na * nb)
+
+
+# ── Activation (mirrors the TypeScript / Rust activation model) ──
+
+_HOUR = 3_600_000
+_DAY = 24 * _HOUR
+
+DEFAULT_ACTIVATION = {
+    "scoreHalfLifeMs": _DAY,
+    "importanceHalfLifeMs": 30 * _DAY,
+    "importanceGain": 0.05,
+}
+
+
+def _clamp01(value: float) -> float:
+    if value < 0.0:
+        return 0.0
+    if value > 1.0:
+        return 1.0
+    return value
+
+
+def decay_factor(elapsed_ms: float, half_life_ms: float) -> float:
+    """Exponential-decay multiplier `0.5 ** (elapsed / halfLife)`. Returns 1 for
+    non-positive elapsed times and a non-decaying half-life."""
+    if not math.isfinite(elapsed_ms) or elapsed_ms <= 0:
+        return 1.0
+    if not math.isfinite(half_life_ms) or half_life_ms <= 0:
+        return 1.0
+    factor = 0.5 ** (elapsed_ms / half_life_ms)
+    return factor if factor < 1.0 else 1.0
+
+
+def _activation_score_of(node: Node, now: Optional[int] = None, half_life_ms: Optional[float] = None) -> float:
+    activation = node.get("activation")
+    if not activation:
+        return 0.0
+    now = now if now is not None else int(time.time() * 1000)
+    half_life_ms = half_life_ms if half_life_ms is not None else DEFAULT_ACTIVATION["scoreHalfLifeMs"]
+    return _clamp01(activation["score"] * decay_factor(now - activation["lastMeaningfulActivation"], half_life_ms))
+
+
+def _decay_activation_state(
+    activation: dict,
+    now: int,
+    score_half_life_ms: float = DEFAULT_ACTIVATION["scoreHalfLifeMs"],
+    importance_half_life_ms: float = DEFAULT_ACTIVATION["importanceHalfLifeMs"],
+) -> dict:
+    return {
+        "score": _clamp01(activation["score"] * decay_factor(now - activation["lastMeaningfulActivation"], score_half_life_ms)),
+        "importance": _clamp01(
+            activation["importance"] * decay_factor(now - activation["lastMeaningfulActivation"], importance_half_life_ms)
+        ),
+        "reinforcementCount": activation["reinforcementCount"],
+        "lastMeaningfulActivation": activation["lastMeaningfulActivation"],
+    }
+
+
+def _reinforce_activation(previous: Optional[dict], delta: float, now: int) -> dict:
+    if previous:
+        decayed = _decay_activation_state(previous, now)
+        score, importance = decayed["score"], decayed["importance"]
+        count = previous.get("reinforcementCount", 0) + 1
+    else:
+        score, importance, count = 0.0, 0.0, 1
+    return {
+        "score": _clamp01(score + delta),
+        "importance": _clamp01(importance + DEFAULT_ACTIVATION["importanceGain"] * delta),
+        "reinforcementCount": count,
+        "lastMeaningfulActivation": now,
+    }
+
+
+def merge_activation(existing: dict, incoming: dict, now: Optional[int] = None) -> dict:
+    """Merge two durable activation records (total-state max-merge). Decay-corrects
+    both to `now`, keeps the stronger component of each, and re-anchors to `now`.
+    Concurrent deltas accumulate additively instead — activation is accumulated
+    knowledge, not last-write-wins data."""
+    now = now if now is not None else int(time.time() * 1000)
+    ex = _decay_activation_state(existing, now)
+    inc = _decay_activation_state(incoming, now)
+    return {
+        "score": max(ex["score"], inc["score"]),
+        "importance": max(ex["importance"], inc["importance"]),
+        "reinforcementCount": max(existing["reinforcementCount"], incoming["reinforcementCount"]),
+        "lastMeaningfulActivation": now,
+    }
+
+
+def _validate_activation(activation: Any) -> dict:
+    if not isinstance(activation, dict):
+        raise PolypackValueError("activation must be an object")
+    for key in ("score", "importance"):
+        value = activation.get(key)
+        if not isinstance(value, (int, float)) or not math.isfinite(float(value)) or not 0 <= float(value) <= 1:
+            raise PolypackValueError(f"activation.{key} must be a finite number in [0, 1]")
+    count = activation.get("reinforcementCount", 0)
+    if not isinstance(count, int) or count < 0:
+        raise PolypackValueError("activation.reinforcementCount must be a non-negative integer")
+    anchor = activation.get("lastMeaningfulActivation", 0)
+    if not isinstance(anchor, (int, float)) or not math.isfinite(float(anchor)) or anchor < 0:
+        raise PolypackValueError("activation.lastMeaningfulActivation must be a finite non-negative number")
+    return {
+        "score": float(activation["score"]),
+        "importance": float(activation["importance"]),
+        "reinforcementCount": int(count),
+        "lastMeaningfulActivation": int(anchor),
+    }
 
 
 # ── Vector index wrappers ──
@@ -298,7 +409,7 @@ class DirectoryStorage:
 
 
 def _copy_node(node: Node) -> Node:
-    return {
+    out = {
         "id": node["id"],
         "type": node["type"],
         "data": copy.deepcopy(node.get("data") or {}),
@@ -306,6 +417,9 @@ def _copy_node(node: Node) -> Node:
         "insertedAt": node["insertedAt"],
         "updatedAt": node["updatedAt"],
     }
+    if node.get("activation") is not None:
+        out["activation"] = dict(node["activation"])
+    return out
 
 
 def _edge_key(source: str, edge_type: str, target: str) -> str:
@@ -358,6 +472,8 @@ class PolyGraph:
             "insertedAt": node["insertedAt"],
             "updatedAt": node["updatedAt"],
         }
+        if node.get("activation") is not None:
+            stored["activation"] = _validate_activation(node["activation"])
         if node.get("vector") is not None:
             stored["vector"] = _validate_vector(node["vector"])
         else:
@@ -371,8 +487,8 @@ class PolyGraph:
         else:
             self._removed_vector_ids.add(stored["id"])
 
-    def update_node(self, id_: str, data: dict, vector: Any = None) -> Optional[Node]:
-        """Shallow-merge `data` into a loaded node and optionally replace its vector. Returns `None` if the node isn't loaded."""
+    def update_node(self, id_: str, data: dict, vector: Any = None, activation: Optional[dict] = None) -> Optional[Node]:
+        """Shallow-merge `data` into a loaded node and optionally replace its vector or durable activation. Returns `None` if the node isn't loaded."""
         node = self._nodes.get(id_)
         if node is None:
             return None
@@ -381,6 +497,8 @@ class PolyGraph:
             node["vector"] = _validate_vector(vector)
             self.vectors.add(id_, node["vector"])
             self._removed_vector_ids.discard(id_)
+        if activation is not None:
+            node["activation"] = _validate_activation(activation)
         node["updatedAt"] = int(time.time() * 1000)
         return _copy_node(node)
 
@@ -589,6 +707,73 @@ class PolyGraph:
     def size(self) -> int:
         return len(self._nodes)
 
+    # ── activation (mirrors PolyGraph.reinforceNode etc.) ──
+
+    def reinforce_node(self, id_: str, amount: float, reason: Optional[str] = None) -> Optional[Node]:
+        """Apply a durable reinforcement delta. The prior state is decay-corrected
+        to now, `amount` is added to `score`, a fraction folds into `importance`,
+        the counter increments, and the decay anchor re-sets to now. Returns the
+        updated node, or `None` if the node isn't loaded. (Python has no change
+        events, so no notification is emitted.)"""
+        if not isinstance(amount, (int, float)) or not math.isfinite(float(amount)):
+            raise PolypackValueError("reinforcement amount must be finite")
+        node = self._nodes.get(id_)
+        if node is None:
+            return None
+        now = int(time.time() * 1000)
+        node["activation"] = _reinforce_activation(node.get("activation"), float(amount), now)
+        node["updatedAt"] = now
+        return _copy_node(node)
+
+    def reinforce_node_safe(self, id_: str, amount: float, reason: Optional[str] = None) -> Optional[Node]:
+        """Alias for `reinforce_node` — the Python graph has no hot cache or
+        eviction, so there is nothing to restore."""
+        return self.reinforce_node(id_, amount, reason)
+
+    def get_activation(self, id_: str, half_life_ms: Optional[float] = None) -> float:
+        """Current decayed activation score of a node (0 when it has none)."""
+        node = self._nodes.get(id_)
+        return 0.0 if node is None else _activation_score_of(node, half_life_ms=half_life_ms)
+
+    def get_activation_state(self, id_: str) -> Optional[dict]:
+        """Decay-corrected view of a node's durable activation, or `None`."""
+        node = self._nodes.get(id_)
+        if node is None or node.get("activation") is None:
+            return None
+        return _decay_activation_state(node["activation"], int(time.time() * 1000))
+
+    def top_activated(self, limit: int, min_score: float = 0.0) -> list:
+        """Loaded nodes with the highest current activation, descending."""
+        if not isinstance(limit, int) or limit < 0:
+            raise PolypackValueError("limit must be a non-negative integer")
+        if limit == 0:
+            return []
+        now = int(time.time() * 1000)
+        scored = []
+        for node in self._nodes.values():
+            score = _activation_score_of(node, now)
+            if score > min_score:
+                scored.append((score, _copy_node(node)))
+        scored.sort(key=lambda x: x[0], reverse=True)
+        return [n for _, n in scored[:limit]]
+
+    def decay(self, now: Optional[int] = None) -> None:
+        """Materialize decay for every loaded node: rewrite stored activation to
+        its current decayed state and re-anchor to `now`. Reads already decay
+        lazily, so this only matters for persisting fresh values."""
+        now = now if now is not None else int(time.time() * 1000)
+        for node in self._nodes.values():
+            if node.get("activation") is None:
+                continue
+            corrected = _decay_activation_state(node["activation"], now)
+            node["activation"] = {
+                "score": corrected["score"],
+                "importance": corrected["importance"],
+                "reinforcementCount": node["activation"]["reinforcementCount"],
+                "lastMeaningfulActivation": now,
+            }
+            node["updatedAt"] = now
+
     # ── ownership internals ──
 
     def _ownership(self, edge: dict) -> Ownership:
@@ -654,6 +839,8 @@ class GraphQuery:
         self._traversal: list = []
         self._joins: list = []
         self._similarity: Optional[dict] = None
+        self._activation_above: Optional[float] = None
+        self._activation_order: Optional[str] = None
 
     def where_type(self, *types: str) -> "GraphQuery":
         self._node_types = list(types)
@@ -673,6 +860,20 @@ class GraphQuery:
 
     def order_by(self, field: str, direction: str = "asc") -> "GraphQuery":
         self._order_by = (field, direction)
+        return self
+
+    def where_activated(self, above: float) -> "GraphQuery":
+        """Keep only nodes whose current (decay-corrected) activation exceeds `above`."""
+        if not math.isfinite(float(above)):
+            raise PolypackValueError("above must be finite")
+        self._activation_above = float(above)
+        return self
+
+    def order_by_activation(self, direction: str = "desc") -> "GraphQuery":
+        """Order results by current (decay-corrected) activation instead of a data field."""
+        if direction not in ("asc", "desc"):
+            raise PolypackValueError("direction must be 'asc' or 'desc'")
+        self._activation_order = direction
         return self
 
     def offset(self, n: int) -> "GraphQuery":
@@ -724,6 +925,8 @@ class GraphQuery:
                     return False
                 if below is not None and actual >= below:
                     return False
+        if self._activation_above is not None and _activation_score_of(node) < self._activation_above:
+            return False
         return True
 
     def _connected(self, node: Node, edge_type: str, direction: str) -> bool:
@@ -802,6 +1005,10 @@ class GraphQuery:
 
     def _native_ids(self, plan: dict) -> Optional[list]:
         """Run the plan through the Rust query executor; None on failure."""
+        if self._activation_above is not None or self._activation_order is not None:
+            # The native executor doesn't understand activation filters — force
+            # the pure-Python pipeline so results can't silently diverge.
+            return None
         try:
             nodes = [dict(n) for n in self._graph._nodes.values()]
             edges = []
@@ -848,6 +1055,12 @@ class GraphQuery:
                 results,
                 key=lambda n: (n.get("data") or {}).get(field, 0) or 0,
                 reverse=(direction == "desc"),
+            )
+        if self._activation_order is not None:
+            results = sorted(
+                results,
+                key=lambda n: _activation_score_of(n),
+                reverse=(self._activation_order == "desc"),
             )
         if self._similarity:
             sim = self._similarity
@@ -903,6 +1116,178 @@ class GraphQuery:
         else:
             raise PolypackValueError(f"unknown aggregate op {op}")
         return {"value": value, "count": len(values)}
+
+
+# ── ActivationEngine (adaptive memory, mirrors the Rust / TypeScript engine) ──
+
+
+class ActivationEngine:
+    """Adaptive-memory layer over a `PolyGraph`.
+
+    Two tiers: durable reinforcement (persisted through the store) and
+    transient attention (local to this engine, never serialized). `spread`
+    implements spreading activation, `pulse`/`absorb` the semantic +
+    relational + recency + usage composite, and `working_memory` materializes
+    the current "mental state". `pulse`/`absorb` take a raw query vector —
+    embed text first with your own embedding provider.
+    """
+
+    def __init__(self, graph: "PolyGraph", config: Optional[dict] = None) -> None:
+        self.graph = graph
+        cfg: dict = {
+            "scoreHalfLifeMs": DEFAULT_ACTIVATION["scoreHalfLifeMs"],
+            "importanceHalfLifeMs": DEFAULT_ACTIVATION["importanceHalfLifeMs"],
+            "importanceGain": DEFAULT_ACTIVATION["importanceGain"],
+            "spreadDecay": 0.5,
+            "spreadDepth": 2,
+            "recencyHalfLifeMs": 7 * _DAY,
+            "weights": {"semantic": 1, "graph": 1, "recency": 1, "usage": 1},
+            "minReinforceDelta": 0.05,
+            "pulseThreshold": 0.0,
+            "absorbThreshold": 0.3,
+            "absorbGain": 0.05,
+        }
+        cfg.update(config or {})
+        weights = dict(cfg["weights"])
+        cfg["weights"] = weights
+        self.config = cfg
+        self.attention: dict = {}
+
+    def dispose(self) -> None:
+        """Drop transient attention. Durable state is untouched."""
+        self.attention.clear()
+
+    # ── transient attention (local, never synced) ──
+
+    def bump_attention(self, id_: str, amount: float) -> None:
+        """Accumulate runtime-only attention, promoting to durable reinforcement
+        once it clears `minReinforceDelta`."""
+        next_ = _clamp01(self.attention.get(id_, 0.0) + amount)
+        self.attention[id_] = next_
+        if next_ >= self.config["minReinforceDelta"]:
+            self.attention.pop(id_, None)
+            self.graph.reinforce_node(id_, next_, "attention")
+
+    def attention_of(self, id_: str) -> float:
+        return self.attention.get(id_, 0.0)
+
+    def effective(self, id_: str) -> float:
+        """Durable decayed score (using `scoreHalfLifeMs`) plus transient attention."""
+        node = self.graph.get_node(id_)
+        durable = 0.0
+        if node and node.get("activation"):
+            act = node["activation"]
+            now = int(time.time() * 1000)
+            durable = _clamp01(
+                act["score"] * decay_factor(now - act["lastMeaningfulActivation"], self.config["scoreHalfLifeMs"])
+            )
+        return _clamp01(durable + self.attention_of(id_))
+
+    # ── durable reinforcement ──
+
+    def reinforce(self, id_: str, amount: float, reason: Optional[str] = None) -> Optional[Node]:
+        return self.graph.reinforce_node(id_, amount, reason)
+
+    def reinforce_all(self, entries: Iterable[tuple]) -> None:
+        for id_, amount, reason in entries:
+            self.graph.reinforce_node(id_, amount, reason)
+
+    # ── relational spreading activation ──
+
+    def spread(
+        self,
+        seeds: Iterable[str],
+        depth: Optional[int] = None,
+        decay: Optional[float] = None,
+        edge_types: Optional[Sequence[str]] = None,
+    ) -> dict:
+        """Spread activation outward from `seeds` across outgoing edges. Each hop
+        attenuates the contribution by `decay`; multiple paths to a node sum."""
+        depth = depth if depth is not None else self.config["spreadDepth"]
+        decay = decay if decay is not None else self.config["spreadDecay"]
+        contributions: dict = {}
+        visited = set(seeds)
+        frontier = list(seeds)
+        for hop in range(depth):
+            if not frontier:
+                break
+            nxt = []
+            for id_ in frontier:
+                for e in self.graph.get_edges(id_):
+                    if edge_types is not None and e["type"] not in edge_types:
+                        continue
+                    if e["target"] in visited:
+                        continue
+                    visited.add(e["target"])
+                    contributions[e["target"]] = contributions.get(e["target"], 0.0) + decay ** (hop + 1)
+                    nxt.append(e["target"])
+            frontier = nxt
+        return contributions
+
+    # ── semantic pulse / absorb ──
+
+    def pulse(
+        self,
+        vector: Any,
+        top_k: Optional[int] = None,
+        semantic_threshold: float = 0.0,
+        pulse_threshold: Optional[float] = None,
+        depth: Optional[int] = None,
+        decay: Optional[float] = None,
+        edge_types: Optional[Sequence[str]] = None,
+    ) -> list:
+        """Score the region of the graph around `vector`: semantic seeds via vector
+        similarity (nodes with zero similarity never seed the region), outward
+        spreading activation, folded with recency and usage. Returns ranked
+        `(node_id, composite)` pairs."""
+        threshold = pulse_threshold if pulse_threshold is not None else self.config["pulseThreshold"]
+        now = int(time.time() * 1000)
+        q = _validate_vector(vector, "query vector")
+        top_k = top_k if top_k is not None else len(self.graph.vectors)
+        semantic: dict = {}
+        for id_, score in self.graph.vectors.query(q, top_k, 0.0):
+            if score > max(semantic_threshold, 0.0):
+                semantic[id_] = score
+        graph_contrib = self.spread(list(semantic.keys()), depth=depth, decay=decay, edge_types=edge_types)
+        w = self.config["weights"]
+        scores: dict = {}
+        for id_ in set(semantic) | set(graph_contrib):
+            node = self.graph.get_node(id_)
+            if node is None:
+                continue
+            s = semantic.get(id_, 0.0)
+            g = graph_contrib.get(id_, 0.0)
+            recency = decay_factor(now - node["insertedAt"], self.config["recencyHalfLifeMs"])
+            activation = node.get("activation")
+            usage = activation["importance"] if activation else 0.0
+            scores[id_] = w["semantic"] * s + w["graph"] * g + w["recency"] * recency + w["usage"] * usage
+        return sorted(
+            ((id_, score) for id_, score in scores.items() if score > threshold),
+            key=lambda x: x[1],
+            reverse=True,
+        )
+
+    def absorb(self, vector: Any, **options) -> list:
+        """`pulse` plus reinforcement: nodes whose composite clears
+        `absorbThreshold` receive durable reinforcement of `absorbGain * score`."""
+        scores = self.pulse(vector, **options)
+        for id_, score in scores:
+            if score >= self.config["absorbThreshold"]:
+                self.graph.reinforce_node(id_, _clamp01(self.config["absorbGain"] * score), "pulse")
+        return scores
+
+    # ── working memory ──
+
+    def working_memory(self, limit: int = 10, min_score: float = 0.0) -> list:
+        """The current "mental state": loaded nodes ranked by `effective`
+        activation descending, top `limit`."""
+        scored = []
+        for node in self.graph._nodes.values():
+            score = self.effective(node["id"])
+            if score > min_score:
+                scored.append((score, _copy_node(node)))
+        scored.sort(key=lambda x: x[0], reverse=True)
+        return [n for _, n in scored[:limit]]
 
 
 # ── Change batch (v1: structural contract; execution is Phase 5) ──

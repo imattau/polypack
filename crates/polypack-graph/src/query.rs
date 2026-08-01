@@ -10,11 +10,13 @@
 
 use std::collections::{HashMap, HashSet};
 
+use polypack_core::activation::{activation_score_of, DEFAULT_ACTIVATION};
 use polypack_core::query::Direction;
 use polypack_core::vector::cosine;
 use polypack_core::Node;
 
 use crate::edge::EdgeEntry;
+use crate::graph::now_millis;
 
 /// A `join` predicate closure: `Some` to filter by the connected node,
 /// `None` to require only that a connection exists.
@@ -109,6 +111,8 @@ pub struct GraphQuery<'a> {
     traversal_steps: Vec<TraversalStep>,
     similarity: Option<SimilaritySpec>,
     join_filters: Vec<JoinPredicate<'a>>,
+    activation_above: Option<f64>,
+    activation_order: Option<OrderDirection>,
 }
 
 impl<'a> GraphQuery<'a> {
@@ -133,6 +137,8 @@ impl<'a> GraphQuery<'a> {
             traversal_steps: Vec::new(),
             similarity: None,
             join_filters: Vec::new(),
+            activation_above: None,
+            activation_order: None,
         }
     }
 
@@ -176,6 +182,20 @@ impl<'a> GraphQuery<'a> {
 
     pub fn order_by(mut self, field: &str, direction: OrderDirection) -> Self {
         self.order_by = Some((field.to_string(), direction));
+        self
+    }
+
+    /// Keep only nodes whose current (decay-corrected) activation exceeds
+    /// `above`. Mirrors `GraphQuery.whereActivated`.
+    pub fn where_activated(mut self, above: f64) -> Self {
+        self.activation_above = Some(above);
+        self
+    }
+
+    /// Order results by current (decay-corrected) activation instead of a data
+    /// field. Mirrors `GraphQuery.orderByActivation`.
+    pub fn order_by_activation(mut self, direction: OrderDirection) -> Self {
+        self.activation_order = Some(direction);
         self
     }
 
@@ -293,6 +313,11 @@ impl<'a> GraphQuery<'a> {
                     .any(|e| e.target == node.id && self.edge_type.as_deref().is_none_or(|t| e.edge_type == t))
             });
             if !matched {
+                return false;
+            }
+        }
+        if let Some(above) = self.activation_above {
+            if activation_score_of(node, now_millis(), DEFAULT_ACTIVATION.score_half_life_ms) < above {
                 return false;
             }
         }
@@ -417,6 +442,20 @@ impl<'a> GraphQuery<'a> {
             });
         }
 
+        if let Some(direction) = self.activation_order {
+            let now = now_millis();
+            results.sort_by(|a, b| {
+                let av = activation_score_of(a, now, DEFAULT_ACTIVATION.score_half_life_ms);
+                let bv = activation_score_of(b, now, DEFAULT_ACTIVATION.score_half_life_ms);
+                let ord = av.partial_cmp(&bv).unwrap_or(std::cmp::Ordering::Equal);
+                if direction == OrderDirection::Desc {
+                    ord.reverse()
+                } else {
+                    ord
+                }
+            });
+        }
+
         if let Some(sim) = &self.similarity {
             let mut scored: Vec<(f64, &Node)> = results
                 .into_iter()
@@ -451,7 +490,9 @@ impl<'a> GraphQuery<'a> {
         let needs_materialization = !self.traversal_steps.is_empty()
             || self.similarity.is_some()
             || self.offset.is_some()
-            || self.limit.is_some();
+            || self.limit.is_some()
+            || self.activation_above.is_some()
+            || self.activation_order.is_some();
         if needs_materialization {
             return self.to_array().len();
         }
@@ -633,13 +674,14 @@ impl<'a> GraphQuery<'a> {
 mod tests {
     use super::*;
     use crate::edge::EdgeOwnership;
+    use polypack_core::NodeActivation;
 
     fn node(id: &str, node_type: &str, data: &[(&str, serde_json::Value)]) -> Node {
         let mut map = serde_json::Map::new();
         for (k, v) in data {
             map.insert((*k).to_string(), v.clone());
         }
-        Node { id: id.to_string(), node_type: node_type.to_string(), data: map, vector: None, inserted_at: 1, updated_at: 1 }
+        Node { id: id.to_string(), node_type: node_type.to_string(), data: map, vector: None, inserted_at: 1, updated_at: 1, activation: None }
     }
 
     struct Fixture {
@@ -887,5 +929,48 @@ mod tests {
         let mut ids = ids_of(f.query().where_node_type(vec!["user".into()]).collect("RATED", Direction::Out, None));
         ids.sort();
         assert_eq!(ids, vec!["fantasy1".to_string(), "scifi1".to_string()]);
+    }
+
+    #[test]
+    fn where_activated_filters_by_decayed_score() {
+        let mut f = Fixture::new();
+        let now = now_millis();
+        for (id, score) in [("a", 0.9), ("b", 0.5), ("c", 0.1)] {
+            let mut n = node(id, "t", &[]);
+            n.activation = Some(NodeActivation {
+                score,
+                importance: 0.0,
+                reinforcement_count: 1,
+                last_meaningful_activation: now,
+            });
+            f.add(n);
+        }
+        let mut ids = f.query().where_activated(0.4).ids();
+        ids.sort();
+        assert_eq!(ids, vec!["a".to_string(), "b".to_string()]);
+    }
+
+    #[test]
+    fn order_by_activation_sorts_descending_and_ascending() {
+        let mut f = Fixture::new();
+        let now = now_millis();
+        for (id, score) in [("a", 0.9), ("b", 0.5), ("c", 0.1)] {
+            let mut n = node(id, "t", &[]);
+            n.activation = Some(NodeActivation {
+                score,
+                importance: 0.0,
+                reinforcement_count: 1,
+                last_meaningful_activation: now,
+            });
+            f.add(n);
+        }
+        assert_eq!(
+            f.query().order_by_activation(OrderDirection::Desc).ids(),
+            vec!["a".to_string(), "b".to_string(), "c".to_string()]
+        );
+        assert_eq!(
+            f.query().order_by_activation(OrderDirection::Asc).ids(),
+            vec!["c".to_string(), "b".to_string(), "a".to_string()]
+        );
     }
 }

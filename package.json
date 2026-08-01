@@ -43,6 +43,10 @@
       "types": "./dist/react.d.ts",
       "import": "./dist/react.js"
     },
+    "./activation": {
+      "types": "./dist/activation.d.ts",
+      "import": "./dist/activation.js"
+    },
     "./sync": {
       "types": "./dist/sync/index.d.ts",
       "import": "./dist/sync/index.js"
@@ -58,7 +62,7 @@
   "scripts": {
     "build": "tsc",
     "check": "npm test && npm run build && npm run check:exports && npm run check:browser && npm run check:build:browser",
-    "check:exports": "node --input-type=module --eval \"const core = await import('./dist/index.js'); const persistence = await import('./dist/persistence/index.js'); const node = await import('./dist/persistence/node.js'); const opfs = await import('./dist/persistence/opfs.js'); const sync = await import('./dist/sync/index.js'); const react = await import('./dist/react.js'); if (!core.PolyGraph || !core.PersistedGraphQuery || !core.FeatureHashEmbedding || !persistence.MemoryAdapter || !node.BinaryStoreAdapter || !node.NodeFileIO || !opfs.BinaryStoreAdapter || !opfs.OPFSFileIO || !sync.SyncClient || !sync.SyncServer || !react.useGraphQuery) process.exit(1)\"",
+    "check:exports": "node --input-type=module --eval \"const core = await import('./dist/index.js'); const persistence = await import('./dist/persistence/index.js'); const node = await import('./dist/persistence/node.js'); const opfs = await import('./dist/persistence/opfs.js'); const sync = await import('./dist/sync/index.js'); const react = await import('./dist/react.js'); const activation = await import('./dist/activation.js'); if (!core.PolyGraph || !core.PersistedGraphQuery || !core.FeatureHashEmbedding || !core.ActivationEngine || !core.mergeActivation || !activation.ActivationEngine || !activation.mergeActivation || !persistence.MemoryAdapter || !node.BinaryStoreAdapter || !node.NodeFileIO || !opfs.BinaryStoreAdapter || !opfs.OPFSFileIO || !sync.SyncClient || !sync.SyncServer || !react.useGraphQuery) process.exit(1)\"",
     "check:browser": "node scripts/check-browser-safe.mjs",
     "check:build:browser": "node scripts/browser-build-check.mjs",
     "prepack": "npm run build",

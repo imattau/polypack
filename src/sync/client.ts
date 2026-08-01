@@ -1,6 +1,7 @@
 import { Subscription } from 'rxjs'
 import type { PolyGraph } from '../graph.js'
-import type { GraphChangeEvent } from '../types.js'
+import type { GraphChangeEvent, NodeActivation } from '../types.js'
+import { mergeActivation } from '../activation.js'
 import type { SyncTransport } from './transport.js'
 import type { SyncMessage, SyncOp } from './types.js'
 import { OpLog } from './oplog.js'
@@ -14,6 +15,11 @@ export interface SyncClientOptions {
   autoFlush?: boolean
   /** Retry interval for unacknowledged operations in milliseconds. Set 0 to disable. */
   retryMs?: number
+  /**
+   * Activation deltas below this magnitude are dropped instead of synced, so
+   * transient noise never floods the op log. Default 0.05.
+   */
+  activationSyncThreshold?: number
 }
 
 const NODE_OPS: Record<string, SyncOp['kind']> = {
@@ -26,6 +32,8 @@ const EDGE_OPS: Record<string, SyncOp['kind']> = {
   edge_added: 'addEdge',
   edge_removed: 'removeEdges',
 }
+
+const DEFAULT_ACTIVATION_SYNC_THRESHOLD = 0.05
 
 /**
  * Syncs a local PolyGraph with a remote server: subscribes to graph change
@@ -40,6 +48,9 @@ export class SyncClient {
   private subscription: Subscription
   private autoFlush: boolean
   private retryMs: number
+  private activationSyncThreshold: number
+  /** Coalesced, not-yet-materialised activation deltas per node. */
+  private pendingActivation = new Map<string, { delta: number; reason?: string }>()
   private retryTimer: ReturnType<typeof setTimeout> | null = null
   private serverCursor = 0
   private applyingRemote = false
@@ -50,6 +61,7 @@ export class SyncClient {
     this.oplog = new OpLog(options.clientId ?? `client-${Date.now()}`)
     this.autoFlush = options.autoFlush ?? true
     this.retryMs = options.retryMs ?? 1000
+    this.activationSyncThreshold = options.activationSyncThreshold ?? DEFAULT_ACTIVATION_SYNC_THRESHOLD
     this.bindTransport(options.transport)
 
     this.subscription = this.graph.changes.subscribe((event) => {
@@ -64,6 +76,20 @@ export class SyncClient {
   }
 
   private handleLocalChange(event: GraphChangeEvent): void {
+    if (event.type === 'activation_updated') {
+      // Activation is a derived, statistical signal: coalesce deltas per node
+      // and only materialise them into ops at flush time, gated by threshold.
+      if (event.nodeId && typeof event.delta === 'number') {
+        const pending = this.pendingActivation.get(event.nodeId)
+        this.pendingActivation.set(event.nodeId, {
+          delta: (pending?.delta ?? 0) + event.delta,
+          reason: event.reason ?? pending?.reason,
+        })
+        if (this.autoFlush) this.flush()
+      }
+      return
+    }
+
     let kind: SyncOp['kind'] | undefined
     let payload: Record<string, unknown> | undefined
 
@@ -81,6 +107,7 @@ export class SyncClient {
           vector: node.vector ? [...node.vector] : null,
           insertedAt: node.insertedAt,
           updatedAt: node.updatedAt,
+          activation: node.activation ? { ...node.activation } : undefined,
         }
       } else {
         return
@@ -143,6 +170,7 @@ export class SyncClient {
           vector: p.vector ? new Float64Array(p.vector as number[]) : undefined,
           insertedAt: p.insertedAt as number,
           updatedAt: p.updatedAt as number,
+          activation: this.mergedActivation(p.id as string, p.activation as NodeActivation | undefined),
         })
         break
       case 'updateNode':
@@ -150,6 +178,7 @@ export class SyncClient {
           p.id as string,
           p.data as Record<string, unknown>,
           p.vector ? new Float64Array(p.vector as number[]) : undefined,
+          this.mergedActivation(p.id as string, p.activation as NodeActivation | undefined),
         )
         break
       case 'removeNode':
@@ -170,11 +199,48 @@ export class SyncClient {
           p.target as string | undefined,
         )
         break
+      case 'activationUpdate':
+        // Activation deltas accumulate — not last-write-wins. Apply synchronously
+        // when the node is loaded so the resulting change event stays inside the
+        // `applyingRemote` window (no echo); fall back to an async restore for
+        // evicted nodes.
+        if (this.graph.hasLoadedNode(p.node as string)) {
+          this.graph.reinforceNode(p.node as string, p.delta as number, p.reason as string | undefined)
+        } else {
+          this.graph.reinforceNodeSafe(p.node as string, p.delta as number, p.reason as string | undefined)
+        }
+        break
     }
+  }
+
+  /**
+   * Merge a full-node activation payload into the local node's durable state.
+   * Full states merge by max (idempotent across re-delivered snapshots) and an
+   * absent incoming activation never wipes locally learned state; concurrent
+   * deltas use the additive `activationUpdate` op instead.
+   */
+  private mergedActivation(id: string, incoming: NodeActivation | undefined): NodeActivation | undefined {
+    const existing = this.graph.getNode(id)?.activation
+    if (existing && !incoming) return existing
+    if (!existing && incoming) return incoming
+    if (existing && incoming) return mergeActivation(existing, incoming)
+    return undefined
+  }
+
+  /** Materialise coalesced activation deltas into ops, dropping sub-threshold noise. */
+  private materializeActivationOps(): void {
+    if (this.pendingActivation.size === 0) return
+    for (const [nodeId, { delta, reason }] of this.pendingActivation) {
+      if (Math.abs(delta) >= this.activationSyncThreshold) {
+        this.oplog.append('activationUpdate', { node: nodeId, delta, reason })
+      }
+    }
+    this.pendingActivation.clear()
   }
 
   /** Send pending local ops through the transport. */
   flush(): void {
+    this.materializeActivationOps()
     const ops = this.oplog.since(this.lastAckedSeq)
     if (ops.length === 0) return
     this.transport.send({

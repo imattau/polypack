@@ -8,6 +8,7 @@
 //! `polypack-node`, or `polypack-python` depends on it, so it can evolve
 //! independently of the published NAPI/PyO3 bindings.
 //!
+mod activation;
 mod edge;
 mod embedding;
 mod event;
@@ -16,6 +17,7 @@ mod lru;
 mod persisted_query;
 mod query;
 
+pub use activation::{ActivationConfig, ActivationEngine, ActivationWeights, PulseOptions, SpreadOptions};
 pub use edge::{EdgeEntry, EdgeOwnership};
 pub use embedding::{
     build_embedding_text, create_embedding, EmbeddingProvider, FeatureHashEmbedding, FeatureHashEmbeddingOptions,
@@ -24,3 +26,4 @@ pub use event::GraphChangeEvent;
 pub use graph::{Graph, GraphConfig};
 pub use persisted_query::PersistedGraphQuery;
 pub use query::{AggregateOp, AggregateResult, GraphQuery, GroupedRow, OrderDirection};
+pub use polypack_core::{merge_activation, NodeActivation};

@@ -58,6 +58,7 @@ migration notes.
 - **Reactive** — RxJS change events, batching, React hooks
 - **Pluggable persistence** — MemoryAdapter, BinaryStoreAdapter (MessagePack + WAL), build your own
 - **Persisted queries** — asynchronous filtering and similarity across the full backing store
+- **Adaptive memory** — activation model: durable, decayed relevance (`score`/`importance`) per node, spreading activation over edges, semantic pulses, and a live working-memory set — synced additively
 - **Real-time sync** — acknowledgements, retry, deduplication, reconnect recovery, and echo suppression
 
 ## Quick start
@@ -123,7 +124,8 @@ graph.query()
 | `@0xx0lostcause0xx0/polypack/persistence` | Platform-neutral persistence: adapters, `FileIO` types |
 | `@0xx0lostcause0xx0/polypack/persistence/node` | BinaryStoreAdapter + `NodeFileIO` for the filesystem |
 | `@0xx0lostcause0xx0/polypack/persistence/opfs` | BinaryStoreAdapter + `OPFSFileIO` for the browser |
-| `@0xx0lostcause0xx0/polypack/react` | React hooks: `useGraphQuery`, `useLiveQuery` |
+| `@0xx0lostcause0xx0/polypack/react` | React hooks: `useGraphQuery`, `useLiveQuery`, `useWorkingMemory` |
+| `@0xx0lostcause0xx0/polypack/activation` | Adaptive memory: `ActivationEngine`, `mergeActivation`, activation config types |
 | `@0xx0lostcause0xx0/polypack/sync` | Sync layer: OpLog, SyncAdapter, SyncClient, SyncServer |
 | `@0xx0lostcause0xx0/polypack-native` | Separate package: NAPI-RS bindings for native `VectorIndex`/`HNSWIndex` over the Rust core |
 | `polypack-db` (PyPI) | Separate package: PyO3/maturin bindings exposing `PolyGraph`, `GraphQuery`, and vector indexes to Python — see [python/README.md](python/README.md) |

@@ -10,6 +10,8 @@ export type { AggregateOp, AggregateResult, GroupedRow } from './query.js'
 export { PersistedGraphQuery } from './persisted-query.js'
 export { MemoryAdapter } from './persistence/memory.js'
 export type { PersistenceAdapter, PersistenceChanges, PersistedNodeQuery } from './persistence/adapter.js'
+export { ActivationEngine, mergeActivation } from './activation.js'
+export type { ActivationConfig, SpreadOptions, PulseOptions, VectorLike } from './activation.js'
 export type {
   PolyNode,
   PolyEdge,
@@ -20,6 +22,7 @@ export type {
   VectorQuery,
   EdgeTypes,
   DataTransform,
+  NodeActivation,
 } from './types.js'
 export { defineEdges } from './types.js'
 export { yieldToUI, edgeId } from './utils.js'

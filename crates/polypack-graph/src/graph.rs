@@ -3,7 +3,10 @@
 use std::collections::{HashMap, HashSet};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use polypack_core::model::{edge_id, validate_node};
+use polypack_core::activation::{
+    activation_score_of, decay_activation_state, reinforce_activation, DEFAULT_ACTIVATION,
+};
+use polypack_core::model::{edge_id, validate_activation, validate_node, NodeActivation};
 use polypack_core::storage::NodeQuery;
 use polypack_core::{
     aggregate as core_aggregate, execute as core_execute, ChangeBatch, Edge, GraphSnapshot, HnswConfig,
@@ -527,15 +530,16 @@ impl Graph {
     }
 
     /// Shallow-merge `data` into a loaded node and optionally replace its
-    /// vector. A no-op (returns `None`) if the node isn't loaded — see
-    /// `update_node_safe`. Mirrors `PolyGraph.updateNode`; the data-transform
-    /// serialize/deserialize hooks aren't part of this crate, so `data` is
-    /// merged as-is.
+    /// vector or durable activation. A no-op (returns `None`) if the node
+    /// isn't loaded — see `update_node_safe`. Mirrors `PolyGraph.updateNode`;
+    /// the data-transform serialize/deserialize hooks aren't part of this
+    /// crate, so `data` is merged as-is.
     pub fn update_node(
         &mut self,
         id: &str,
         data: serde_json::Map<String, serde_json::Value>,
         vector: Option<Vec<f64>>,
+        activation: Option<NodeActivation>,
     ) -> Result<Option<&Node>> {
         if !self.nodes.contains_key(id) {
             return Ok(None);
@@ -545,12 +549,18 @@ impl Graph {
                 return Err(PolypackError::InvalidArgument("vector must contain finite values".into()));
             }
         }
+        if let Some(activation) = &activation {
+            validate_activation(activation)?;
+        }
 
         let node_type = {
             let node = self.nodes.get_mut(id).unwrap();
             node.data.extend(data);
             if let Some(vector) = &vector {
                 node.vector = Some(vector.clone());
+            }
+            if activation.is_some() {
+                node.activation = activation.clone();
             }
             node.updated_at = now_millis();
             node.node_type.clone()
@@ -575,11 +585,12 @@ impl Graph {
         id: &str,
         data: serde_json::Map<String, serde_json::Value>,
         vector: Option<Vec<f64>>,
+        activation: Option<NodeActivation>,
     ) -> Result<Option<&Node>> {
         if self.get_node_safe(id)?.is_none() {
             return Ok(None);
         }
-        self.update_node(id, data, vector)
+        self.update_node(id, data, vector, activation)
     }
 
     /// Embed `text` and update a loaded node's data and vector together.
@@ -591,7 +602,7 @@ impl Graph {
         text: &str,
     ) -> Result<Option<&Node>> {
         let vector = self.embed(text)?;
-        self.update_node(id, data, Some(vector))
+        self.update_node(id, data, Some(vector), None)
     }
 
     /// Embed `text`, restoring an evicted node before updating when
@@ -603,7 +614,7 @@ impl Graph {
         text: &str,
     ) -> Result<Option<&Node>> {
         let vector = self.embed(text)?;
-        self.update_node_safe(id, data, Some(vector))
+        self.update_node_safe(id, data, Some(vector), None)
     }
 
     /// Remove a node's vector while keeping the node and its data. A no-op
@@ -1135,6 +1146,122 @@ impl Graph {
         self.store.node_count()
     }
 
+    // ── activation ──
+
+    /// Current decayed activation score of a loaded node, or 0 when it has
+    /// none. Decay is a pure function of elapsed time from
+    /// `lastMeaningfulActivation`, so this is deterministic across replicas
+    /// with the same stored state. `half_life_ms` defaults to the standard 24h
+    /// score curve. Mirrors `PolyGraph.getActivation`.
+    pub fn get_activation(&self, id: &str, half_life_ms: i64) -> f64 {
+        match self.nodes.get(id) {
+            Some(node) => activation_score_of(node, now_millis(), half_life_ms),
+            None => 0.0,
+        }
+    }
+
+    /// Decay-corrected view of a loaded node's durable activation, or `None`.
+    /// Mirrors `PolyGraph.getActivationState`.
+    pub fn get_activation_state(&self, id: &str) -> Option<NodeActivation> {
+        let node = self.nodes.get(id)?;
+        node.activation.as_ref().map(|a| {
+            decay_activation_state(
+                a,
+                now_millis(),
+                DEFAULT_ACTIVATION.score_half_life_ms,
+                DEFAULT_ACTIVATION.importance_half_life_ms,
+            )
+        })
+    }
+
+    /// Apply a durable reinforcement delta to a loaded node's activation. The
+    /// prior state is decay-corrected to now, `amount` is added to `score`, a
+    /// fraction is folded into `importance`, the reinforcement counter
+    /// increments, and the decay anchor re-sets to now. Persists and emits an
+    /// `ActivationUpdated` change event. Returns the updated node or `None`
+    /// when the node isn't loaded (see `reinforce_node_safe`). Mirrors
+    /// `PolyGraph.reinforceNode`.
+    pub fn reinforce_node(&mut self, id: &str, amount: f64, reason: Option<&str>) -> Result<Option<&Node>> {
+        if !amount.is_finite() {
+            return Err(PolypackError::InvalidArgument("reinforcement amount must be finite".into()));
+        }
+        let Some(node) = self.nodes.get_mut(id) else {
+            return Ok(None);
+        };
+        let now = now_millis();
+        node.activation = Some(reinforce_activation(node.activation.as_ref(), amount, now, &DEFAULT_ACTIVATION));
+        node.updated_at = now;
+        let node_type = node.node_type.clone();
+
+        self.touch_hot_cache(id);
+        self.mark_dirty(id);
+        self.emit(GraphChangeEvent::ActivationUpdated {
+            node_id: id.to_string(),
+            node_type,
+            delta: amount,
+            reason: reason.map(|r| r.to_string()),
+        });
+        Ok(self.nodes.get(id))
+    }
+
+    /// Restore an evicted node when necessary, then reinforce it. Mirrors
+    /// `PolyGraph.reinforceNodeSafe`.
+    pub fn reinforce_node_safe(&mut self, id: &str, amount: f64, reason: Option<&str>) -> Result<Option<&Node>> {
+        if !amount.is_finite() {
+            return Err(PolypackError::InvalidArgument("reinforcement amount must be finite".into()));
+        }
+        if self.get_node_safe(id)?.is_none() {
+            return Ok(None);
+        }
+        self.reinforce_node(id, amount, reason)
+    }
+
+    /// Loaded nodes with the highest current activation, descending. The
+    /// working-memory primitive. Mirrors `PolyGraph.topActivated`.
+    pub fn top_activated(&self, limit: usize, min_score: f64) -> Vec<&Node> {
+        if limit == 0 {
+            return Vec::new();
+        }
+        let now = now_millis();
+        let mut scored: Vec<(&Node, f64)> = self
+            .nodes
+            .values()
+            .map(|n| (n, activation_score_of(n, now, DEFAULT_ACTIVATION.score_half_life_ms)))
+            .filter(|(_, score)| *score > min_score)
+            .collect();
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        scored.into_iter().take(limit).map(|(n, _)| n).collect()
+    }
+
+    /// Materialize decay for every loaded node with activation: rewrite each
+    /// node's stored values to their current decayed state and re-anchor to
+    /// `now`. Reads already decay lazily, so this only matters for persisting
+    /// fresh values (e.g. before eviction-driven lifecycle events). Mirrors
+    /// `PolyGraph.decay`.
+    pub fn decay(&mut self, now: i64) {
+        let mut dirty: Vec<String> = Vec::new();
+        for node in self.nodes.values_mut() {
+            let Some(activation) = &node.activation else { continue };
+            let corrected = decay_activation_state(
+                activation,
+                now,
+                DEFAULT_ACTIVATION.score_half_life_ms,
+                DEFAULT_ACTIVATION.importance_half_life_ms,
+            );
+            node.activation = Some(NodeActivation {
+                score: corrected.score,
+                importance: corrected.importance,
+                reinforcement_count: activation.reinforcement_count,
+                last_meaningful_activation: now,
+            });
+            node.updated_at = now;
+            dirty.push(node.id.clone());
+        }
+        for id in dirty {
+            self.mark_dirty(&id);
+        }
+    }
+
     // ── internal ──
 
     /// Mirrors `PolyGraph.insertNode`: assumes the node has already passed
@@ -1234,7 +1361,7 @@ impl Graph {
     }
 }
 
-fn now_millis() -> i64 {
+pub(crate) fn now_millis() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("system clock before UNIX epoch")
@@ -1264,6 +1391,7 @@ mod tests {
             vector: None,
             inserted_at: 1,
             updated_at: 1,
+            activation: None,
         }
     }
 
@@ -1777,7 +1905,7 @@ mod tests {
 
         let mut patch = serde_json::Map::new();
         patch.insert("title".into(), serde_json::json!("hello"));
-        let updated = g.update_node("a", patch, None).unwrap().unwrap();
+        let updated = g.update_node("a", patch, None, None).unwrap().unwrap();
 
         assert_eq!(updated.data.get("title"), Some(&serde_json::json!("hello")));
         assert!(g.dirty_nodes.contains("a"));
@@ -1792,7 +1920,7 @@ mod tests {
 
         let mut patch = serde_json::Map::new();
         patch.insert("added".into(), serde_json::json!(2));
-        let updated = g.update_node("a", patch, None).unwrap().unwrap();
+        let updated = g.update_node("a", patch, None, None).unwrap().unwrap();
 
         assert_eq!(updated.data.get("kept"), Some(&serde_json::json!(1)));
         assert_eq!(updated.data.get("added"), Some(&serde_json::json!(2)));
@@ -1804,7 +1932,7 @@ mod tests {
         g.add_node(node("a")).unwrap();
         g.flush().unwrap();
 
-        let updated = g.update_node("a", serde_json::Map::new(), Some(vec![1.0, 2.0])).unwrap().unwrap();
+        let updated = g.update_node("a", serde_json::Map::new(), Some(vec![1.0, 2.0]), None).unwrap().unwrap();
 
         assert_eq!(updated.vector, Some(vec![1.0, 2.0]));
         assert!(g.hnsw.has("a"));
@@ -1816,7 +1944,7 @@ mod tests {
         let mut g = test_graph();
         g.add_node(node("a")).unwrap();
 
-        let err = g.update_node("a", serde_json::Map::new(), Some(vec![f64::NAN])).unwrap_err();
+        let err = g.update_node("a", serde_json::Map::new(), Some(vec![f64::NAN]), None).unwrap_err();
         let _ = err;
         assert!(g.get_node("a").unwrap().vector.is_none(), "node must be untouched on error");
     }
@@ -1826,7 +1954,7 @@ mod tests {
         let mut g = test_graph();
         let mut patch = serde_json::Map::new();
         patch.insert("title".into(), serde_json::json!("hello"));
-        assert!(g.update_node("missing", patch, None).unwrap().is_none());
+        assert!(g.update_node("missing", patch, None, None).unwrap().is_none());
     }
 
     fn shared_storage() -> std::sync::Arc<std::sync::Mutex<InMemoryStorage>> {
@@ -2121,7 +2249,7 @@ mod tests {
         g.add_node(node("a")).unwrap();
         let mut patch = serde_json::Map::new();
         patch.insert("title".into(), serde_json::json!("edited"));
-        g.update_node("a", patch, None).unwrap();
+        g.update_node("a", patch, None, None).unwrap();
 
         // Push the periodic eviction-skip counter (touch_hot_cache only
         // checks the cap every 10th touch) past its next multiple of 10
@@ -2411,8 +2539,7 @@ mod tests {
     }
 
     #[test]
-    fn emit_dispatches_immediately_outside_a_batch() {
-        let (mut g, events) = recording_graph();
+    fn emit_dispatches_immediately_outside_a_batch() {        let (mut g, events) = recording_graph();
 
         g.add_node(node("a")).unwrap();
 
@@ -2638,7 +2765,7 @@ mod tests {
 
         let mut patch = serde_json::Map::new();
         patch.insert("title".into(), serde_json::json!("hello"));
-        let updated = g.update_node_safe("a", patch, None).unwrap().unwrap();
+        let updated = g.update_node_safe("a", patch, None, None).unwrap().unwrap();
 
         assert_eq!(updated.data.get("title"), Some(&serde_json::json!("hello")));
     }
@@ -2652,7 +2779,7 @@ mod tests {
 
         let mut patch = serde_json::Map::new();
         patch.insert("title".into(), serde_json::json!("hello"));
-        let updated = g.update_node_safe("a", patch, None).unwrap().unwrap().clone();
+        let updated = g.update_node_safe("a", patch, None, None).unwrap().unwrap().clone();
 
         assert!(g.has_loaded_node("a"), "restored into the hot cache along the way");
         assert_eq!(updated.data.get("title"), Some(&serde_json::json!("hello")));
@@ -2663,7 +2790,7 @@ mod tests {
         let mut g = test_graph();
         let mut patch = serde_json::Map::new();
         patch.insert("title".into(), serde_json::json!("hello"));
-        assert!(g.update_node_safe("missing", patch, None).unwrap().is_none());
+        assert!(g.update_node_safe("missing", patch, None, None).unwrap().is_none());
     }
 
     #[test]
@@ -2766,5 +2893,153 @@ mod tests {
     fn search_nodes_returns_empty_for_blank_text_without_embedding() {
         let mut g = test_graph();
         assert!(g.search_nodes("   ", "doc", 0.0, None).unwrap().is_empty());
+    }
+
+    // ── activation ──
+
+    #[test]
+    fn reinforce_node_sets_activation_and_emits_an_activation_updated_event() {
+        let mut g = test_graph();
+        g.add_node(node("a")).unwrap();
+        let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let events_cb = events.clone();
+        g.on_change(move |e| events_cb.borrow_mut().push(e));
+
+        g.reinforce_node("a", 0.5, Some("user_read")).unwrap();
+
+        // Decay is re-evaluated against a fresh wall-clock read here, so allow
+        // for the (small) real elapsed time since reinforce_node wrote it.
+        let state = g.get_activation_state("a").unwrap();
+        assert!((state.score - 0.5).abs() < 1e-5);
+        assert!((state.importance - 0.025).abs() < 1e-5);
+        assert_eq!(state.reinforcement_count, 1);
+        assert!((g.get_activation("a", DEFAULT_ACTIVATION.score_half_life_ms) - 0.5).abs() < 1e-5);
+        assert_eq!(
+            events.borrow().as_slice(),
+            &[GraphChangeEvent::ActivationUpdated {
+                node_id: "a".into(),
+                node_type: "doc".into(),
+                delta: 0.5,
+                reason: Some("user_read".into()),
+            }]
+        );
+    }
+
+    #[test]
+    fn reinforce_node_clamps_and_accumulates() {
+        let mut g = test_graph();
+        g.add_node(node("a")).unwrap();
+        g.reinforce_node("a", 5.0, None).unwrap();
+        assert!((g.get_activation_state("a").unwrap().score - 1.0).abs() < 1e-5);
+        g.reinforce_node("a", 0.2, None).unwrap();
+        g.reinforce_node("a", 0.3, None).unwrap();
+        let state = g.get_activation_state("a").unwrap();
+        assert_eq!(state.reinforcement_count, 3);
+    }
+
+    #[test]
+    fn reinforce_node_decay_corrects_before_adding() {
+        let mut g = test_graph();
+        let now = now_millis();
+        let mut n = node("a");
+        n.activation = Some(NodeActivation {
+            score: 1.0,
+            importance: 0.5,
+            reinforcement_count: 1,
+            last_meaningful_activation: now - DEFAULT_ACTIVATION.score_half_life_ms,
+        });
+        g.add_node(n).unwrap();
+        g.reinforce_node("a", 0.5, None).unwrap();
+        let state = g.get_activation_state("a").unwrap();
+        // Decayed to 0.5, then +0.5 → 1.0, re-anchored to now. Allow for the
+        // real elapsed time since this fresh wall-clock read re-decays it.
+        assert!((state.score - 1.0).abs() < 1e-5);
+        assert_eq!(state.last_meaningful_activation, now_millis());
+    }
+
+    #[test]
+    fn reinforce_node_missing_or_unloaded_returns_none() {
+        let mut g = test_graph();
+        assert!(g.reinforce_node("missing", 0.5, None).unwrap().is_none());
+        assert_eq!(g.get_activation("missing", DEFAULT_ACTIVATION.score_half_life_ms), 0.0);
+    }
+
+    #[test]
+    fn activation_persists_through_flush_and_warm() {
+        let storage = shared_storage();
+        {
+            let mut g = graph_on(&storage, GraphConfig::default());
+            g.add_node(node("a")).unwrap();
+            g.reinforce_node("a", 0.6, None).unwrap();
+            g.flush().unwrap();
+            g.dispose().unwrap();
+        }
+
+        let mut g2 = graph_on(&storage, GraphConfig::default());
+        g2.warm().unwrap();
+        let state = g2.get_activation_state("a").unwrap();
+        assert!((state.score - 0.6).abs() < 1e-5);
+        assert_eq!(state.reinforcement_count, 1);
+    }
+
+    #[test]
+    fn reinforce_node_safe_restores_an_evicted_node() {
+        let mut g = Graph::open(
+            Box::new(InMemoryStorage::new()),
+            StoreConfig::default(),
+            GraphConfig { hot_cache_max: 1, ..GraphConfig::default() },
+        )
+        .unwrap();
+        g.add_node(node("a")).unwrap();
+        g.reinforce_node("a", 0.4, None).unwrap();
+        g.flush().unwrap();
+        g.add_node(node("b")).unwrap();
+        g.flush().unwrap();
+        assert!(!g.has_loaded_node("a"));
+
+        g.reinforce_node_safe("a", 0.3, None).unwrap().unwrap();
+        let state = g.get_activation_state("a").unwrap();
+        assert!((state.score - 0.7).abs() < 1e-5);
+        assert!(g.has_loaded_node("a"));
+    }
+
+    #[test]
+    fn top_activated_ranks_by_current_score_descending() {
+        let mut g = test_graph();
+        for (id, amount) in [("a", 0.9), ("b", 0.5), ("c", 0.1)] {
+            g.add_node(node(id)).unwrap();
+            g.reinforce_node(id, amount, None).unwrap();
+        }
+        let top: Vec<String> = g.top_activated(2, 0.0).into_iter().map(|n| n.id.clone()).collect();
+        assert_eq!(top, vec!["a".to_string(), "b".to_string()]);
+        let hot: Vec<String> = g.top_activated(10, 0.6).into_iter().map(|n| n.id.clone()).collect();
+        assert_eq!(hot, vec!["a".to_string()]);
+    }
+
+    #[test]
+    fn persisted_query_activation_filters_and_orders() {
+        let mut g = test_graph();
+        let now = now_millis();
+        for (id, score) in [("a", 0.9), ("b", 0.5), ("c", 0.1)] {
+            let mut n = node(id);
+            n.activation = Some(NodeActivation {
+                score,
+                importance: 0.0,
+                reinforcement_count: 1,
+                last_meaningful_activation: now,
+            });
+            g.add_node(n).unwrap();
+        }
+        g.flush().unwrap();
+
+        let mut high = g.query_persisted().where_activated(0.4).ids().unwrap();
+        high.sort();
+        assert_eq!(high, vec!["a".to_string(), "b".to_string()]);
+        let ordered = g
+            .query_persisted()
+            .order_by_activation(crate::query::OrderDirection::Desc)
+            .ids()
+            .unwrap();
+        assert_eq!(ordered, vec!["a".to_string(), "b".to_string(), "c".to_string()]);
     }
 }

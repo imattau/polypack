@@ -7,6 +7,7 @@ use napi::bindgen_prelude::*;
 use napi_derive::napi;
 use polypack_core::hnsw::{HnswConfig, HnswIndex};
 use polypack_core::vector::{DistanceFn, ExactIndex};
+use polypack_core::NodeActivation as CoreNodeActivation;
 use std::cell::RefCell;
 
 #[napi(object)]
@@ -543,4 +544,72 @@ pub fn aggregate_query_plan(
     let snap = GraphSnapshot::new(nodes, edges);
     let (value, count) = core_aggregate(&snap, &plan, &field, &op).map_err(to_napi_err)?;
     Ok(serde_json::json!({ "value": value, "count": count }))
+}
+
+// ── activation helpers (pure math, for parity with the TypeScript layer) ──
+
+#[napi(object)]
+pub struct NodeActivation {
+  pub score: f64,
+  pub importance: f64,
+  pub reinforcement_count: f64,
+  pub last_meaningful_activation: i64,
+}
+
+fn to_napi_activation(a: &CoreNodeActivation) -> NodeActivation {
+  NodeActivation {
+    score: a.score,
+    importance: a.importance,
+    reinforcement_count: a.reinforcement_count as f64,
+    last_meaningful_activation: a.last_meaningful_activation,
+  }
+}
+
+fn from_napi_activation(a: &NodeActivation) -> CoreNodeActivation {
+  CoreNodeActivation {
+    score: a.score,
+    importance: a.importance,
+    reinforcement_count: a.reinforcement_count as u64,
+    last_meaningful_activation: a.last_meaningful_activation,
+  }
+}
+
+/// Exponential-decay multiplier `0.5 ** (elapsed / halfLife)`.
+#[napi]
+pub fn decay_factor(elapsed_ms: i64, half_life_ms: i64) -> f64 {
+  polypack_core::decay_factor(elapsed_ms, half_life_ms)
+}
+
+/// Merge two durable activation totals (max-merge, re-anchored to `now`).
+#[napi]
+pub fn merge_activation(existing: NodeActivation, incoming: NodeActivation, now: Option<i64>) -> NodeActivation {
+  to_napi_activation(&polypack_core::merge_activation(
+    &from_napi_activation(&existing),
+    &from_napi_activation(&incoming),
+    now.unwrap_or_else(|| {
+      std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock before UNIX epoch")
+        .as_millis() as i64
+    }),
+  ))
+}
+
+/// Apply a reinforcement delta to a durable activation record.
+#[napi]
+pub fn reinforce_activation(previous: Option<NodeActivation>, delta: f64, now: i64) -> NodeActivation {
+  to_napi_activation(&polypack_core::reinforce_activation(
+    previous.as_ref().map(from_napi_activation).as_ref(),
+    delta,
+    now,
+    &polypack_core::DEFAULT_ACTIVATION,
+  ))
+}
+
+/// Current decayed activation score for a stored `score`/anchor pair (0 when
+/// the node has no activation — pass `score` and a missing flag via the
+/// `Option<f64>` form instead by calling with `score: 0`).
+#[napi]
+pub fn activation_score_of(score: f64, last_meaningful_activation: i64, now: i64, half_life_ms: i64) -> f64 {
+  polypack_core::clamp01(score * polypack_core::decay_factor(now - last_meaningful_activation, half_life_ms))
 }

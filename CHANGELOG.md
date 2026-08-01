@@ -3,6 +3,75 @@
 All notable changes to this project are documented here. This project follows
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- **Activation model (adaptive memory)**. A new two-tier relevance layer turns
+  Polypack from a passive data store into an adaptive memory system:
+  - **Durable activation.** Optional `NodeActivation` (`score`, `importance`,
+    `reinforcementCount`, `lastMeaningfulActivation`) on every node, persisted
+    through the existing snapshot/WAL and adapters (MessagePack carries the new
+    field, so stores remain forward/backward compatible).
+  - **Core `PolyGraph` primitives.** `reinforceNode`/`reinforceNodeSafe`
+    (durable reinforcement, decay-corrected, re-anchored, emits a new
+    `activation_updated` change event with `delta`/`reason`),
+    `getActivation`/`getActivationState` (lazy decay as a pure function of
+    elapsed time from the anchor, so replicas converge), `topActivated`
+    (working-memory primitive), and `decay` (materialize fresh values).
+  - **`@0xx0lostcause0xx0/polypack/activation` subpath.** `ActivationEngine`
+    composing the adaptive layer: transient (never-synced) attention
+    (`bumpAttention`/`attentionOf`/`effective`), spreading activation
+    (`spread` with per-hop attenuation and edge-type filtering), semantic
+    region scoring (`pulse`, zero-similarity nodes never seed the region),
+    self-maintaining reinforcement (`absorb`), and a live `workingMemory`
+    view. `mergeActivation` merges total-state records (max, idempotent).
+  - **Query integration.** `whereActivated` and `orderByActivation` on both
+    `GraphQuery` and `PersistedGraphQuery`; `GraphQuery` falls back from the
+    native executor when activation filters are present.
+  - **React.** `useWorkingMemory` — a live view of the most-activated nodes.
+  - **Sync semantics.** Activation is synced as *derived statistical state*,
+    not ordinary CRUD: deltas accumulate via a new `activationUpdate` op
+    (coalesced per node and gated by `SyncClientOptions.activationSyncThreshold`,
+    default 0.05) while full-node payloads max-merge on arrival, and an absent
+    incoming activation never wipes locally learned state. The `SyncClient`
+    applies deltas synchronously for loaded nodes so the echo-suppression window
+    stays intact.
+  - `examples/activation.ts` — a Nostr-style adaptive-memory scenario.
+  - **Rust port (`polypack-core` + `polypack-graph`).** The activation model is
+    implemented natively in Rust, byte-for-byte compatible with the TypeScript
+    reference: `NodeActivation` on the core `Node` (persisted through the
+    snapshot/WAL — the Rust `node_to_msg`/`msg_to_node` codecs now always emit
+    the `activation` key, matching TS's explicit-nil encoding, with updated
+    byte-compat hex fixtures and a new activation round-trip test);
+    `polypack_core::activation` (decay/reinforce/merge math); `Graph`
+    primitives (`reinforce_node`/`reinforce_node_safe` emitting a new
+    `ActivationUpdated` event, `get_activation`/`get_activation_state`,
+    `top_activated`, `decay`); `where_activated`/`order_by_activation` on
+    `GraphQuery` and `PersistedGraphQuery`; and an `ActivationEngine` with
+    spread/pulse/absorb/working-memory.
+  - **Python port (`polypack-db`).** The pure-Python `PolyGraph`/`GraphQuery`
+    layer carries `activation` through node plumbing and the store, gains
+    `reinforce_node`/`get_activation`/`top_activated`/`decay` and
+    `where_activated`/`order_by_activation` (activation filters bypass the
+    native query executor), and ships an `ActivationEngine`, `merge_activation`,
+    and `decay_factor`. `reinforce_node_safe` is an alias — the Python graph
+    has no hot-cache eviction.
+  - **Native bindings (`polypack-node`/`polypack-native`).** Pure activation
+    helpers exposed through NAPI and wrapped in `@0xx0lostcause0xx0/polypack-native`:
+    `decayFactor`, `mergeActivation`, `reinforceActivation`, `activationScoreOf`,
+    with a parity test. The TS activation engine itself stays pure TypeScript.
+
+### Changed
+
+- `PolyNode`/`SerializedNode` gain an optional `activation` field;
+  `GraphChangeEvent` gains the `activation_updated` type (additive, non-breaking).
+- `updateNode` accepts an optional fourth `activation` argument for sync-merge
+  application.
+- The Rust snapshot/WAL wire format now carries the `activation` node field
+  (always emitted, nil when absent, matching TypeScript) — old stores without
+  the field still decode.
+
 ## [2.4.7] - 2026-08-01
 
 ### Added

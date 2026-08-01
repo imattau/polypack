@@ -21,9 +21,38 @@ A node is the primary entity of the graph.
 | `vector`    | array of finite f64  | no       | Uniform dimension within an index.               |
 | `insertedAt`| integer millis       | yes      | Finite, non-negative.                            |
 | `updatedAt` | integer millis       | yes      | Finite, non-negative.                            |
+| `activation`| object               | no       | Durable activation state (see 1.5).              |
 
 A node without a vector is distinct from a node whose vector is absent from the
 index. Both are valid; similarity operations simply skip vectorless nodes.
+
+### 1.5 Activation
+
+A node may carry an optional `activation` object with four fields:
+
+| Field                     | Type         | Constraints                                       |
+|---------------------------|--------------|---------------------------------------------------|
+| `score`                   | finite f64   | Clamped to `[0, 1]`.                              |
+| `importance`              | finite f64   | Clamped to `[0, 1]`.                              |
+| `reinforcementCount`      | integer      | Non-negative.                                     |
+| `lastMeaningfulActivation`| integer millis | Finite, non-negative decay anchor.                |
+
+Semantics (shared across TypeScript, Rust, and Python):
+
+- **Decay** is a pure function of elapsed time anchored at
+  `lastMeaningfulActivation`: `decay = 0.5 ** (elapsed / halfLife)` for the
+  `score` curve (24 h default) and a slower `importance` curve (30 days).
+  Because it depends only on stored state and the clock, replicas with the same
+  state compute identical current scores. Reads decay lazily; nothing is
+  re-written until reinforcement or an explicit `decay()` sweep.
+- **Reinforcement** (`reinforceNode`/`reinforce_node`): decay-correct the prior
+  state to now, add the delta to `score`, fold a fraction (`importanceGain`,
+  0.05) into `importance`, increment `reinforcementCount`, and re-anchor
+  `lastMeaningfulActivation` to now. `score`/`importance` clamp to `[0, 1]`.
+- **Merge** for total-state payloads (e.g. sync snapshots) is a max-merge of the
+  decay-corrected components, re-anchored to now — idempotent for re-delivered
+  snapshots. Concurrent **deltas** accumulate additively instead; activation is
+  accumulated knowledge, not last-write-wins data.
 
 ### 1.2 Edge
 

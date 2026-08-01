@@ -2,7 +2,7 @@ import type { PolyNode, SerializedEdge, SerializedNode, DataTransform } from './
 import type { PersistenceAdapter, PersistedNodeQuery } from './persistence/adapter.js'
 import { applyPersistedNodeQuery } from './persistence/query.js'
 import { cosineSimilarity } from './vector-index.js'
-import { assertFiniteVector, assertNonNegativeInteger, cloneData } from './utils.js'
+import { activationScoreOf, assertFiniteVector, assertNonNegativeInteger, cloneData } from './utils.js'
 
 function readNode(node: PolyNode, transform?: DataTransform, sidecarData?: Map<string, unknown>): PolyNode {
   if (!transform?.deserialize) return node
@@ -18,6 +18,7 @@ function restoreNode(node: SerializedNode, transform?: DataTransform, sidecarDat
     vector: node.vector ? new Float64Array(node.vector) : undefined,
     insertedAt: node.insertedAt,
     updatedAt: node.updatedAt,
+    activation: node.activation ? { ...node.activation } : undefined,
   }, transform, sidecarData)
 }
 
@@ -33,6 +34,8 @@ export class PersistedGraphQuery {
   private edgeType?: string
   private edgeTarget?: string
   private edgeSource?: string
+  private activationAbove?: number
+  private activationOrder?: 'asc' | 'desc'
   private joins: Array<{
     edgeType: string
     direction: 'out' | 'in'
@@ -103,6 +106,19 @@ export class PersistedGraphQuery {
 
   orderBy(field: string, direction: 'asc' | 'desc' = 'asc'): this {
     this.query.orderBy = { field, direction }
+    return this
+  }
+
+  /** Keep only nodes whose current (decay-corrected) activation exceeds `above`. */
+  whereActivated(above: number): this {
+    if (!Number.isFinite(above)) throw new RangeError('above must be finite')
+    this.activationAbove = above
+    return this
+  }
+
+  /** Order results by current (decay-corrected) activation instead of a data field. */
+  orderByActivation(direction: 'asc' | 'desc' = 'desc'): this {
+    this.activationOrder = direction
     return this
   }
 
@@ -225,12 +241,25 @@ export class PersistedGraphQuery {
   async toArray(): Promise<PolyNode[]> {
     const hasTraversal = this.traversals.length > 0
     const adapterCanPaginate = !this.similarVector && !this.edgeType && !this.edgeSource &&
-      this.joins.length === 0 && !hasTraversal
+      this.joins.length === 0 && !hasTraversal &&
+      this.activationAbove === undefined && this.activationOrder === undefined
     let serialized = await this.serialized(!hasTraversal, adapterCanPaginate)
     serialized = await this.applyEdgeFilters(serialized)
     serialized = await this.applyJoins(serialized)
     if (hasTraversal) serialized = await this.applyTraversals(serialized)
     let results = serialized.map(n => restoreNode(n, this.transform, this.sidecarData))
+
+    if (this.activationAbove !== undefined) {
+      results = results.filter(n => activationScoreOf(n) >= this.activationAbove!)
+    }
+    if (this.activationOrder) {
+      const now = Date.now()
+      results = [...results].sort((a, b) => {
+        const av = activationScoreOf(a, now)
+        const bv = activationScoreOf(b, now)
+        return this.activationOrder === 'desc' ? bv - av : av - bv
+      })
+    }
 
     if (hasTraversal && this.query.orderBy) {
       const { field, direction } = this.query.orderBy
@@ -270,7 +299,8 @@ export class PersistedGraphQuery {
 
   async count(): Promise<number> {
     if (this.similarVector || this.resultOffset !== undefined || this.resultLimit !== undefined ||
-        this.edgeType || this.edgeSource || this.joins.length > 0 || this.traversals.length > 0) {
+        this.edgeType || this.edgeSource || this.joins.length > 0 || this.traversals.length > 0 ||
+        this.activationAbove !== undefined || this.activationOrder !== undefined) {
       return (await this.toArray()).length
     }
     if (this.adapter.countNodes) return this.adapter.countNodes(this.query)

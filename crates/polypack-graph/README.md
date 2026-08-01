@@ -47,6 +47,16 @@ cargo add polypack-graph
   implementation) wired into `Graph::add_node_with_embedding`,
   `update_node_with_embedding`, `query_text`, `query_persisted_text`, and
   `search_nodes`.
+- **Activation (adaptive memory)** — durable per-node relevance
+  (`NodeActivation` with `score`/`importance`/`reinforcementCount`/
+  `lastMeaningfulActivation`) persisted through the core `Store`; graph
+  primitives `reinforce_node`/`reinforce_node_safe` (decay-correct, re-anchor,
+  emit `ActivationUpdated`), `get_activation`/`get_activation_state`,
+  `top_activated`, and `decay`; `where_activated`/`order_by_activation` on both
+  query builders; and an `ActivationEngine` composing spreading activation,
+  semantic `pulse`/`absorb`, transient attention, and `working_memory`. Decay
+  math and `merge_activation` live in `polypack_core::activation`, matching the
+  TypeScript and Python implementations exactly.
 
 ## Quick start
 

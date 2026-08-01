@@ -1,6 +1,6 @@
 import type { PolyNode, DataTransform } from './types.js'
 import { cosineSimilarity } from './vector-index.js'
-import { assertFiniteVector, assertNonNegativeInteger, cloneData, clonePolyNode, edgeId } from './utils.js'
+import { activationScoreOf, assertFiniteVector, assertNonNegativeInteger, cloneData, clonePolyNode, edgeId } from './utils.js'
 
 /**
  * Native query executor hook. Given a query-plan IR, serialized nodes, and
@@ -64,6 +64,8 @@ export class GraphQuery {
     afterSteps?: TraversalStep[]
     similarVector?: { vector: number[]; threshold: number; topK?: number }
     joinFilters?: Array<(node: PolyNode) => boolean>
+    activationAbove?: number
+    activationOrder?: 'asc' | 'desc'
   } = {}
 
   private nodes: Map<string, PolyNode>
@@ -137,6 +139,19 @@ export class GraphQuery {
 
   orderBy(field: string, direction: 'asc' | 'desc' = 'asc'): this {
     this.opts.orderBy = { field, direction }
+    return this
+  }
+
+  /** Keep only nodes whose current (decay-corrected) activation exceeds `above`. */
+  whereActivated(above: number): this {
+    if (!Number.isFinite(above)) throw new RangeError('above must be finite')
+    this.opts.activationAbove = above
+    return this
+  }
+
+  /** Order results by current (decay-corrected) activation instead of a data field. */
+  orderByActivation(direction: 'asc' | 'desc' = 'desc'): this {
+    this.opts.activationOrder = direction
     return this
   }
 
@@ -219,6 +234,10 @@ export class GraphQuery {
       for (const filter of this.opts.joinFilters) {
         if (!filter(node)) return false
       }
+    }
+
+    if (this.opts.activationAbove !== undefined && activationScoreOf(node) < this.opts.activationAbove) {
+      return false
     }
 
     return true
@@ -320,6 +339,7 @@ export class GraphQuery {
   private toPlan(): Record<string, unknown> | null {
     if (this.opts.joinFilters && this.opts.joinFilters.length > 0) return null
     if (this.opts.edgeSource && !this.opts.edgeType) return null
+    if (this.opts.activationAbove !== undefined || this.opts.activationOrder !== undefined) return null
     const plan: Record<string, unknown> = {}
     if (this.opts.nodeTypes) plan.nodeTypes = [...this.opts.nodeTypes]
     if (this.opts.attributes) {
@@ -369,6 +389,7 @@ export class GraphQuery {
       vector: n.vector ? [...n.vector] : null,
       insertedAt: n.insertedAt,
       updatedAt: n.updatedAt,
+      activation: n.activation ? { ...n.activation } : undefined,
     }))
   }
 
@@ -425,6 +446,15 @@ export class GraphQuery {
         const av = (a.data as Record<string, unknown>)[field] as number ?? 0
         const bv = (b.data as Record<string, unknown>)[field] as number ?? 0
         return direction === 'asc' ? av - bv : bv - av
+      })
+    }
+
+    if (this.opts.activationOrder) {
+      const now = Date.now()
+      results = [...results].sort((a, b) => {
+        const av = activationScoreOf(a, now)
+        const bv = activationScoreOf(b, now)
+        return this.opts.activationOrder === 'desc' ? bv - av : av - bv
       })
     }
 
