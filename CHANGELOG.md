@@ -3,7 +3,7 @@
 All notable changes to this project are documented here. This project follows
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [2.4.4] - 2026-08-01
 
 ### Added
 
@@ -25,6 +25,14 @@ All notable changes to this project are documented here. This project follows
   records / 4)`) in both the TypeScript adapter and the Rust `Store`, keeping
   total compaction work linear in writes instead of quadratic. The
   `compactThreshold` config is now a lower bound rather than a fixed count.
+
+### Fixed
+
+- The new secondary type index (`MemoryAdapter`, `BinaryStoreAdapter`, and the
+  Rust `Store`) left a stale entry under a node's previous type whenever the
+  node was overwritten with a different type, corrupting `countNodes`/
+  `queryNodes` results for that type indefinitely. `indexNode`/`index_node`
+  now unindex the prior type first.
 
 ## [2.4.3] - 2026-08-01
 
