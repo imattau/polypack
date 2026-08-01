@@ -96,7 +96,16 @@ jobs:
           targets: ${{ matrix.triple }}
       - run: npm ci
       - name: Build native addon for ${{ matrix.triple }}
-        run: npm run build:binary --prefix packages/node-native -- --target ${{ matrix.triple }}
+        # Not `npm run build:binary -- --target ...`: build:binary is a
+        # compound `napi build && rm ...` script, and npm would append the
+        # extra args to the end of that whole string (onto `rm`), not onto
+        # `napi build`. Invoke napi directly instead.
+        run: |
+          npx napi build --platform --release \
+            --manifest-path ../../crates/polypack-node/Cargo.toml \
+            --output-dir dist --no-js --target ${{ matrix.triple }}
+          rm -f dist/index.d.ts
+        working-directory: packages/node-native
       - name: Upload addon
         uses: actions/upload-artifact@v4
         with:
@@ -171,7 +180,13 @@ jobs:
           CARGO_REGISTRIES_CRATES_IO_TOKEN: ${{ secrets.CRATES_IO_TOKEN || steps.oidc.outputs.oidc_token }}
           CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN || steps.oidc.outputs.oidc_token }}
         run: |
-          VERSION=$(cargo metadata --no-deps --format-version 1 --manifest-path crates/polypack-core/Cargo.toml | jq -r '.packages[0].version')
+          set -euo pipefail
+          # Note: working-directory is already `crates`, so this path must
+          # not be re-prefixed with `crates/` (that silently produced an
+          # empty $VERSION here before, which made the "already published"
+          # check pass right through to a failing `cargo publish`).
+          VERSION=$(cargo metadata --no-deps --format-version 1 --manifest-path polypack-core/Cargo.toml | jq -r '.packages[0].version')
+          test -n "$VERSION" && [ "$VERSION" != "null" ]
           if curl -sf -A "polypack-release" "https://crates.io/api/v1/crates/polypack-core/$VERSION" >/dev/null 2>&1; then
             echo "skip polypack-core@$VERSION (already published)"
           else
