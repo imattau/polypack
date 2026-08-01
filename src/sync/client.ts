@@ -320,8 +320,14 @@ export class SyncClient {
     this.requestSync()
   }
 
-  /** Stop retrying, unsubscribe from graph changes, and close the transport. */
+  /**
+   * Flush pending operations, stop retrying, unsubscribe from graph changes,
+   * and close the transport. Flushing first means buffered ops (including
+   * coalesced sub-threshold `autoFlush: false` activation deltas) are sent
+   * before teardown instead of silently discarded.
+   */
   disconnect(): void {
+    this.flush()
     if (this.retryTimer) clearTimeout(this.retryTimer)
     this.retryTimer = null
     this.subscription.unsubscribe()

@@ -257,6 +257,23 @@ describe('HNSWIndex', () => {
     })
   })
 
+  describe('config validation', () => {
+    it.each([
+      { M: 0 },
+      { M: -1 },
+      { M: 1.5 },
+      { Mmax0: 0 },
+      { efConstruction: 0 },
+      { efSearch: 0 },
+    ])('rejects a non-positive-integer config value (%o)', (config) => {
+      expect(() => new HNSWIndex(undefined, undefined, config)).toThrow(RangeError)
+    })
+
+    it('accepts valid overrides', () => {
+      expect(() => new HNSWIndex(undefined, undefined, { M: 4, Mmax0: 8, efConstruction: 50, efSearch: 50 })).not.toThrow()
+    })
+  })
+
   describe('recall at scale', () => {
     it('achieves >95% recall@10 with 1000 vectors (8 dims)', () => {
       const dims = 8

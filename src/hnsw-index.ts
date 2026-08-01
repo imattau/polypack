@@ -25,6 +25,16 @@ const DEF: Required<HNSWConfig> = {
   efSearch: 200,
 }
 
+/** All four knobs must be positive integers — 0 or negative silently degrades the graph to unusable. */
+function assertValidHnswConfig(config: Required<HNSWConfig>): void {
+  for (const name of ['M', 'Mmax0', 'efConstruction', 'efSearch'] as const) {
+    const value = config[name]
+    if (!Number.isInteger(value) || value < 1) {
+      throw new RangeError(`HNSWConfig.${name} must be a positive integer`)
+    }
+  }
+}
+
 /**
  * Approximate, update-safe HNSW vector index — a faster alternative to
  * `VectorIndex` for large datasets, at the cost of exact recall. Unlike
@@ -52,6 +62,7 @@ export class HNSWIndex implements VectorIndexLike {
     this.onChange = onChange
     this.distanceFn = distanceFn ?? cosineSimilarity
     this.config = { ...DEF, ...config }
+    assertValidHnswConfig(this.config)
     this.mL = 1 / Math.log(Math.max(this.config.M, 2))
     this.levelRng = rng ?? Math.random
   }

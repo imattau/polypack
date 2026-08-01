@@ -206,6 +206,22 @@ describe('SyncServer + SyncClient', () => {
     client.disconnect()
   })
 
+  it('flushes buffered ops on disconnect instead of discarding them', () => {
+    const graph = new PolyGraph()
+    const messages: SyncMessage[] = []
+    const transport: SyncTransport = { onMessage: null, close: () => undefined, send: msg => messages.push(msg) }
+    const client = new SyncClient({ graph, transport, clientId: 'disconnect-client', autoFlush: false, retryMs: 0 })
+
+    graph.addNode({ id: 'unflushed', type: 't', data: {}, insertedAt: 1, updatedAt: 1 })
+    expect(client.pendingOps).toHaveLength(1)
+    expect(messages).toHaveLength(0)
+
+    client.disconnect()
+
+    expect(messages).toHaveLength(1)
+    expect(messages[0].type).toBe('delta')
+  })
+
   it('catches up a late client from a server snapshot', async () => {
     const server = new SyncServer()
     const sourceGraph = new PolyGraph()

@@ -74,6 +74,15 @@ All notable changes to this project are documented here. This project follows
   (always emitted, nil when absent, matching TypeScript) — old stores without
   the field still decode.
 
+### Fixed
+
+- `SyncClient.disconnect()` now flushes pending operations (including
+  coalesced `autoFlush: false` activation deltas) before tearing down,
+  instead of silently discarding whatever hadn't been sent yet.
+- `HNSWIndex` now validates `M`/`Mmax0`/`efConstruction`/`efSearch` are
+  positive integers and throws `RangeError` on invalid config, instead of
+  silently building a degenerate graph that returns bad query results.
+
 ## [2.4.7] - 2026-08-01
 
 ### Added
