@@ -16,6 +16,10 @@ use polypack_core::Node;
 
 use crate::edge::EdgeEntry;
 
+/// A `join` predicate closure: `Some` to filter by the connected node,
+/// `None` to require only that a connection exists.
+type JoinPredicate<'a> = Box<dyn Fn(&Node) -> bool + 'a>;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OrderDirection {
     Asc,
@@ -104,7 +108,7 @@ pub struct GraphQuery<'a> {
     offset: Option<usize>,
     traversal_steps: Vec<TraversalStep>,
     similarity: Option<SimilaritySpec>,
-    join_filters: Vec<Box<dyn Fn(&Node) -> bool + 'a>>,
+    join_filters: Vec<JoinPredicate<'a>>,
 }
 
 impl<'a> GraphQuery<'a> {
@@ -203,7 +207,7 @@ impl<'a> GraphQuery<'a> {
         mut self,
         edge_type: &str,
         direction: Direction,
-        predicate: Option<Box<dyn Fn(&Node) -> bool + 'a>>,
+        predicate: Option<JoinPredicate<'a>>,
     ) -> Self {
         let nodes = self.nodes;
         let edges = self.edges;
@@ -873,7 +877,7 @@ mod tests {
     fn unique_keys_ignores_all_filters() {
         let f = library();
         let mut keys = f.query().where_node_type(vec!["missing".into()]).unique_keys("genre");
-        keys.sort_by(|a, b| a.to_string().cmp(&b.to_string()));
+        keys.sort_by_key(|v| v.to_string());
         assert_eq!(keys, vec![serde_json::json!("fantasy"), serde_json::json!("sci-fi")]);
     }
 

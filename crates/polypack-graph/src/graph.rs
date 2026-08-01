@@ -17,6 +17,9 @@ use crate::lru::LruList;
 use crate::persisted_query::PersistedGraphQuery;
 use crate::query::GraphQuery;
 
+type OnChangeCallback = Box<dyn FnMut(GraphChangeEvent)>;
+type OnOrphanCallback = Box<dyn FnMut(&str)>;
+
 /// Tuning knobs, mirrors the `PolyGraph` constructor's `hotCacheMax`, the
 /// `HnswIndex` config threaded through `createVectorIndex`, and the
 /// `embedding` provider — all three are TS constructor arguments, bundled
@@ -66,8 +69,8 @@ pub struct Graph {
     removed_edge_ids: HashSet<String>,
     removed_vector_ids: HashSet<String>,
 
-    on_change: Option<Box<dyn FnMut(GraphChangeEvent)>>,
-    on_orphan: Option<Box<dyn FnMut(&str)>>,
+    on_change: Option<OnChangeCallback>,
+    on_orphan: Option<OnOrphanCallback>,
 
     /// Mirrors `PolyGraph.batchDepth`/`pendingBatchEvents`: while > 0,
     /// `emit` queues events instead of dispatching them — see `start_batch`.
@@ -81,7 +84,7 @@ impl Graph {
     /// Open a graph over `storage`, creating the backing [`Store`].
     pub fn open(storage: Box<dyn Storage>, store_config: StoreConfig, config: GraphConfig) -> Result<Self> {
         let store = Store::new(storage, store_config);
-        let hnsw = HnswIndex::new(config.hnsw.clone(), 0);
+        let hnsw = HnswIndex::new(config.hnsw, 0);
         Ok(Self {
             store,
             hnsw,
@@ -168,7 +171,7 @@ impl Graph {
         if all_nodes.is_empty() {
             return Ok(());
         }
-        all_nodes.sort_by(|a, b| b.inserted_at.cmp(&a.inserted_at));
+        all_nodes.sort_by_key(|n| std::cmp::Reverse(n.inserted_at));
         all_nodes.truncate(self.config.hot_cache_max);
 
         for node in all_nodes {
@@ -938,9 +941,7 @@ impl Graph {
             }
         }
 
-        if remove_all {
-            self.edges.remove(source);
-        } else if self.edges.get(source).is_some_and(|m| m.is_empty()) {
+        if remove_all || self.edges.get(source).is_some_and(|m| m.is_empty()) {
             self.edges.remove(source);
         }
 
@@ -1199,7 +1200,7 @@ impl Graph {
     fn touch_hot_cache(&mut self, id: &str) {
         self.hot_cache_order.touch(id);
         self.eviction_skip_counter += 1;
-        if self.eviction_skip_counter % 10 == 0 {
+        if self.eviction_skip_counter.is_multiple_of(10) {
             self.evict_oldest_if_over_cap();
         }
     }

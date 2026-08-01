@@ -18,6 +18,10 @@ use polypack_core::{Node, Result, Store};
 
 use crate::query::OrderDirection;
 
+/// A `join`/`join`-predicate closure: `Some` to filter by the connected
+/// node, `None` to require only that a connection exists.
+type JoinPredicate<'a> = Box<dyn Fn(&Node) -> bool + 'a>;
+
 #[derive(Clone, Debug)]
 struct SimilaritySpec {
     vector: Vec<f64>,
@@ -41,7 +45,7 @@ pub struct PersistedGraphQuery<'a> {
     edge_type: Option<String>,
     edge_target: Option<String>,
     edge_source: Option<String>,
-    joins: Vec<(String, Direction, Option<Box<dyn Fn(&Node) -> bool + 'a>>)>,
+    joins: Vec<(String, Direction, Option<JoinPredicate<'a>>)>,
     traversals: Vec<(String, usize, Direction)>,
 }
 
@@ -100,7 +104,7 @@ impl<'a> PersistedGraphQuery<'a> {
         mut self,
         edge_type: &str,
         direction: Direction,
-        predicate: Option<Box<dyn Fn(&Node) -> bool + 'a>>,
+        predicate: Option<JoinPredicate<'a>>,
     ) -> Self {
         self.joins.push((edge_type.to_string(), direction, predicate));
         self
