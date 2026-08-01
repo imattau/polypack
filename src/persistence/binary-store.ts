@@ -504,8 +504,12 @@ export class BinaryStoreAdapter implements PersistenceAdapter {
       clearTimeout(this.compactTimer)
       this.compactTimer = null
     }
+    // Flip synchronously, before enqueueing: a write whose assertOpen() check
+    // races with close() must see the closed state immediately, not just once
+    // this task reaches the front of the queue — otherwise it can slip in and
+    // execute after the compaction step below.
+    this.closed = true
     await this.enqueue(async () => {
-      this.closed = true
       if (this.initPromise) {
         await this.ensureLoaded()
         await this.compact()

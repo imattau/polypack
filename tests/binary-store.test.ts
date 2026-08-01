@@ -215,6 +215,14 @@ describe('BinaryStoreAdapter', () => {
     it('close does not throw', async () => {
       await adapter.close()
     })
+
+    it('rejects writes issued after close is called, even before close resolves', async () => {
+      const closePromise = adapter.close()
+      await expect(
+        adapter.putNode({ id: 'n', type: 't', data: {}, vector: null, insertedAt: 1, updatedAt: 1 }),
+      ).rejects.toThrow('BinaryStoreAdapter is closed')
+      await closePromise
+    })
   })
 
   describe('persistence across instances', () => {

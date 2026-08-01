@@ -82,6 +82,13 @@ All notable changes to this project are documented here. This project follows
 - `HNSWIndex` now validates `M`/`Mmax0`/`efConstruction`/`efSearch` are
   positive integers and throws `RangeError` on invalid config, instead of
   silently building a degenerate graph that returns bad query results.
+- `HNSWIndex.update()` — not part of `VectorIndexLike` and functionally
+  identical to `add()` — is now `@deprecated` and delegates to `add()`
+  instead of duplicating its logic.
+- `BinaryStoreAdapter.close()` now flips its closed state synchronously
+  before enqueueing shutdown work, closing a race where a write issued
+  concurrently with `close()` could pass its open-check and land after
+  the compaction step completed.
 
 ## [2.4.7] - 2026-08-01
 

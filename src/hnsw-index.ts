@@ -80,16 +80,15 @@ export class HNSWIndex implements VectorIndexLike {
     this.onChange?.(id)
   }
 
-  /** Replace the vector and topology of an existing id (same as add). */
+  /**
+   * Replace the vector and topology of an existing id (identical to `add`).
+   * @deprecated Not part of `VectorIndexLike`, so code written against the
+   * portable index interface (e.g. via `PolyGraph`'s `createVectorIndex`)
+   * can't call it. Use `add()` instead — it already overwrites an existing
+   * id the same way. Kept only for source compatibility.
+   */
   update(id: string, vector: number[] | Float64Array): void {
-    if (!id) throw new TypeError('Vector id must not be empty')
-    assertFiniteVector(vector)
-    if (this.nodes.has(id)) this.remove(id)
-    const stored = new Float64Array(vector)
-    const level = this.assignLevel()
-    this.nodes.set(id, stored)
-    this.insertIntoGraph(id, level)
-    this.onChange?.(id)
+    this.add(id, vector)
   }
 
   hydrate(id: string, vector: number[] | Float64Array): void {
