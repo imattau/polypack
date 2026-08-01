@@ -1,7 +1,8 @@
 import { act, cleanup, renderHook } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { PolyGraph } from '../src/graph'
-import { useGraphQuery } from '../src/react'
+import { ActivationEngine } from '../src/activation'
+import { useGraphQuery, useWorkingMemory } from '../src/react'
 
 describe('useGraphQuery', () => {
   beforeEach(() => {
@@ -107,5 +108,52 @@ describe('useGraphQuery', () => {
       await Promise.resolve()
     })
     expect(onError).toHaveBeenCalledWith(error)
+  })
+})
+
+describe('useWorkingMemory', () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+  })
+
+  afterEach(() => {
+    cleanup()
+    vi.useRealTimers()
+    vi.restoreAllMocks()
+  })
+
+  it('defaults to the graph durable-only ranking without an engine', () => {
+    const graph = new PolyGraph()
+    graph.addNode({ id: 'a', type: 't', data: {}, insertedAt: 1, updatedAt: 1 })
+    graph.addNode({ id: 'b', type: 't', data: {}, insertedAt: 1, updatedAt: 1 })
+    graph.reinforceNode('a', 0.9)
+    graph.reinforceNode('b', 0.1)
+
+    const { result } = renderHook(() => useWorkingMemory(graph, 2, [], 0))
+    expect(result.current?.map(n => n.id)).toEqual(['a', 'b'])
+  })
+
+  it('reflects transient attention when an engine is provided', () => {
+    const graph = new PolyGraph()
+    graph.addNode({ id: 'a', type: 't', data: {}, insertedAt: 1, updatedAt: 1 })
+    graph.addNode({ id: 'b', type: 't', data: {}, insertedAt: 1, updatedAt: 1 })
+    graph.reinforceNode('a', 0.12)
+    graph.reinforceNode('b', 0.1)
+    const engine = new ActivationEngine(graph)
+
+    // Two bumps that stay under minReinforceDelta (0.05 default): transient
+    // attention only, never promoted to durable state, so topActivated (and
+    // useWorkingMemory without an engine) never sees it — but the engine's
+    // workingMemory folds it in, enough to overtake 'a' here.
+    engine.bumpAttention('b', 0.02)
+    engine.bumpAttention('b', 0.02)
+
+    const withoutEngine = renderHook(() => useWorkingMemory(graph, 2, [], 0))
+    expect(withoutEngine.result.current?.map(n => n.id)).toEqual(['a', 'b'])
+
+    const withEngine = renderHook(() => useWorkingMemory(graph, 2, [], 0, undefined, engine))
+    expect(withEngine.result.current?.map(n => n.id)).toEqual(['b', 'a'])
+
+    engine.dispose()
   })
 })

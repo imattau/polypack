@@ -29,7 +29,9 @@ All notable changes to this project are documented here. This project follows
   - **Query integration.** `whereActivated` and `orderByActivation` on both
     `GraphQuery` and `PersistedGraphQuery`; `GraphQuery` falls back from the
     native executor when activation filters are present.
-  - **React.** `useWorkingMemory` — a live view of the most-activated nodes.
+  - **React.** `useWorkingMemory` — a live view of the most-activated nodes;
+    pass an optional `ActivationEngine` to rank by durable score *plus*
+    transient attention instead of the graph's durable-only ranking.
   - **Sync semantics.** Activation is synced as *derived statistical state*,
     not ordinary CRUD: deltas accumulate via a new `activationUpdate` op
     (coalesced per node and gated by `SyncClientOptions.activationSyncThreshold`,

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
 import type { PolyGraph } from './graph.js'
+import type { ActivationEngine } from './activation.js'
 import type { PolyNode } from './types.js'
 
 /** Run a reactive graph query and optionally return a value before its first result. */
@@ -142,6 +143,14 @@ export function useGraphQuery<T>(
  * Live view of the current "working memory": the `limit` most-activated loaded
  * nodes, re-queried after graph mutations (including `activation_updated`).
  * `deps` controls re-runs and must include `limit` when it can change.
+ *
+ * Pass an `engine` to rank by `ActivationEngine.workingMemory` (durable decayed
+ * score *plus* transient attention from `bumpAttention`) instead of the
+ * graph's durable-only `topActivated`. Note that sub-threshold `bumpAttention`
+ * calls never emit a graph change event (they're deliberately local and
+ * unsynced), so they won't trigger an automatic re-run on their own — include
+ * something that changes after a bump (e.g. a local counter) in `deps` if you
+ * need the view to reflect it immediately.
  */
 export function useWorkingMemory<T = PolyNode>(
   graph: PolyGraph,
@@ -149,7 +158,14 @@ export function useWorkingMemory<T = PolyNode>(
   deps: unknown[] = [],
   delay = 200,
   nodeTypes?: string[],
+  engine?: ActivationEngine,
 ): T[] | undefined {
-  const result = useGraphQuery(graph, () => graph.topActivated(limit), deps, delay, nodeTypes)
+  const result = useGraphQuery(
+    graph,
+    () => (engine ? engine.workingMemory(limit) : graph.topActivated(limit)),
+    deps,
+    delay,
+    nodeTypes,
+  )
   return result as T[] | undefined
 }
