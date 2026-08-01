@@ -3,6 +3,14 @@
 All notable changes to this project are documented here. This project follows
 [Semantic Versioning](https://semver.org/).
 
+## [2.4.3] - 2026-08-01
+
+Version-only re-release. `@0xx0lostcause0xx0/polypack-native@2.4.2` was
+accidentally unpublished from npm during a manual recovery from an OIDC
+trusted-publisher outage; npm permanently blocks reusing an unpublished
+name+version, so the whole stack moves to `2.4.3` to stay in lockstep. No
+code changes beyond `2.4.2`.
+
 ## [2.4.2] - 2026-08-01
 
 ### Fixed
