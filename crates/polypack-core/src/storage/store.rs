@@ -627,7 +627,7 @@ impl Store {
             if let Some(ids) = self.edges_by_source.get(source) {
                 for id in ids {
                     if let Some(edge) = self.edges.get(id) {
-                        if edge_type.map_or(true, |t| t == edge.edge_type) && seen.insert(edge.id.clone()) {
+                        if edge_type.is_none_or(|t| t == edge.edge_type) && seen.insert(edge.id.clone()) {
                             out.push(edge.clone());
                         }
                     }
@@ -646,7 +646,7 @@ impl Store {
             if let Some(ids) = self.edges_by_target.get(target) {
                 for id in ids {
                     if let Some(edge) = self.edges.get(id) {
-                        if edge_type.map_or(true, |t| t == edge.edge_type) && seen.insert(edge.id.clone()) {
+                        if edge_type.is_none_or(|t| t == edge.edge_type) && seen.insert(edge.id.clone()) {
                             out.push(edge.clone());
                         }
                     }
