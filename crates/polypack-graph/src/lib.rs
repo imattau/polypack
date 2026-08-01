@@ -9,6 +9,7 @@
 //! independently of the published NAPI/PyO3 bindings.
 //!
 mod edge;
+mod embedding;
 mod event;
 mod graph;
 mod lru;
@@ -16,6 +17,9 @@ mod persisted_query;
 mod query;
 
 pub use edge::{EdgeEntry, EdgeOwnership};
+pub use embedding::{
+    build_embedding_text, create_embedding, EmbeddingProvider, FeatureHashEmbedding, FeatureHashEmbeddingOptions,
+};
 pub use event::GraphChangeEvent;
 pub use graph::{Graph, GraphConfig};
 pub use persisted_query::PersistedGraphQuery;

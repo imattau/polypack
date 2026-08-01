@@ -11,21 +11,25 @@ use polypack_core::{
 };
 
 use crate::edge::{decode_ownership, encode_ownership, EdgeEntry, EdgeOwnership};
+use crate::embedding::{create_embedding, EmbeddingProvider, FeatureHashEmbedding};
 use crate::event::GraphChangeEvent;
 use crate::lru::LruList;
 use crate::persisted_query::PersistedGraphQuery;
 use crate::query::GraphQuery;
 
-/// Tuning knobs, mirrors the `PolyGraph` constructor's `hotCacheMax` plus the
-/// `HnswIndex` config threaded through `createVectorIndex` in the TS version.
+/// Tuning knobs, mirrors the `PolyGraph` constructor's `hotCacheMax`, the
+/// `HnswIndex` config threaded through `createVectorIndex`, and the
+/// `embedding` provider — all three are TS constructor arguments, bundled
+/// here since Rust has no optional-positional-argument constructors.
 pub struct GraphConfig {
     pub hot_cache_max: usize,
     pub hnsw: HnswConfig,
+    pub embedding: Box<dyn EmbeddingProvider>,
 }
 
 impl Default for GraphConfig {
     fn default() -> Self {
-        Self { hot_cache_max: 50_000, hnsw: HnswConfig::default() }
+        Self { hot_cache_max: 50_000, hnsw: HnswConfig::default(), embedding: Box::new(FeatureHashEmbedding::default()) }
     }
 }
 
@@ -461,6 +465,22 @@ impl Graph {
         self.end_batch()
     }
 
+    /// Embed `text` with the configured provider (see `GraphConfig::embedding`),
+    /// validated by `create_embedding`. Mirrors `PolyGraph.embed`.
+    pub fn embed(&self, text: &str) -> Result<Vec<f64>> {
+        create_embedding(self.config.embedding.as_ref(), text)
+    }
+
+    /// Embed `text` with the configured provider and add the resulting node.
+    /// Any `vector` already set on `node` is overwritten — Rust has no
+    /// `Omit<PolyNode, 'vector'>` equivalent, so this takes a full `Node` and
+    /// ignores its vector field rather than a vector-less variant. Mirrors
+    /// `PolyGraph.addNodeWithEmbedding`.
+    pub fn add_node_with_embedding(&mut self, mut node: Node, text: &str) -> Result<()> {
+        node.vector = Some(self.embed(text)?);
+        self.add_node(node)
+    }
+
     /// Detached view of a currently loaded node. Does not restore evicted
     /// nodes — see `get_node_safe`.
     pub fn get_node(&mut self, id: &str) -> Option<&Node> {
@@ -543,6 +563,44 @@ impl Graph {
         self.mark_dirty(id);
         self.emit(GraphChangeEvent::NodeUpdated { node_id: id.to_string(), node_type });
         Ok(self.nodes.get(id))
+    }
+
+    /// Restore `id` from the `Store` if necessary, then update it. Mirrors
+    /// `PolyGraph.updateNodeSafe`.
+    pub fn update_node_safe(
+        &mut self,
+        id: &str,
+        data: serde_json::Map<String, serde_json::Value>,
+        vector: Option<Vec<f64>>,
+    ) -> Result<Option<&Node>> {
+        if self.get_node_safe(id)?.is_none() {
+            return Ok(None);
+        }
+        self.update_node(id, data, vector)
+    }
+
+    /// Embed `text` and update a loaded node's data and vector together.
+    /// Mirrors `PolyGraph.updateNodeWithEmbedding`.
+    pub fn update_node_with_embedding(
+        &mut self,
+        id: &str,
+        data: serde_json::Map<String, serde_json::Value>,
+        text: &str,
+    ) -> Result<Option<&Node>> {
+        let vector = self.embed(text)?;
+        self.update_node(id, data, Some(vector))
+    }
+
+    /// Embed `text`, restoring an evicted node before updating when
+    /// necessary. Mirrors `PolyGraph.updateNodeSafeWithEmbedding`.
+    pub fn update_node_safe_with_embedding(
+        &mut self,
+        id: &str,
+        data: serde_json::Map<String, serde_json::Value>,
+        text: &str,
+    ) -> Result<Option<&Node>> {
+        let vector = self.embed(text)?;
+        self.update_node_safe(id, data, Some(vector))
     }
 
     /// Remove a node's vector while keeping the node and its data. A no-op
@@ -1752,7 +1810,7 @@ mod tests {
         Graph::open(
             Box::new(InMemoryStorage::new()),
             StoreConfig::default(),
-            GraphConfig { hot_cache_max, hnsw: HnswConfig::default() },
+            GraphConfig { hot_cache_max, ..GraphConfig::default() },
         )
         .unwrap()
     }
@@ -1821,7 +1879,7 @@ mod tests {
             g.flush().unwrap();
         }
 
-        let mut g2 = graph_on(&storage, GraphConfig { hot_cache_max: 1, hnsw: HnswConfig::default() });
+        let mut g2 = graph_on(&storage, GraphConfig { hot_cache_max: 1, ..GraphConfig::default() });
         g2.warm().unwrap();
 
         assert_eq!(g2.size(), 1);
@@ -2500,5 +2558,119 @@ mod tests {
             ids_of(g.query_persisted().where_node_type(vec!["user".into()]).collect("RATED", Direction::Out, None).unwrap());
         ids.sort();
         assert_eq!(ids, vec!["fantasy1".to_string(), "scifi1".to_string()]);
+    }
+
+    #[test]
+    fn embed_uses_the_configured_provider() {
+        let g = test_graph();
+        let a = g.embed("hello world").unwrap();
+        let b = g.embed("hello world").unwrap();
+        assert_eq!(a, b);
+        assert_eq!(a.len(), 384, "default provider is the 384-dim FeatureHashEmbedding");
+    }
+
+    #[test]
+    fn add_node_with_embedding_sets_the_vector_and_ignores_any_existing_one() {
+        let mut g = test_graph();
+        let mut n = node("a");
+        n.vector = Some(vec![9.0, 9.0]); // must be overwritten
+        let expected = g.embed("hello world").unwrap();
+
+        g.add_node_with_embedding(n, "hello world").unwrap();
+
+        assert_eq!(g.get_node("a").unwrap().vector, Some(expected));
+    }
+
+    #[test]
+    fn add_node_with_embedding_uses_a_custom_provider() {
+        use crate::embedding::{FeatureHashEmbedding, FeatureHashEmbeddingOptions};
+
+        let mut g = Graph::open(
+            Box::new(InMemoryStorage::new()),
+            StoreConfig::default(),
+            GraphConfig {
+                embedding: Box::new(FeatureHashEmbedding::new(FeatureHashEmbeddingOptions { dimensions: 8 }).unwrap()),
+                ..GraphConfig::default()
+            },
+        )
+        .unwrap();
+
+        g.add_node_with_embedding(node("a"), "hello world").unwrap();
+
+        assert_eq!(g.get_node("a").unwrap().vector.as_ref().unwrap().len(), 8);
+    }
+
+    #[test]
+    fn update_node_safe_updates_a_loaded_node() {
+        let mut g = test_graph();
+        g.add_node(node("a")).unwrap();
+
+        let mut patch = serde_json::Map::new();
+        patch.insert("title".into(), serde_json::json!("hello"));
+        let updated = g.update_node_safe("a", patch, None).unwrap().unwrap();
+
+        assert_eq!(updated.data.get("title"), Some(&serde_json::json!("hello")));
+    }
+
+    #[test]
+    fn update_node_safe_restores_an_evicted_node_then_updates_it() {
+        let mut g = test_graph();
+        g.add_node(node("a")).unwrap();
+        g.flush().unwrap();
+        evict(&mut g, "a");
+
+        let mut patch = serde_json::Map::new();
+        patch.insert("title".into(), serde_json::json!("hello"));
+        let updated = g.update_node_safe("a", patch, None).unwrap().unwrap().clone();
+
+        assert!(g.has_loaded_node("a"), "restored into the hot cache along the way");
+        assert_eq!(updated.data.get("title"), Some(&serde_json::json!("hello")));
+    }
+
+    #[test]
+    fn update_node_safe_returns_none_for_a_missing_node() {
+        let mut g = test_graph();
+        let mut patch = serde_json::Map::new();
+        patch.insert("title".into(), serde_json::json!("hello"));
+        assert!(g.update_node_safe("missing", patch, None).unwrap().is_none());
+    }
+
+    #[test]
+    fn update_node_with_embedding_sets_data_and_vector() {
+        let mut g = test_graph();
+        g.add_node(node("a")).unwrap();
+        let expected = g.embed("hello world").unwrap();
+
+        let mut patch = serde_json::Map::new();
+        patch.insert("title".into(), serde_json::json!("hello"));
+        let updated = g.update_node_with_embedding("a", patch, "hello world").unwrap().unwrap();
+
+        assert_eq!(updated.data.get("title"), Some(&serde_json::json!("hello")));
+        assert_eq!(updated.vector, Some(expected));
+    }
+
+    #[test]
+    fn update_node_safe_with_embedding_restores_an_evicted_node_then_updates_it() {
+        let mut g = test_graph();
+        g.add_node(node("a")).unwrap();
+        g.flush().unwrap();
+        evict(&mut g, "a");
+        let expected = g.embed("hello world").unwrap();
+
+        let mut patch = serde_json::Map::new();
+        patch.insert("title".into(), serde_json::json!("hello"));
+        let updated = g.update_node_safe_with_embedding("a", patch, "hello world").unwrap().unwrap().clone();
+
+        assert!(g.has_loaded_node("a"));
+        assert_eq!(updated.data.get("title"), Some(&serde_json::json!("hello")));
+        assert_eq!(updated.vector, Some(expected));
+    }
+
+    #[test]
+    fn update_node_safe_with_embedding_returns_none_for_a_missing_node() {
+        let mut g = test_graph();
+        let mut patch = serde_json::Map::new();
+        patch.insert("title".into(), serde_json::json!("hello"));
+        assert!(g.update_node_safe_with_embedding("missing", patch, "text").unwrap().is_none());
     }
 }
