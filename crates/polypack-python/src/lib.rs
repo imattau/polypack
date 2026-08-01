@@ -168,16 +168,16 @@ impl HnswIndex {
         ef_construction: usize,
         ef_search: usize,
         level_seed: u32,
-    ) -> Self {
+    ) -> PyResult<Self> {
         let config = HnswConfig {
             m,
             mmax0,
             ef_construction,
             ef_search,
         };
-        HnswIndex {
-            inner: CoreHnswIndex::new(config, level_seed),
-        }
+        Ok(HnswIndex {
+            inner: CoreHnswIndex::new(config, level_seed).map_err(to_pyerr)?,
+        })
     }
 
     fn add(&mut self, id: String, vector: Bound<'_, PyAny>) -> PyResult<()> {

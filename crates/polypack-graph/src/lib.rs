@@ -26,4 +26,8 @@ pub use event::GraphChangeEvent;
 pub use graph::{Graph, GraphConfig};
 pub use persisted_query::PersistedGraphQuery;
 pub use query::{AggregateOp, AggregateResult, GraphQuery, GroupedRow, OrderDirection};
+// `Direction` is a required parameter of `GraphQuery`/`PersistedGraphQuery`'s
+// `traverse`/`join`, so it must be nameable without adding `polypack-core` as
+// a separate direct dependency.
+pub use polypack_core::query::Direction;
 pub use polypack_core::{merge_activation, NodeActivation};

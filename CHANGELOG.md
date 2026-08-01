@@ -89,6 +89,23 @@ All notable changes to this project are documented here. This project follows
   before enqueueing shutdown work, closing a race where a write issued
   concurrently with `close()` could pass its open-check and land after
   the compaction step completed.
+- Python `PolyGraph.close_store()` (and the `with PolyGraph.open(...)`
+  context manager, which calls it) now saves before closing the store,
+  instead of silently discarding mutations made since the last explicit
+  `save()` — matching Rust's `Graph::close`, which already flushes first.
+- Rust `HnswIndex::new` now validates `m`/`mmax0`/`ef_construction`/
+  `ef_search` are at least 1 and returns `Err(InvalidArgument)` instead of
+  either building an index whose queries silently return no results
+  (`ef_search == 0`) or panicking on the second insert (`ef_construction ==
+  0`). Propagated through `Graph::open`, the N-API `NativeHnswIndex`
+  constructor, and the PyO3 `HnswIndex` constructor (all now fallible).
+- Removed two stale Rust doc comments in `polypack-graph::Graph` claiming
+  `remove_node` and hot-cache eviction were unimplemented stubs that would
+  panic; both are fully implemented and tested.
+- `polypack-graph` now re-exports `polypack_core::query::Direction`, which
+  `GraphQuery`/`PersistedGraphQuery`'s `traverse`/`join` require as a
+  parameter but previously couldn't be named without an explicit
+  `polypack-core` dependency.
 
 ## [2.4.7] - 2026-08-01
 

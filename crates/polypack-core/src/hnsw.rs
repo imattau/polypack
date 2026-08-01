@@ -93,8 +93,24 @@ pub struct HnswIndex {
 }
 
 impl HnswIndex {
-    pub fn new(config: HnswConfig, level_seed: u32) -> Self {
-        HnswIndex {
+    /// `m`, `mmax0`, `ef_construction`, and `ef_search` must all be at least 1.
+    /// A value of 0 isn't just a bad tuning choice: `search_layer`'s
+    /// candidate list is capped at `ef`, so `ef == 0` collapses every search
+    /// (including the internal ones `add` uses to wire up the graph) to an
+    /// empty result — silently returning no query hits, or panicking on
+    /// insert when graph-building code indexes into that empty result.
+    pub fn new(config: HnswConfig, level_seed: u32) -> Result<Self> {
+        for (name, value) in [
+            ("m", config.m),
+            ("mmax0", config.mmax0),
+            ("ef_construction", config.ef_construction),
+            ("ef_search", config.ef_search),
+        ] {
+            if value < 1 {
+                return Err(PolypackError::InvalidArgument(format!("HnswConfig.{name} must be at least 1")));
+            }
+        }
+        Ok(HnswIndex {
             nodes: HashMap::new(),
             node_level: HashMap::new(),
             adjacency: HashMap::new(),
@@ -104,7 +120,7 @@ impl HnswIndex {
             ml: 1.0 / (config.m.max(2) as f64).ln(),
             config,
             level_rng: LevelRng(level_seed),
-        }
+        })
     }
 
     pub fn add(&mut self, id: &str, vector: &[f64]) -> Result<()> {
@@ -453,8 +469,23 @@ mod tests {
     }
 
     #[test]
+    fn new_rejects_non_positive_config_values() {
+        for cfg in [
+            HnswConfig { m: 0, ..Default::default() },
+            HnswConfig { mmax0: 0, ..Default::default() },
+            HnswConfig { ef_construction: 0, ..Default::default() },
+            HnswConfig { ef_search: 0, ..Default::default() },
+        ] {
+            match HnswIndex::new(cfg, 7) {
+                Err(PolypackError::InvalidArgument(_)) => {}
+                _ => panic!("zero config value must be rejected with InvalidArgument"),
+            }
+        }
+    }
+
+    #[test]
     fn basic_recall_matches_exact() {
-        let mut hnsw = HnswIndex::new(HnswConfig { ef_search: 300, ..Default::default() }, 7);
+        let mut hnsw = HnswIndex::new(HnswConfig { ef_search: 300, ..Default::default() }, 7).unwrap();
         let mut exact = ExactIndex::new(DistanceFn::Cosine);
         let mut rand = crate::rng::Mulberry32::new(42);
         for i in 0..500 {
@@ -476,7 +507,7 @@ mod tests {
 
     #[test]
     fn remove_then_readd_works() {
-        let mut hnsw = HnswIndex::new(HnswConfig::default(), 7);
+        let mut hnsw = HnswIndex::new(HnswConfig::default(), 7).unwrap();
         hnsw.add("a", &vec8(1.0, 0.0)).unwrap();
         hnsw.add("b", &vec8(0.0, 1.0)).unwrap();
         hnsw.remove("a");
@@ -490,7 +521,7 @@ mod tests {
 
     #[test]
     fn update_replaces_vector_without_duplicate() {
-        let mut hnsw = HnswIndex::new(HnswConfig::default(), 7);
+        let mut hnsw = HnswIndex::new(HnswConfig::default(), 7).unwrap();
         hnsw.add("a", &vec8(1.0, 0.0)).unwrap();
         hnsw.add("b", &vec8(0.0, 1.0)).unwrap();
         hnsw.update("a", &vec8(0.0, 1.0)).unwrap();
@@ -503,7 +534,7 @@ mod tests {
 
     #[test]
     fn clears_topology_after_removing_everything() {
-        let mut hnsw = HnswIndex::new(HnswConfig::default(), 7);
+        let mut hnsw = HnswIndex::new(HnswConfig::default(), 7).unwrap();
         for i in 0..50 {
             hnsw.add(&format!("n{i}"), &vec8(i as f64 / 50.0, 0.0)).unwrap();
         }
@@ -518,7 +549,7 @@ mod tests {
 
     #[test]
     fn reuses_ids_after_churn_without_collapse() {
-        let mut hnsw = HnswIndex::new(HnswConfig { ef_search: 300, ..Default::default() }, 7);
+        let mut hnsw = HnswIndex::new(HnswConfig { ef_search: 300, ..Default::default() }, 7).unwrap();
         let mut exact = ExactIndex::new(DistanceFn::Cosine);
         let mut rand = crate::rng::Mulberry32::new(3);
         for i in 0..200 {

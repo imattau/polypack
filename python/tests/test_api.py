@@ -51,6 +51,12 @@ def test_hnsw_index_churn():
     assert sorted(i for i, _ in idx.query([1.0, 0.0, 0.0], 2)) == ["a", "b"]
 
 
+@pytest.mark.parametrize("kwarg", ["m", "mmax0", "ef_construction", "ef_search"])
+def test_hnsw_index_rejects_non_positive_config(kwarg):
+    with pytest.raises(PolypackValueError):
+        HnswIndex(**{kwarg: 0})
+
+
 def test_graph_ownership_cascade():
     graph = PolyGraph()
     graph.add_node({"id": "a", "type": "user", "data": {}, "insertedAt": 1, "updatedAt": 1})
@@ -109,6 +115,17 @@ def test_persist_round_trip(tmp_path):
     g2.close_store()
 
 
+def test_context_manager_saves_before_closing_the_store(tmp_path):
+    # No explicit save() — closing the `with` block must not silently lose
+    # mutations, mirroring Rust's Graph::close (which flushes before closing).
+    with PolyGraph.open(str(tmp_path)) as g:
+        _seed_graph(g)
+
+    with PolyGraph.open(str(tmp_path)) as g2:
+        assert g2.get_node("n1")["data"] == {"title": "Hello"}
+        assert g2.get_edge_targets("n1", "LINKS") == ["n2"]
+
+
 def test_persist_recovers_from_truncated_wal(tmp_path):
     g = PolyGraph()
     _seed_graph(g)
@@ -126,6 +143,10 @@ def test_persist_recovers_from_truncated_wal(tmp_path):
     assert g2.get_node("n1") is not None
     assert g2.get_node("n2") is not None
     g2.close_store()
-    # Recovery persisted a snapshot before deleting the WAL.
+    # Recovery already compacted the truncated WAL down to a snapshot; the
+    # save() that close_store() now does first (to avoid discarding unsaved
+    # changes) re-applies the unchanged state, so the WAL is empty rather
+    # than absent — both mean "nothing left to replay".
     assert (tmp_path / "snapshot.msgpack").exists()
-    assert not (tmp_path / "wal.msgpack").exists()
+    wal_file = tmp_path / "wal.msgpack"
+    assert not wal_file.exists() or wal_file.stat().st_size == 0

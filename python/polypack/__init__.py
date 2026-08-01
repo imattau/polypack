@@ -640,8 +640,13 @@ class PolyGraph:
         self._load_from_store()
 
     def close_store(self) -> None:
-        """Compact and close the attached store. Safe to call repeatedly."""
+        """Persist any unsaved changes, then compact and close the attached
+        store. Safe to call repeatedly. Mirrors the Rust `Graph::close`,
+        which flushes before closing for the same reason: without this,
+        mutations made since the last explicit `save()` — including inside
+        a `with PolyGraph.open(...) as g:` block — would be silently lost."""
         if self._store is not None:
+            self.save()
             self._store.close()
             self._store = None
 

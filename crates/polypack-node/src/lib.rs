@@ -158,7 +158,7 @@ pub struct NativeHnswIndex {
 #[napi]
 impl NativeHnswIndex {
   #[napi(constructor)]
-  pub fn new(config: Option<HnswConfigInput>, level_seed: Option<u32>) -> Self {
+  pub fn new(config: Option<HnswConfigInput>, level_seed: Option<u32>) -> Result<Self> {
     let base = HnswConfig::default();
     let cfg = HnswConfig {
       m: config.as_ref().and_then(|c| c.m).map(|v| v as usize).unwrap_or(base.m),
@@ -174,9 +174,9 @@ impl NativeHnswIndex {
         .map(|v| v as usize)
         .unwrap_or(base.ef_search),
     };
-    NativeHnswIndex {
-      inner: RefCell::new(HnswIndex::new(cfg, level_seed.unwrap_or(7))),
-    }
+    Ok(NativeHnswIndex {
+      inner: RefCell::new(HnswIndex::new(cfg, level_seed.unwrap_or(7)).map_err(to_napi_err)?),
+    })
   }
 
   #[napi]

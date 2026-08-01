@@ -87,7 +87,7 @@ impl Graph {
     /// Open a graph over `storage`, creating the backing [`Store`].
     pub fn open(storage: Box<dyn Storage>, store_config: StoreConfig, config: GraphConfig) -> Result<Self> {
         let store = Store::new(storage, store_config);
-        let hnsw = HnswIndex::new(config.hnsw, 0);
+        let hnsw = HnswIndex::new(config.hnsw, 0)?;
         Ok(Self {
             store,
             hnsw,
@@ -163,7 +163,7 @@ impl Graph {
     /// `hot_cache_max` of them: the same intent (keep the newest, cap the
     /// working set), expressed with the ordering information actually
     /// available here. Because the cap is applied before loading, this never
-    /// needs `touch_hot_cache`'s eviction (still a stub) to run.
+    /// needs `touch_hot_cache`'s eviction to run.
     pub fn warm(&mut self) -> Result<()> {
         if self.warmed {
             return Ok(());
@@ -906,8 +906,8 @@ impl Graph {
     /// source also owns it); 'shared' edges fire `on_orphan` if the target
     /// becomes disconnected. Mirrors `PolyGraph.removeEdges`.
     ///
-    /// The owned-edge cascade calls `remove_node`, which is still a stub —
-    /// this path will panic until that port lands.
+    /// The owned-edge cascade calls `remove_node`, which handles cycles
+    /// (`A -> B -> A`) safely, removing each node only once.
     pub fn remove_edges(&mut self, source: &str, edge_type: Option<&str>, target: Option<&str>) -> Result<()> {
         let Some(edges) = self.edges.get(source) else { return Ok(()) };
         let removed: Vec<EdgeEntry> = edges

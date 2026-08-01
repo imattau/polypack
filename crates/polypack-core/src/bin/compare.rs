@@ -110,7 +110,7 @@ fn run_case(spec: &CaseSpec) -> CaseResult {
     let exact_build_ms = exact_build.elapsed().as_secs_f64() * 1000.0;
 
     let hnsw_build = Instant::now();
-    let mut hnsw = HnswIndex::new(HnswConfig { ef_construction: 200, ef_search: 300, ..Default::default() }, 7);
+    let mut hnsw = HnswIndex::new(HnswConfig { ef_construction: 200, ef_search: 300, ..Default::default() }, 7).unwrap();
     if spec.index == "hnsw" {
         for (i, v) in data.iter().enumerate() {
             hnsw.add(&format!("v{i}"), v).unwrap();

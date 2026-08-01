@@ -552,7 +552,7 @@ mod tests {
         let mut n3 = node("c", "vec", vec![]);
         n3.vector = Some(vec![0.0, 1.0, 0.0, 0.0]);
         let snap = GraphSnapshot::new(vec![n1, n2, n3], vec![]);
-        let mut hnsw = HnswIndex::new(crate::hnsw::HnswConfig { ef_search: 100, ..Default::default() }, 7);
+        let mut hnsw = HnswIndex::new(crate::hnsw::HnswConfig { ef_search: 100, ..Default::default() }, 7).unwrap();
         for n in &snap.nodes {
             hnsw.add(&n.id, n.vector.as_deref().unwrap()).unwrap();
         }
