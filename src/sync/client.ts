@@ -115,10 +115,15 @@ export class SyncClient {
   /** Apply remote ops to the local graph without triggering re-sync. */
   applyRemote(ops: SyncOp[]): void {
     if (ops.length === 0) return
+    // A client has already applied its own operations locally. A cursor-gap
+    // catch-up can re-deliver them (the relay never echoes them to their
+    // sender), so skip them to avoid duplicate change events and redundant work.
+    const remote = ops.filter(op => !(op.clientId === this.oplog.clientId && op.seq <= this.oplog.latestSeq))
+    if (remote.length === 0) return
     this.applyingRemote = true
     this.graph.startBatch()
     try {
-      for (const op of ops) {
+      for (const op of remote) {
         this.applyOp(op)
       }
     } finally {

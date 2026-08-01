@@ -358,6 +358,40 @@ describe('SyncServer + SyncClient', () => {
     client.disconnect()
   })
 
+  it('does not replay a client\'s own ops during cursor catch-up', async () => {
+    const server = new SyncServer()
+    const aGraph = new PolyGraph()
+    const bGraph = new PolyGraph()
+
+    const { client: alice, cleanup: ca } = connect(aGraph, 'alice', server, false)
+    const { client: bob, cleanup: cb } = connect(bGraph, 'bob', server, false)
+
+    const aEvents: string[] = []
+    const sub = aGraph.changes.subscribe(e => { if (e.nodeId === 'n1') aEvents.push(e.type) })
+
+    // Alice contributes first; her cursor never advances past her own op until
+    // a peer broadcasts, which triggers a gap catch-up that re-delivers it.
+    aGraph.addNode({ id: 'n1', type: 't', data: {}, insertedAt: 1, updatedAt: 1 })
+    alice.flush()
+    await new Promise(resolve => setTimeout(resolve, 10))
+
+    bGraph.addNode({ id: 'n2', type: 't', data: {}, insertedAt: 2, updatedAt: 2 })
+    bob.flush()
+    await new Promise(resolve => setTimeout(resolve, 10))
+
+    // Catch-up must deliver Bob's op without re-applying Alice's own.
+    alice.requestSync()
+    await new Promise(resolve => setTimeout(resolve, 10))
+
+    expect(aGraph.getNode('n2')).toBeDefined()
+    expect(aEvents.filter(e => e === 'node_added')).toHaveLength(1)
+    expect(alice.syncCursor).toBe(server.cursor)
+
+    sub.unsubscribe()
+    ca()
+    cb()
+  })
+
   it('syncs cascade deletion across clients', async () => {
     const server = new SyncServer()
     const aGraph = new PolyGraph()
