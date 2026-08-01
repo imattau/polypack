@@ -9,7 +9,13 @@ optional and only loaded by `@0xx0lostcause0xx0/polypack/react`.
 ### `PolyGraph`
 
 ```ts
-new PolyGraph(adapter?: PersistenceAdapter, hotCacheMax?: number, embedding?: EmbeddingProvider, transform?: DataTransform)
+new PolyGraph(
+  adapter?: PersistenceAdapter,
+  hotCacheMax?: number,
+  embedding?: EmbeddingProvider,
+  transform?: DataTransform,
+  createVectorIndex?: (onChange: (id: string) => void) => VectorIndex,
+)
 ```
 
 The main property-graph container. Without an adapter it uses `MemoryAdapter`.
@@ -21,6 +27,20 @@ Synchronous queries and mutations operate on currently loaded nodes; use
 The optional `transform` parameter provides `serialize`/`deserialize` hooks for
 non-cloneable data (Blob, File, etc.) that cannot pass through
 `structuredClone`. See the DataTransform section below.
+
+The optional `createVectorIndex` factory swaps the vector engine backing the
+public `vectors` property (a `VectorIndex` by default). It is typed as
+`(onChange) => VectorIndex`, so at the type level it only accepts another
+`VectorIndex` instance (e.g. a subclass). **`HNSWIndex` and
+`@0xx0lostcause0xx0/polypack-native`'s `createNativeVectorIndex()`/
+`createNativeHnswIndex` do not satisfy this type** — despite being the
+intended use case — because `VectorIndex` has private fields that create a
+nominal type brand `tsc` enforces. Passing them works at runtime (this is
+exercised in `tests/native/native.test.ts`, which is not type-checked) but
+fails `tsc --strict` for any consumer importing both packages' declarations.
+Until the parameter type is loosened to a structural `VectorIndexLike`
+interface, treat cross-engine substitution as a runtime-only, not
+type-checked, integration.
 
 Lifecycle:
 
@@ -60,6 +80,10 @@ Nodes:
   a type ordered by a data field (async convenience).
 - `countNodesByType(type)` returns the persisted count for a node type (async).
 - `deleteNodesByType(type)` removes all persisted nodes of a type (async).
+- `vectors` is the public `VectorIndex` (or substituted engine) backing
+  similarity search. Mutating it directly (rather than through `addNode`/
+  `updateNode`) does not schedule persistence; call `markVectorDirty(id)`
+  afterwards so the change is picked up on the next flush.
 
 Convenience — graph traversal:
 
@@ -171,13 +195,23 @@ that filtering, traversal, and ranking occur before the page is selected.
 
 - `new VectorIndex(onChange?, distanceFn?)` creates an exact in-memory index.
 - `add`, `addMany`, `remove`, `removeMany`, `clear`, `has`, `get`, `entries`, and
-  `size` manage vectors.
+  `size` manage vectors. `add`/`addMany` invoke `onChange` for each id;
+  `hydrate(id, vector)` sets a vector without triggering `onChange`, for
+  restoring persisted state without marking it dirty again.
 - `query(vector, topK, threshold?)` returns `{ id, score }[]`, highest first.
 - `cosineSimilarity(a, b)` and `euclideanSimilarity(a, b)` are built in.
 
 All compared vectors must have identical dimensions; otherwise similarity
 functions throw `RangeError`. Zero vectors have cosine similarity `0`. Added
 vectors are copied, and `get()`/`entries()` return detached arrays.
+
+`HNSWIndex` (`new HNSWIndex(onChange?, distanceFn?, config?, rng?)`) is an
+approximate, update-safe alternative with the same `add`/`addMany`/`hydrate`/
+`remove`/`removeMany`/`query`/`clear`/`has`/`get`/`entries`/`size` surface,
+plus `update(id, vector)` for in-place replacement. `config` accepts `M`,
+`Mmax0`, `efConstruction`, and `efSearch` (all optional, cosine distance by
+default). It is not assignable to `PolyGraph`'s `createVectorIndex` hook at
+the type level — see the constructor section above.
 
 ### Text embeddings
 

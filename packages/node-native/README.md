@@ -30,8 +30,8 @@ if (isNativeAvailable()) {
 ```
 
 `NativeVectorIndex` and `NativeHnswIndex` are drop-in replacements for the
-TypeScript `VectorIndex`/`HNSWIndex` classes and are the recommended way to
-plug native acceleration into `PolyGraph` via its `createVectorIndex` hook:
+TypeScript `VectorIndex`/`HNSWIndex` classes, and `createNativeVectorIndex()`
+is meant to plug into `PolyGraph`'s `createVectorIndex` constructor hook:
 
 ```ts
 import { PolyGraph } from '@0xx0lostcause0xx0/polypack'
@@ -39,6 +39,14 @@ import { createNativeVectorIndex } from '@0xx0lostcause0xx0/polypack-native'
 
 const graph = new PolyGraph(undefined, 50_000, undefined, undefined, createNativeVectorIndex())
 ```
+
+This runs correctly (`tests/native/native.test.ts` exercises it), but **does
+not currently type-check** under `tsc --strict`: `createVectorIndex` is typed
+as `(onChange) => VectorIndex`, and `VectorIndex`'s private fields make
+`NativeVectorIndex` structurally incompatible with it even though it has the
+same public shape. If you hit this, either relax to `// @ts-expect-error`
+at the call site or track the upstream fix that widens the parameter to a
+structural interface.
 
 `installNativeQueryExecutor()` routes in-memory `GraphQuery` execution
 through the Rust query planner when available (queries with join predicates
