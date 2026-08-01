@@ -314,6 +314,87 @@ impl Graph {
         self.store.close()
     }
 
+    /// Write the complete currently loaded graph to the `Store`, without
+    /// touching dirty-tracking state. Mirrors `PolyGraph.save`.
+    pub fn save(&mut self) -> Result<()> {
+        let put_nodes: Vec<Node> = self.nodes.values().cloned().collect();
+
+        let mut put_edges = Vec::new();
+        for (source, inner) in &self.edges {
+            for entry in inner.values() {
+                put_edges.push(Edge {
+                    id: edge_id(source, &entry.edge_type, &entry.target),
+                    source: source.clone(),
+                    target: entry.target.clone(),
+                    edge_type: entry.edge_type.clone(),
+                    data: encode_ownership(entry.data.clone(), entry.ownership),
+                    created_at: now_millis(),
+                });
+            }
+        }
+
+        let put_vectors: Vec<polypack_core::VectorEntry> = self
+            .hnsw
+            .nodes()
+            .iter()
+            .map(|(id, vector)| polypack_core::VectorEntry { id: id.clone(), vector: vector.clone() })
+            .collect();
+
+        self.store.apply(&ChangeBatch {
+            put_nodes,
+            delete_node_ids: Vec::new(),
+            put_edges,
+            delete_edge_ids: Vec::new(),
+            put_vectors,
+            delete_vector_ids: Vec::new(),
+        })
+    }
+
+    /// Clear in-memory state only — does not flush pending mutations or
+    /// touch the underlying `Store`'s persisted contents. Mirrors
+    /// `PolyGraph.clear`.
+    pub fn clear(&mut self) {
+        self.nodes.clear();
+        self.edges.clear();
+        self.hnsw.clear();
+        self.hot_cache_order = LruList::new();
+        self.node_to_edge.clear();
+        self.by_type.clear();
+        self.evicted_dirty_nodes.clear();
+        self.dirty_edges.clear();
+        self.dirty_vectors.clear();
+        self.dirty_nodes.clear();
+        self.removed_node_ids.clear();
+        self.removed_edge_ids.clear();
+        self.removed_vector_ids.clear();
+        self.warmed = false;
+    }
+
+    /// Flush pending mutations, clear in-memory state, then close the
+    /// `Store`. Mirrors `PolyGraph.dispose`.
+    pub fn dispose(&mut self) -> Result<()> {
+        self.flush()?;
+        self.clear();
+        self.store.close()
+    }
+
+    /// Trim the hot working set down to `max_nodes` by removing the oldest
+    /// nodes (by `inserted_at`) via `remove_node` — cascading through
+    /// 'owned' edges the same as any other removal. Mirrors `PolyGraph.prune`.
+    pub fn prune(&mut self, max_nodes: usize) -> Result<()> {
+        if self.nodes.len() <= max_nodes {
+            return Ok(());
+        }
+        let mut by_age: Vec<(String, i64)> =
+            self.nodes.iter().map(|(id, node)| (id.clone(), node.inserted_at)).collect();
+        by_age.sort_by_key(|(_, inserted_at)| *inserted_at);
+        let excess = self.nodes.len() - max_nodes;
+        for (id, _) in by_age.into_iter().take(excess) {
+            self.remove_node(&id)?;
+        }
+        Ok(())
+    }
+
     // ── node CRUD ──
 
     /// Insert or replace a node. Replacement re-indexes by type and
@@ -1845,5 +1926,133 @@ mod tests {
             "restore must recover the unflushed edit, not a stale/absent persisted copy"
         );
         assert!(!g.evicted_dirty_nodes.contains_key("a"), "get_node_safe consumes the snapshot");
+    }
+
+    #[test]
+    fn save_persists_the_full_loaded_graph_without_clearing_dirty_state() {
+        let mut g = test_graph();
+        let mut a = node("a");
+        a.vector = Some(vec![1.0, 0.0]);
+        g.add_node(a).unwrap();
+        g.add_node(node("b")).unwrap();
+        g.add_edge("a", "REL", "b", None, EdgeOwnership::Owned).unwrap();
+
+        g.save().unwrap();
+
+        assert_eq!(g.store.get_node("a").unwrap().unwrap().id, "a");
+        assert_eq!(g.store.get_vector("a").unwrap().unwrap(), vec![1.0, 0.0]);
+        let edges = g.store.edges_snapshot().unwrap();
+        assert!(edges.iter().any(|(id, _)| *id == edge_id("a", "REL", "b")));
+        assert!(g.has_pending_persistence(), "save must not clear dirty-tracking state");
+    }
+
+    #[test]
+    fn clear_resets_in_memory_state_without_touching_the_store() {
+        let mut g = test_graph();
+        g.add_node(node("a")).unwrap();
+        g.flush().unwrap();
+
+        g.clear();
+
+        assert_eq!(g.size(), 0);
+        assert!(!g.has_pending_persistence());
+        assert!(!g.has_loaded_node("a"));
+        assert!(g.store.get_node("a").unwrap().is_some(), "clear must not touch the store");
+    }
+
+    #[test]
+    fn clear_allows_warm_to_reload_from_the_store() {
+        let mut g = test_graph();
+        g.add_node(node("a")).unwrap();
+        g.flush().unwrap();
+        g.warm().unwrap();
+        assert!(g.has_loaded_node("a"));
+
+        g.clear();
+        assert!(!g.has_loaded_node("a"));
+
+        g.warm().unwrap();
+        assert!(g.has_loaded_node("a"), "clear() must reset `warmed` so warm() reloads");
+    }
+
+    #[test]
+    fn dispose_flushes_before_closing() {
+        let storage = shared_storage();
+        {
+            let mut g = graph_on(&storage, GraphConfig::default());
+            g.add_node(node("a")).unwrap();
+            g.dispose().unwrap();
+        }
+
+        let mut g2 = graph_on(&storage, GraphConfig::default());
+        g2.warm().unwrap();
+
+        assert!(g2.has_loaded_node("a"), "dispose must flush before closing");
+    }
+
+    #[test]
+    fn dispose_clears_in_memory_state() {
+        let mut g = test_graph();
+        g.add_node(node("a")).unwrap();
+
+        g.dispose().unwrap();
+
+        assert_eq!(g.size(), 0);
+        assert!(!g.has_pending_persistence());
+    }
+
+    #[test]
+    fn prune_removes_the_oldest_nodes_down_to_the_cap() {
+        let mut g = test_graph();
+        let mut old = node("old");
+        old.inserted_at = 1;
+        let mut mid = node("mid");
+        mid.inserted_at = 2;
+        let mut newest = node("newest");
+        newest.inserted_at = 3;
+        g.add_node(old).unwrap();
+        g.add_node(mid).unwrap();
+        g.add_node(newest).unwrap();
+
+        g.prune(1).unwrap();
+
+        assert_eq!(g.size(), 1);
+        assert!(g.has_loaded_node("newest"));
+        assert!(!g.has_loaded_node("old"));
+        assert!(!g.has_loaded_node("mid"));
+    }
+
+    #[test]
+    fn prune_is_a_noop_when_within_the_cap() {
+        let mut g = test_graph();
+        g.add_node(node("a")).unwrap();
+
+        g.prune(5).unwrap();
+
+        assert!(g.has_loaded_node("a"));
+    }
+
+    #[test]
+    fn prune_cascades_through_owned_edges_beyond_the_targeted_count() {
+        let mut g = test_graph();
+        let mut old = node("old");
+        old.inserted_at = 1;
+        let mut owned_child = node("owned_child");
+        owned_child.inserted_at = 2;
+        let mut newest = node("newest");
+        newest.inserted_at = 3;
+        g.add_node(old).unwrap();
+        g.add_node(owned_child).unwrap();
+        g.add_node(newest).unwrap();
+        g.add_edge("old", "OWNS", "owned_child", None, EdgeOwnership::Owned).unwrap();
+
+        g.prune(2).unwrap(); // directly targets only "old", the single oldest
+
+        assert!(!g.has_loaded_node("old"));
+        assert!(
+            !g.has_loaded_node("owned_child"),
+            "cascade-removed along with old, even though it wasn't directly targeted"
+        );
+        assert!(g.has_loaded_node("newest"));
     }
 }
