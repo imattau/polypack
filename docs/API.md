@@ -14,7 +14,7 @@ new PolyGraph(
   hotCacheMax?: number,
   embedding?: EmbeddingProvider,
   transform?: DataTransform,
-  createVectorIndex?: (onChange: (id: string) => void) => VectorIndex,
+  createVectorIndex?: (onChange: (id: string) => void) => VectorIndexLike,
 )
 ```
 
@@ -29,18 +29,18 @@ non-cloneable data (Blob, File, etc.) that cannot pass through
 `structuredClone`. See the DataTransform section below.
 
 The optional `createVectorIndex` factory swaps the vector engine backing the
-public `vectors` property (a `VectorIndex` by default). It is typed as
-`(onChange) => VectorIndex`, so at the type level it only accepts another
-`VectorIndex` instance (e.g. a subclass). **`HNSWIndex` and
-`@0xx0lostcause0xx0/polypack-native`'s `createNativeVectorIndex()`/
-`createNativeHnswIndex` do not satisfy this type** — despite being the
-intended use case — because `VectorIndex` has private fields that create a
-nominal type brand `tsc` enforces. Passing them works at runtime (this is
-exercised in `tests/native/native.test.ts`, which is not type-checked) but
-fails `tsc --strict` for any consumer importing both packages' declarations.
-Until the parameter type is loosened to a structural `VectorIndexLike`
-interface, treat cross-engine substitution as a runtime-only, not
-type-checked, integration.
+public `vectors` property (a `VectorIndex` by default). It accepts anything
+implementing `VectorIndexLike` — the structural interface shared by
+`VectorIndex`, `HNSWIndex` (see Vector search below), and the native engines
+from `@0xx0lostcause0xx0/polypack-native` (`NativeVectorIndex`/
+`NativeHnswIndex` via `createNativeVectorIndex()`/`createNativeHnswIndex`) —
+so any of them can be swapped in and still type-check:
+
+```ts
+import { PolyGraph, HNSWIndex } from '@0xx0lostcause0xx0/polypack'
+
+const graph = new PolyGraph(undefined, undefined, undefined, undefined, (onChange) => new HNSWIndex(onChange))
+```
 
 Lifecycle:
 
@@ -206,12 +206,12 @@ functions throw `RangeError`. Zero vectors have cosine similarity `0`. Added
 vectors are copied, and `get()`/`entries()` return detached arrays.
 
 `HNSWIndex` (`new HNSWIndex(onChange?, distanceFn?, config?, rng?)`) is an
-approximate, update-safe alternative with the same `add`/`addMany`/`hydrate`/
-`remove`/`removeMany`/`query`/`clear`/`has`/`get`/`entries`/`size` surface,
-plus `update(id, vector)` for in-place replacement. `config` accepts `M`,
-`Mmax0`, `efConstruction`, and `efSearch` (all optional, cosine distance by
-default). It is not assignable to `PolyGraph`'s `createVectorIndex` hook at
-the type level — see the constructor section above.
+approximate, update-safe alternative implementing the same `VectorIndexLike`
+surface (`add`/`addMany`/`hydrate`/`remove`/`removeMany`/`query`/`clear`/
+`has`/`get`/`entries`/`size`), plus `update(id, vector)` for in-place
+replacement. `config` accepts `M`, `Mmax0`, `efConstruction`, and `efSearch`
+(all optional, cosine distance by default). It can be passed directly to
+`PolyGraph`'s `createVectorIndex` hook — see the constructor section above.
 
 ### Text embeddings
 

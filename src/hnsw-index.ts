@@ -1,5 +1,5 @@
 import { cosineSimilarity } from './vector-index.js'
-import type { DistanceFunction } from './vector-index.js'
+import type { DistanceFunction, VectorIndexLike } from './vector-index.js'
 import { assertFiniteVector, assertNonNegativeInteger } from './utils.js'
 
 export interface HNSWConfig {
@@ -21,7 +21,7 @@ const DEF: Required<HNSWConfig> = {
   efSearch: 200,
 }
 
-export class HNSWIndex {
+export class HNSWIndex implements VectorIndexLike {
   private nodes = new Map<string, Float64Array>()
   private nodeLevel = new Map<string, number>()
   private adjacency = new Map<number, Map<string, Set<string>>>()

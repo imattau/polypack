@@ -1,6 +1,7 @@
 import { Subject } from 'rxjs'
 import type { PolyNode, EdgeOwnership, GraphChangeEvent, SerializedNode, SerializedEdge, DataTransform } from './types.js'
 import { VectorIndex } from './vector-index.js'
+import type { VectorIndexLike } from './vector-index.js'
 import { GraphQuery } from './query.js'
 import { PersistedGraphQuery } from './persisted-query.js'
 import { assertFiniteVector, cloneData, clonePolyNode, edgeId, yieldToUI } from './utils.js'
@@ -33,7 +34,7 @@ export class PolyGraph {
   protected edges: EdgeIndex = new Map()
   protected nodeToEdgeMap = new Map<string, Set<string>>()
 
-  readonly vectors: VectorIndex
+  readonly vectors: VectorIndexLike
   readonly changes = new Subject<GraphChangeEvent>()
   readonly persistence: PersistenceAdapter
   readonly hotCacheMax: number
@@ -87,7 +88,7 @@ export class PolyGraph {
     hotCacheMax?: number,
     embedding?: EmbeddingProvider,
     transform?: DataTransform,
-    createVectorIndex?: (onChange: (id: string) => void) => VectorIndex,
+    createVectorIndex?: (onChange: (id: string) => void) => VectorIndexLike,
   ) {
     this.persistence = adapter ?? new MemoryAdapter()
     this.hotCacheMax = hotCacheMax ?? DEFAULT_HOT_CACHE_MAX

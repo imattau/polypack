@@ -22,7 +22,7 @@ import { readFileSync, readdirSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { PolyGraph, HNSWIndex, cosineSimilarity } from '../../src/index'
-import type { EdgeOwnership, PolyNode, SerializedNode, VectorIndex } from '../../src/index'
+import type { EdgeOwnership, PolyNode, SerializedNode, VectorIndexLike } from '../../src/index'
 import type { QueryPlan } from './query-plan'
 
 export type ErrorCode =
@@ -360,7 +360,7 @@ function assertExpectations(graph: PolyGraph, orphanGraph: OrphanAwareGraph | nu
   }
 }
 
-export function runFixture(fixture: Fixture, createIndex?: (onChange: (id: string) => void) => VectorIndex): void {
+export function runFixture(fixture: Fixture, createIndex?: (onChange: (id: string) => void) => VectorIndexLike): void {
   const graph = fixture.orphanAware
     ? new OrphanAwareGraph(undefined, fixture.graphOptions?.hotCacheMax, undefined, undefined, createIndex)
     : new PolyGraph(undefined, fixture.graphOptions?.hotCacheMax, undefined, undefined, createIndex)

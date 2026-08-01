@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import { HNSWIndex } from '../src/hnsw-index'
 import { VectorIndex, cosineSimilarity, euclideanSimilarity } from '../src/vector-index'
+import type { VectorIndexLike } from '../src/vector-index'
 
 describe('HNSWIndex', () => {
   describe('CRUD', () => {
@@ -141,7 +142,7 @@ describe('HNSWIndex', () => {
 
   describe('query', () => {
     function bruteForce(
-      index: VectorIndex,
+      index: VectorIndexLike,
       query: number[],
       topK: number,
       threshold: number,

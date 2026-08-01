@@ -34,8 +34,29 @@ export function euclideanSimilarity(a: ArrayLike<number>, b: ArrayLike<number>):
   return 1 / (1 + Math.sqrt(sum))
 }
 
+/**
+ * Structural surface shared by `VectorIndex`, `HNSWIndex`, and the native
+ * engines from `@0xx0lostcause0xx0/polypack-native` (`NativeVectorIndex`,
+ * `NativeHnswIndex`). This is what `PolyGraph`'s `createVectorIndex`
+ * constructor hook accepts, so any conforming engine can be swapped in
+ * without a nominal-typing mismatch against `VectorIndex`'s private fields.
+ */
+export interface VectorIndexLike {
+  add(id: string, vector: number[] | Float64Array): void
+  hydrate(id: string, vector: number[] | Float64Array): void
+  addMany(entries: Array<{ id: string; vector: number[] | Float64Array }>): void
+  remove(id: string): void
+  removeMany(ids: string[]): void
+  query(vector: number[], topK: number, threshold?: number): Array<{ id: string; score: number }>
+  clear(): void
+  readonly size: number
+  entries(): IterableIterator<[string, Float64Array]>
+  has(id: string): boolean
+  get(id: string): Float64Array | undefined
+}
+
 /** Exact in-memory vector index with O(n log k) top-k selection. */
-export class VectorIndex {
+export class VectorIndex implements VectorIndexLike {
   private vectors = new Map<string, Float64Array>()
   private onChange?: (id: string) => void
   private distanceFn: DistanceFunction
