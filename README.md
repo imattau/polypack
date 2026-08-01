@@ -14,17 +14,36 @@ npm install @0xx0lostcause0xx0/polypack
 
 React is an optional peer dependency and is only required when importing from `@0xx0lostcause0xx0/polypack/react`.
 
+Python and Rust bindings over the same core are published separately:
+
+```sh
+pip install polypack-db
+```
+
+```sh
+cargo add polypack-core
+```
+
 ## Releases
 
 - **npm package:** [`@0xx0lostcause0xx0/polypack`](https://www.npmjs.com/package/@0xx0lostcause0xx0/polypack)
-  is the installable distribution for Node.js and browser build tooling.
+  is the installable TypeScript/JavaScript distribution for Node.js and browser
+  build tooling. [`@0xx0lostcause0xx0/polypack-native`](https://www.npmjs.com/package/@0xx0lostcause0xx0/polypack-native)
+  provides NAPI-RS bindings to the native `VectorIndex`/`HNSWIndex`.
+- **PyPI package:** [`polypack-db`](https://pypi.org/project/polypack-db/)
+  is the Python distribution, built with maturin/PyO3 over the same Rust core.
+- **crates.io package:** [`polypack-core`](https://crates.io/crates/polypack-core)
+  is the portable Rust core (property graph, vector search, persistence)
+  underlying the TypeScript native addon and the Python bindings.
 - **GitHub releases:** [release notes, source archives, and tags](https://github.com/imattau/polypack/releases)
   are published from the repository. The current source release is
-  [`v2.4.1`](https://github.com/imattau/polypack/releases/tag/v2.4.1).
+  [`v2.4.5`](https://github.com/imattau/polypack/releases/tag/v2.4.5).
 
 Stable GitHub releases run the complete test, build, export, and package checks
-before the corresponding package is submitted to npm with provenance. See the
-[changelog](CHANGELOG.md) for breaking changes and migration notes.
+before the corresponding packages are submitted to npm, PyPI, and crates.io
+with provenance/trusted publishing. All three ecosystems are version-locked
+together. See the [changelog](CHANGELOG.md) for breaking changes and
+migration notes.
 
 ## Features
 
@@ -107,6 +126,8 @@ graph.query()
 | `@0xx0lostcause0xx0/polypack/react` | React hooks: `useGraphQuery`, `useLiveQuery` |
 | `@0xx0lostcause0xx0/polypack/sync` | Sync layer: OpLog, SyncAdapter, SyncClient, SyncServer |
 | `@0xx0lostcause0xx0/polypack-native` | Separate package: NAPI-RS bindings for native `VectorIndex`/`HNSWIndex` over the Rust core |
+| `polypack-db` (PyPI) | Separate package: PyO3/maturin bindings exposing `PolyGraph`, `GraphQuery`, and vector indexes to Python — see [python/README.md](python/README.md) |
+| `polypack-core` (crates.io) | Separate package: the portable Rust core (property graph, vector search, persistence) shared by the TypeScript native addon and the Python bindings |
 
 See the complete [API reference](docs/API.md), including persistence, React,
 sync, lifecycle, ownership, and error contracts.
