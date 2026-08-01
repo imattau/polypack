@@ -1,0 +1,356 @@
+//! [`PersistedGraphQuery`]: the Rust counterpart to `PersistedGraphQuery`
+//! (`src/persisted-query.ts`).
+//!
+//! A fluent, chainable query over every persisted node via a `Store`,
+//! without loading results into `Graph`'s hot working set. TS's version
+//! targets a generic `PersistenceAdapter` interface with several optional
+//! capability hooks (`queryNodes`, `getEdgesBySources`, `countNodes`, ...),
+//! falling back to full scans when absent. `Store` always implements the
+//! equivalent methods directly, so there's no capability branching here —
+//! every path always uses the `Store` method.
+
+use std::collections::{HashMap, HashSet};
+
+use polypack_core::query::Direction;
+use polypack_core::storage::{NodeQuery, OrderBy, RangeQuery};
+use polypack_core::vector::cosine;
+use polypack_core::{Node, Result, Store};
+
+use crate::query::OrderDirection;
+
+#[derive(Clone, Debug)]
+struct SimilaritySpec {
+    vector: Vec<f64>,
+    threshold: f64,
+    top_k: Option<usize>,
+}
+
+/// Chainable query over all persisted nodes in a `Store`. Results are
+/// detached clones. Mirrors `PersistedGraphQuery`.
+pub struct PersistedGraphQuery<'a> {
+    store: &'a mut Store,
+
+    node_types: Option<Vec<String>>,
+    attributes: HashMap<String, serde_json::Value>,
+    attribute_ranges: HashMap<String, (Option<f64>, Option<f64>)>,
+    order_by: Option<(String, OrderDirection)>,
+    result_offset: Option<usize>,
+    result_limit: Option<usize>,
+    similarity: Option<SimilaritySpec>,
+
+    edge_type: Option<String>,
+    edge_target: Option<String>,
+    edge_source: Option<String>,
+    joins: Vec<(String, Direction, Option<Box<dyn Fn(&Node) -> bool + 'a>>)>,
+    traversals: Vec<(String, usize, Direction)>,
+}
+
+impl<'a> PersistedGraphQuery<'a> {
+    pub(crate) fn new(store: &'a mut Store) -> Self {
+        Self {
+            store,
+            node_types: None,
+            attributes: HashMap::new(),
+            attribute_ranges: HashMap::new(),
+            order_by: None,
+            result_offset: None,
+            result_limit: None,
+            similarity: None,
+            edge_type: None,
+            edge_target: None,
+            edge_source: None,
+            joins: Vec::new(),
+            traversals: Vec::new(),
+        }
+    }
+
+    // ── builder methods ──
+
+    pub fn where_field(mut self, field: &str, value: serde_json::Value) -> Self {
+        self.attributes.insert(field.to_string(), value);
+        self
+    }
+
+    pub fn where_attribute(self, name: &str, value: serde_json::Value) -> Self {
+        self.where_field(name, value)
+    }
+
+    pub fn where_attribute_range(mut self, name: &str, above: Option<f64>, below: Option<f64>) -> Self {
+        self.attribute_ranges.insert(name.to_string(), (above, below));
+        self
+    }
+
+    pub fn where_node_type(mut self, types: Vec<String>) -> Self {
+        self.node_types = Some(types);
+        self
+    }
+
+    pub fn where_edge(mut self, edge_type: &str, target: Option<&str>) -> Self {
+        self.edge_type = Some(edge_type.to_string());
+        self.edge_target = target.map(|t| t.to_string());
+        self
+    }
+
+    pub fn where_edge_source(mut self, source: &str) -> Self {
+        self.edge_source = Some(source.to_string());
+        self
+    }
+
+    pub fn join(
+        mut self,
+        edge_type: &str,
+        direction: Direction,
+        predicate: Option<Box<dyn Fn(&Node) -> bool + 'a>>,
+    ) -> Self {
+        self.joins.push((edge_type.to_string(), direction, predicate));
+        self
+    }
+
+    pub fn traverse(mut self, edge_type: &str, depth: usize, direction: Direction) -> Self {
+        self.traversals.push((edge_type.to_string(), depth, direction));
+        self
+    }
+
+    pub fn order_by(mut self, field: &str, direction: OrderDirection) -> Self {
+        self.order_by = Some((field.to_string(), direction));
+        self
+    }
+
+    pub fn offset(mut self, n: usize) -> Self {
+        self.result_offset = Some(n);
+        self
+    }
+
+    pub fn limit(mut self, n: usize) -> Self {
+        self.result_limit = Some(n);
+        self
+    }
+
+    pub fn similar_to(mut self, vector: Vec<f64>, threshold: f64, top_k: Option<usize>) -> Self {
+        self.similarity = Some(SimilaritySpec { vector, threshold, top_k });
+        self
+    }
+
+    // ── internals ──
+
+    fn base_query(&self, include_order: bool, include_pagination: bool) -> NodeQuery {
+        NodeQuery {
+            node_types: self.node_types.clone(),
+            attributes: (!self.attributes.is_empty()).then(|| self.attributes.clone().into_iter().collect()),
+            attribute_ranges: (!self.attribute_ranges.is_empty()).then(|| {
+                self.attribute_ranges
+                    .iter()
+                    .map(|(k, (above, below))| (k.clone(), RangeQuery { above: *above, below: *below }))
+                    .collect()
+            }),
+            order_by: include_order.then(|| self.order_by.clone()).flatten().map(|(field, dir)| OrderBy {
+                field,
+                direction: if dir == OrderDirection::Desc { "desc".to_string() } else { "asc".to_string() },
+            }),
+            offset: if include_pagination { self.result_offset } else { None },
+            limit: if include_pagination { self.result_limit } else { None },
+        }
+    }
+
+    fn apply_edge_filters(&mut self, nodes: Vec<Node>) -> Result<Vec<Node>> {
+        let mut results = nodes;
+        if let Some(edge_type) = self.edge_type.clone() {
+            let ids: Vec<String> = results.iter().map(|n| n.id.clone()).collect();
+            let edges = self.store.get_edges_by_sources(&ids, Some(&edge_type))?;
+            let target = self.edge_target.clone();
+            let sources: HashSet<String> = edges
+                .into_iter()
+                .filter(|e| target.as_deref().is_none_or(|t| e.target == t))
+                .map(|e| e.source)
+                .collect();
+            results.retain(|n| sources.contains(&n.id));
+        }
+        if let Some(source) = self.edge_source.clone() {
+            let edges = self.store.get_edges_by_sources(&[source], self.edge_type.as_deref())?;
+            let targets: HashSet<String> = edges.into_iter().map(|e| e.target).collect();
+            results.retain(|n| targets.contains(&n.id));
+        }
+        Ok(results)
+    }
+
+    fn apply_joins(&mut self, nodes: Vec<Node>) -> Result<Vec<Node>> {
+        let mut results = nodes;
+        for i in 0..self.joins.len() {
+            let (edge_type, direction, predicate) = &self.joins[i];
+            let direction = *direction;
+            let ids: Vec<String> = results.iter().map(|n| n.id.clone()).collect();
+            let edges = match direction {
+                Direction::Out => self.store.get_edges_by_sources(&ids, Some(edge_type))?,
+                Direction::In => self.store.get_edges_by_targets(&ids, Some(edge_type))?,
+            };
+            let connected_ids: HashSet<String> = edges
+                .iter()
+                .map(|e| match direction { Direction::Out => e.target.clone(), Direction::In => e.source.clone() })
+                .collect();
+            let mut connected: HashMap<String, Node> = HashMap::new();
+            for id in &connected_ids {
+                if let Some(n) = self.store.get_node(id)? {
+                    connected.insert(id.clone(), n);
+                }
+            }
+            let mut matched = HashSet::new();
+            for e in &edges {
+                let (candidate_id, connected_id) = match direction {
+                    Direction::Out => (&e.source, &e.target),
+                    Direction::In => (&e.target, &e.source),
+                };
+                if let Some(node) = connected.get(connected_id) {
+                    let ok = match predicate { Some(p) => p(node), None => true };
+                    if ok {
+                        matched.insert(candidate_id.clone());
+                    }
+                }
+            }
+            results.retain(|n| matched.contains(&n.id));
+        }
+        Ok(results)
+    }
+
+    fn apply_traversals(&mut self, nodes: Vec<Node>) -> Result<Vec<Node>> {
+        let mut current_ids: Vec<String> = nodes.iter().map(|n| n.id.clone()).collect();
+        for i in 0..self.traversals.len() {
+            let (edge_type, depth, direction) = self.traversals[i].clone();
+            let mut visited: HashSet<String> = current_ids.iter().cloned().collect();
+            let mut frontier = current_ids.clone();
+            for _ in 0..depth {
+                if frontier.is_empty() {
+                    break;
+                }
+                let edges = match direction {
+                    Direction::Out => self.store.get_edges_by_sources(&frontier, Some(&edge_type))?,
+                    Direction::In => self.store.get_edges_by_targets(&frontier, Some(&edge_type))?,
+                };
+                let mut next = Vec::new();
+                for e in &edges {
+                    let id = match direction { Direction::Out => e.target.clone(), Direction::In => e.source.clone() };
+                    if visited.insert(id.clone()) {
+                        next.push(id);
+                    }
+                }
+                frontier = next;
+            }
+            current_ids = visited.into_iter().collect();
+        }
+        let mut out = Vec::with_capacity(current_ids.len());
+        for id in current_ids {
+            if let Some(n) = self.store.get_node(&id)? {
+                out.push(n);
+            }
+        }
+        Ok(out)
+    }
+
+    // ── terminals ──
+
+    /// Materialize matched nodes. Mirrors `PersistedGraphQuery.toArray`.
+    pub fn to_array(&mut self) -> Result<Vec<Node>> {
+        let has_traversal = !self.traversals.is_empty();
+        let adapter_can_paginate =
+            self.similarity.is_none() && self.edge_type.is_none() && self.edge_source.is_none() && self.joins.is_empty() && !has_traversal;
+
+        let query = self.base_query(!has_traversal, adapter_can_paginate);
+        let mut nodes = self.store.query_nodes(&query)?;
+
+        nodes = self.apply_edge_filters(nodes)?;
+        nodes = self.apply_joins(nodes)?;
+        if has_traversal {
+            nodes = self.apply_traversals(nodes)?;
+        }
+
+        if has_traversal {
+            if let Some((field, direction)) = &self.order_by {
+                let desc = *direction == OrderDirection::Desc;
+                nodes.sort_by(|a, b| {
+                    let av = a.data.get(field).and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    let bv = b.data.get(field).and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    let ord = av.partial_cmp(&bv).unwrap_or(std::cmp::Ordering::Equal);
+                    if desc { ord.reverse() } else { ord }
+                });
+            }
+        }
+
+        if let Some(sim) = self.similarity.clone() {
+            let mut scored: Vec<(f64, Node)> = nodes
+                .into_iter()
+                .filter_map(|n| {
+                    let v = n.vector.clone()?;
+                    let score = cosine(&sim.vector, &v).ok()?;
+                    (score >= sim.threshold).then_some((score, n))
+                })
+                .collect();
+            scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+            if let Some(top_k) = sim.top_k {
+                scored.truncate(top_k);
+            }
+            nodes = scored.into_iter().map(|(_, n)| n).collect();
+        }
+
+        if !adapter_can_paginate {
+            if let Some(offset) = self.result_offset {
+                nodes = nodes.into_iter().skip(offset).collect();
+            }
+            if let Some(limit) = self.result_limit {
+                nodes.truncate(limit);
+            }
+        }
+
+        Ok(nodes)
+    }
+
+    pub fn first(&mut self) -> Result<Option<Node>> {
+        Ok(self.to_array()?.into_iter().next())
+    }
+
+    pub fn ids(&mut self) -> Result<Vec<String>> {
+        Ok(self.to_array()?.into_iter().map(|n| n.id).collect())
+    }
+
+    pub fn count(&mut self) -> Result<usize> {
+        let needs_materialization = self.similarity.is_some()
+            || self.result_offset.is_some()
+            || self.result_limit.is_some()
+            || self.edge_type.is_some()
+            || self.edge_source.is_some()
+            || !self.joins.is_empty()
+            || !self.traversals.is_empty();
+        if needs_materialization {
+            return Ok(self.to_array()?.len());
+        }
+        let query = self.base_query(false, false);
+        self.store.count_nodes(&query)
+    }
+
+    /// From the matched nodes, collect distinct connected nodes reachable
+    /// via one `edge_type` hop, optionally filtered by `predicate`.
+    pub fn collect(
+        &mut self,
+        edge_type: &str,
+        direction: Direction,
+        predicate: Option<&dyn Fn(&Node) -> bool>,
+    ) -> Result<Vec<Node>> {
+        let seeds = self.to_array()?;
+        let seed_ids: Vec<String> = seeds.iter().map(|n| n.id.clone()).collect();
+        let edges = match direction {
+            Direction::Out => self.store.get_edges_by_sources(&seed_ids, Some(edge_type))?,
+            Direction::In => self.store.get_edges_by_targets(&seed_ids, Some(edge_type))?,
+        };
+        let connected_ids: HashSet<String> = edges
+            .iter()
+            .map(|e| match direction { Direction::Out => e.target.clone(), Direction::In => e.source.clone() })
+            .collect();
+        let mut out = Vec::new();
+        for id in connected_ids {
+            if let Some(n) = self.store.get_node(&id)? {
+                if predicate.is_none_or(|p| p(&n)) {
+                    out.push(n);
+                }
+            }
+        }
+        Ok(out)
+    }
+}

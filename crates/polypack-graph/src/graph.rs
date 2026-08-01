@@ -13,6 +13,8 @@ use polypack_core::{
 use crate::edge::{decode_ownership, encode_ownership, EdgeEntry, EdgeOwnership};
 use crate::event::GraphChangeEvent;
 use crate::lru::LruList;
+use crate::persisted_query::PersistedGraphQuery;
+use crate::query::GraphQuery;
 
 /// Tuning knobs, mirrors the `PolyGraph` constructor's `hotCacheMax` plus the
 /// `HnswIndex` config threaded through `createVectorIndex` in the TS version.
@@ -63,6 +65,11 @@ pub struct Graph {
     on_change: Option<Box<dyn FnMut(GraphChangeEvent)>>,
     on_orphan: Option<Box<dyn FnMut(&str)>>,
 
+    /// Mirrors `PolyGraph.batchDepth`/`pendingBatchEvents`: while > 0,
+    /// `emit` queues events instead of dispatching them — see `start_batch`.
+    batch_depth: u32,
+    pending_batch_events: Vec<GraphChangeEvent>,
+
     warmed: bool,
 }
 
@@ -90,6 +97,8 @@ impl Graph {
             removed_vector_ids: HashSet::new(),
             on_change: None,
             on_orphan: None,
+            batch_depth: 0,
+            pending_batch_events: Vec::new(),
             warmed: false,
         })
     }
@@ -104,6 +113,31 @@ impl Graph {
     /// disconnected. See `onOrphan` in `graph.ts`.
     pub fn on_orphan(&mut self, cb: impl FnMut(&str) + 'static) {
         self.on_orphan = Some(Box::new(cb));
+    }
+
+    /// Queue `on_change` notifications until the matching `end_batch`.
+    /// Nestable. Mirrors `PolyGraph.startBatch`.
+    pub fn start_batch(&mut self) {
+        self.batch_depth += 1;
+    }
+
+    /// Flush notifications queued since the matching `start_batch`. Errors
+    /// if no batch is open. Mirrors `PolyGraph.endBatch`.
+    pub fn end_batch(&mut self) -> Result<()> {
+        if self.batch_depth == 0 {
+            return Err(PolypackError::InvalidArgument("end_batch without start_batch".into()));
+        }
+        self.batch_depth -= 1;
+        if self.batch_depth > 0 {
+            return Ok(());
+        }
+        let events = std::mem::take(&mut self.pending_batch_events);
+        for event in events {
+            if let Some(cb) = self.on_change.as_mut() {
+                cb(event);
+            }
+        }
+        Ok(())
     }
 
     // ── lifecycle ──
@@ -413,20 +447,18 @@ impl Graph {
     }
 
     /// Add several nodes in one call. All nodes are validated before any are
-    /// inserted (an invalid entry inserts nothing), matching
-    /// `PolyGraph.addNodes`.
-    ///
-    /// TS coalesces change-event notifications for the whole batch via
-    /// `startBatch`/`endBatch`; this port has no batching mechanism yet (see
-    /// the `on_change` docs), so each insert emits immediately.
+    /// inserted (an invalid entry inserts nothing), and change-event
+    /// notifications for the whole batch are coalesced via
+    /// `start_batch`/`end_batch`. Matches `PolyGraph.addNodes`.
     pub fn add_nodes(&mut self, nodes: Vec<Node>) -> Result<()> {
         for n in &nodes {
             validate_node(n)?;
         }
+        self.start_batch();
         for n in nodes {
             self.insert_node(n);
         }
-        Ok(())
+        self.end_batch()
     }
 
     /// Detached view of a currently loaded node. Does not restore evicted
@@ -881,20 +913,34 @@ impl Graph {
 
     // ── query ──
 
-    /// Execute a `QueryPlan` over the current hot working set, matching
-    /// `PersistedGraphQuery`'s in-memory counterpart in `graph.ts` (there,
-    /// `GraphQuery` walks `this.nodes`/`this.edges` directly; here the same
-    /// hot state is handed to `polypack_core::query_exec::execute`, which
-    /// implements the identical pipeline). The hot `HnswIndex` is always
+    /// Execute a raw `QueryPlan` over the current hot working set via
+    /// `polypack_core::query_exec::execute`. The hot `HnswIndex` is always
     /// passed through so a plan's `similarity.engine: "hnsw"` can use it.
-    pub fn query(&self, plan: &QueryPlan) -> Result<Vec<String>> {
+    ///
+    /// This is a lower-level entry point than `query()` (which returns a
+    /// `GraphQuery` fluent builder, mirroring `PolyGraph.query()`) — no
+    /// direct TS equivalent takes a raw plan; it exists to expose
+    /// `query_exec` directly for callers that already have a `QueryPlan`.
+    pub fn query_plan(&self, plan: &QueryPlan) -> Result<Vec<String>> {
         core_execute(&self.snapshot(), plan, Some(&self.hnsw))
     }
 
     /// Aggregate a numeric field over the nodes a `QueryPlan` selects from
-    /// the hot working set. See `query`'s docs on scope.
-    pub fn aggregate(&self, plan: &QueryPlan, field: &str, op: &str) -> Result<(f64, usize)> {
+    /// the hot working set. See `query_plan`'s docs on scope.
+    pub fn aggregate_plan(&self, plan: &QueryPlan, field: &str, op: &str) -> Result<(f64, usize)> {
         core_aggregate(&self.snapshot(), plan, field, op)
+    }
+
+    /// Start a fluent query over the current hot working set. Mirrors
+    /// `PolyGraph.query`.
+    pub fn query(&self) -> GraphQuery<'_> {
+        GraphQuery::new(&self.nodes, &self.edges, &self.node_to_edge)
+    }
+
+    /// Start a fluent query over every persisted node, without loading
+    /// results into the hot working set. Mirrors `PolyGraph.queryPersisted`.
+    pub fn query_persisted(&mut self) -> PersistedGraphQuery<'_> {
+        PersistedGraphQuery::new(&mut self.store)
     }
 
     /// Build a `query_exec::GraphSnapshot` from the current hot node/edge
@@ -1088,8 +1134,12 @@ impl Graph {
         }
     }
 
+    /// Mirrors `PolyGraph.emitChange`: queues while a batch is open (see
+    /// `start_batch`), otherwise dispatches immediately.
     fn emit(&mut self, event: GraphChangeEvent) {
-        if let Some(cb) = self.on_change.as_mut() {
+        if self.batch_depth > 0 {
+            self.pending_batch_events.push(event);
+        } else if let Some(cb) = self.on_change.as_mut() {
             cb(event);
         }
     }
@@ -1852,19 +1902,19 @@ mod tests {
     }
 
     #[test]
-    fn query_filters_by_node_type() {
+    fn query_plan_filters_by_node_type() {
         let mut g = test_graph();
         g.add_node(node_of_type("a", "doc")).unwrap();
         g.add_node(node_of_type("b", "article")).unwrap();
 
         let plan = QueryPlan { node_types: Some(vec!["doc".into()]), ..Default::default() };
-        let ids = g.query(&plan).unwrap();
+        let ids = g.query_plan(&plan).unwrap();
 
         assert_eq!(ids, vec!["a".to_string()]);
     }
 
     #[test]
-    fn query_filters_by_attribute_eq() {
+    fn query_plan_filters_by_attribute_eq() {
         use polypack_core::query::AttributeFilter;
 
         let mut g = test_graph();
@@ -1882,13 +1932,13 @@ mod tests {
             }]),
             ..Default::default()
         };
-        let ids = g.query(&plan).unwrap();
+        let ids = g.query_plan(&plan).unwrap();
 
         assert_eq!(ids, vec!["a".to_string()]);
     }
 
     #[test]
-    fn query_filters_by_edge_filter_target() {
+    fn query_plan_filters_by_edge_filter_target() {
         use polypack_core::query::EdgeFilter;
 
         let mut g = test_graph();
@@ -1902,22 +1952,22 @@ mod tests {
             edge_filter: Some(EdgeFilter { edge_type: "REL".into(), target: Some("c".into()), source: None }),
             ..Default::default()
         };
-        let ids = g.query(&plan).unwrap();
+        let ids = g.query_plan(&plan).unwrap();
 
         assert_eq!(ids, vec!["a".to_string()], "only a has a REL edge into c");
     }
 
     #[test]
-    fn query_respects_limit() {
+    fn query_plan_respects_limit() {
         let mut g = test_graph();
         g.add_nodes(vec![node("a"), node("b"), node("c")]).unwrap();
 
         let plan = QueryPlan { limit: Some(2), ..Default::default() };
-        assert_eq!(g.query(&plan).unwrap().len(), 2);
+        assert_eq!(g.query_plan(&plan).unwrap().len(), 2);
     }
 
     #[test]
-    fn aggregate_sums_a_numeric_field_over_matched_nodes() {
+    fn aggregate_plan_sums_a_numeric_field_over_matched_nodes() {
         let mut g = test_graph();
         let mut a = node_of_type("a", "doc");
         a.data.insert("score".into(), serde_json::json!(3.0));
@@ -1928,20 +1978,20 @@ mod tests {
         g.add_node(node_of_type("c", "article")).unwrap();
 
         let plan = QueryPlan { node_types: Some(vec!["doc".into()]), ..Default::default() };
-        let (sum, count) = g.aggregate(&plan, "score", "sum").unwrap();
+        let (sum, count) = g.aggregate_plan(&plan, "score", "sum").unwrap();
 
         assert_eq!(sum, 7.0);
         assert_eq!(count, 2);
     }
 
     #[test]
-    fn aggregate_rejects_an_unknown_op() {
+    fn aggregate_plan_rejects_an_unknown_op() {
         let mut g = test_graph();
         let mut a = node("a");
         a.data.insert("score".into(), serde_json::json!(1.0));
         g.add_node(a).unwrap();
 
-        assert!(g.aggregate(&QueryPlan::default(), "score", "median").is_err());
+        assert!(g.aggregate_plan(&QueryPlan::default(), "score", "median").is_err());
     }
 
     #[test]
@@ -2261,5 +2311,194 @@ mod tests {
         g2.load().unwrap();
 
         assert!(g2.has_loaded_node("a"));
+    }
+
+    fn recording_graph() -> (Graph, std::rc::Rc<std::cell::RefCell<Vec<GraphChangeEvent>>>) {
+        let mut g = test_graph();
+        let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let events_cb = events.clone();
+        g.on_change(move |ev| events_cb.borrow_mut().push(ev));
+        (g, events)
+    }
+
+    #[test]
+    fn emit_dispatches_immediately_outside_a_batch() {
+        let (mut g, events) = recording_graph();
+
+        g.add_node(node("a")).unwrap();
+
+        assert_eq!(events.borrow().len(), 1);
+    }
+
+    #[test]
+    fn batching_defers_events_until_end_batch() {
+        let (mut g, events) = recording_graph();
+
+        g.start_batch();
+        g.add_node(node("a")).unwrap();
+        assert!(events.borrow().is_empty(), "event must be queued while the batch is open");
+
+        g.end_batch().unwrap();
+        assert_eq!(events.borrow().len(), 1);
+    }
+
+    #[test]
+    fn nested_batches_only_flush_once_the_outermost_ends() {
+        let (mut g, events) = recording_graph();
+
+        g.start_batch();
+        g.start_batch();
+        g.add_node(node("a")).unwrap();
+        g.end_batch().unwrap();
+        assert!(events.borrow().is_empty(), "inner end_batch must not flush yet");
+
+        g.end_batch().unwrap();
+        assert_eq!(events.borrow().len(), 1);
+    }
+
+    #[test]
+    fn end_batch_without_start_batch_errors() {
+        let mut g = test_graph();
+        assert!(g.end_batch().is_err());
+    }
+
+    #[test]
+    fn add_nodes_coalesces_events_into_one_batch() {
+        let (mut g, events) = recording_graph();
+
+        g.add_nodes(vec![node("a"), node("b"), node("c")]).unwrap();
+
+        assert_eq!(events.borrow().len(), 3, "all node_added events fire once add_nodes's batch ends");
+    }
+
+    // ── GraphQuery / PersistedGraphQuery integration (unit coverage for the
+    // matching/traversal/aggregation logic itself lives in query.rs) ──
+
+    use crate::query::OrderDirection;
+    use polypack_core::query::Direction;
+
+    fn persisted_library() -> Graph {
+        let mut g = test_graph();
+        g.add_node(node_of_type("alice", "user")).unwrap();
+        g.add_node(node_of_type("bob", "user")).unwrap();
+        let mut scifi1 = node_of_type("scifi1", "book");
+        scifi1.data.insert("genre".into(), serde_json::json!("sci-fi"));
+        scifi1.data.insert("rating".into(), serde_json::json!(5.0));
+        scifi1.vector = Some(vec![1.0, 0.0]);
+        g.add_node(scifi1).unwrap();
+        let mut fantasy1 = node_of_type("fantasy1", "book");
+        fantasy1.data.insert("genre".into(), serde_json::json!("fantasy"));
+        fantasy1.data.insert("rating".into(), serde_json::json!(3.0));
+        fantasy1.vector = Some(vec![0.0, 1.0]);
+        g.add_node(fantasy1).unwrap();
+        g.add_edge("alice", "RATED", "scifi1", None, EdgeOwnership::Reference).unwrap();
+        g.add_edge("alice", "RATED", "fantasy1", None, EdgeOwnership::Reference).unwrap();
+        g.add_edge("bob", "RATED", "scifi1", None, EdgeOwnership::Reference).unwrap();
+        g.flush().unwrap();
+        g
+    }
+
+    fn ids_of(mut nodes: Vec<Node>) -> Vec<String> {
+        nodes.sort_by(|a, b| a.id.cmp(&b.id));
+        nodes.into_iter().map(|n| n.id).collect()
+    }
+
+    #[test]
+    fn persisted_query_filters_by_node_type_and_attribute() {
+        let mut g = persisted_library();
+        let mut q = g.query_persisted().where_node_type(vec!["book".into()]).where_field("genre", serde_json::json!("sci-fi"));
+        assert_eq!(ids_of(q.to_array().unwrap()), vec!["scifi1"]);
+    }
+
+    #[test]
+    fn persisted_query_where_edge_and_edge_source() {
+        let mut g = persisted_library();
+        assert_eq!(
+            ids_of(g.query_persisted().where_edge("RATED", Some("fantasy1")).to_array().unwrap()),
+            vec!["alice"]
+        );
+        assert_eq!(ids_of(g.query_persisted().where_edge_source("bob").to_array().unwrap()), vec!["scifi1"]);
+    }
+
+    #[test]
+    fn persisted_query_traverse_expands_from_seeds() {
+        let mut g = persisted_library();
+
+        // A base filter matching nothing leaves traversal with no seeds to
+        // expand from — filters apply before traversal, not after.
+        let expanded = g
+            .query_persisted()
+            .where_node_type(vec!["user".into()])
+            .where_field("no_such_field", serde_json::json!(true))
+            .traverse("RATED", 1, Direction::Out)
+            .to_array()
+            .unwrap();
+        assert!(expanded.is_empty());
+
+        let expanded =
+            g.query_persisted().where_node_type(vec!["user".into()]).traverse("RATED", 1, Direction::Out).to_array().unwrap();
+        assert_eq!(ids_of(expanded), vec!["alice", "bob", "fantasy1", "scifi1"]);
+    }
+
+    #[test]
+    fn persisted_query_join_filters_by_connected_node() {
+        let mut g = persisted_library();
+        let results = g
+            .query_persisted()
+            .where_node_type(vec!["user".into()])
+            .join(
+                "RATED",
+                Direction::Out,
+                Some(Box::new(|n: &Node| n.data.get("genre") == Some(&serde_json::json!("fantasy")))),
+            )
+            .to_array()
+            .unwrap();
+        assert_eq!(ids_of(results), vec!["alice"]);
+    }
+
+    #[test]
+    fn persisted_query_order_by_offset_and_limit() {
+        let mut g = persisted_library();
+        let results = g
+            .query_persisted()
+            .where_node_type(vec!["book".into()])
+            .order_by("rating", OrderDirection::Asc)
+            .offset(1)
+            .limit(1)
+            .to_array()
+            .unwrap();
+        assert_eq!(ids_of(results), vec!["scifi1"]);
+    }
+
+    #[test]
+    fn persisted_query_similar_to_ranks_and_filters() {
+        let mut g = persisted_library();
+        let results = g
+            .query_persisted()
+            .where_node_type(vec!["book".into()])
+            .similar_to(vec![1.0, 0.0], 0.5, Some(1))
+            .to_array()
+            .unwrap();
+        assert_eq!(ids_of(results), vec!["scifi1"]);
+    }
+
+    #[test]
+    fn persisted_query_count_first_and_ids() {
+        let mut g = persisted_library();
+        assert_eq!(g.query_persisted().where_node_type(vec!["book".into()]).count().unwrap(), 2);
+        let mut ids = g.query_persisted().where_node_type(vec!["book".into()]).ids().unwrap();
+        ids.sort();
+        assert_eq!(ids, vec!["fantasy1".to_string(), "scifi1".to_string()]);
+        assert!(g.query_persisted().where_node_type(vec!["book".into()]).first().unwrap().is_some());
+        assert!(g.query_persisted().where_node_type(vec!["missing".into()]).first().unwrap().is_none());
+    }
+
+    #[test]
+    fn persisted_query_collect_gathers_connected_nodes() {
+        let mut g = persisted_library();
+        let mut ids =
+            ids_of(g.query_persisted().where_node_type(vec!["user".into()]).collect("RATED", Direction::Out, None).unwrap());
+        ids.sort();
+        assert_eq!(ids, vec!["fantasy1".to_string(), "scifi1".to_string()]);
     }
 }

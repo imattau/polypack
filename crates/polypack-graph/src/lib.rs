@@ -12,7 +12,11 @@ mod edge;
 mod event;
 mod graph;
 mod lru;
+mod persisted_query;
+mod query;
 
 pub use edge::{EdgeEntry, EdgeOwnership};
 pub use event::GraphChangeEvent;
 pub use graph::{Graph, GraphConfig};
+pub use persisted_query::PersistedGraphQuery;
+pub use query::{AggregateOp, AggregateResult, GraphQuery, GroupedRow, OrderDirection};
