@@ -1,10 +1,13 @@
 //! polypack-core: a portable embedded property-graph and vector-search core.
 //!
-//! Phase-2 spike scope (see POLYPACK_RUST_PYTHON_PLAN): node/edge/change-batch
-//! envelopes with validation, exact vector search, an update-safe HNSW index,
-//! serialisable query/result envelopes, and a reproducible benchmark binary.
-//! In-memory operation only; persistence, hosts, and transports are out of
-//! scope for the spike.
+//! Node/edge/change-batch envelopes with validation ([`model`]), exact and
+//! approximate ([`hnsw`]) vector search, a serialisable query plan and
+//! executor ([`query`], [`query_exec`]), and a directory-backed persistence
+//! engine with WAL replay, atomic batch commits, and adaptive compaction
+//! ([`storage`]). This crate is the shared core behind `polypack-node`
+//! (NAPI/npm) and `polypack-python` (PyO3/PyPI); see the
+//! [repository README](https://github.com/imattau/polypack#readme) for the
+//! project overview and `docs/API.md` for cross-language semantics.
 
 pub mod error;
 pub mod hnsw;
