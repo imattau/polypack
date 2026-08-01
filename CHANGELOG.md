@@ -3,6 +3,40 @@
 All notable changes to this project are documented here. This project follows
 [Semantic Versioning](https://semver.org/).
 
+## [2.4.6] - 2026-08-01
+
+### Fixed
+
+- `PolyGraph`'s `createVectorIndex` constructor hook was typed as
+  `(onChange) => VectorIndex`, so `HNSWIndex` and
+  `@0xx0lostcause0xx0/polypack-native`'s `NativeVectorIndex`/`NativeHnswIndex`
+  — the entire point of the hook — failed to type-check under `tsc --strict`
+  despite working at runtime, because `VectorIndex`'s private fields give it
+  a nominal type brand. Introduced a structural `VectorIndexLike` interface
+  (now exported from the package root) that `VectorIndex` and `HNSWIndex`
+  both implement, and retyped `PolyGraph.vectors`/`createVectorIndex`
+  against it.
+- `MemoryAdapter`'s `maxNodes` cap was not actually LRU: `applyChanges` and
+  `bulkPutNodes` re-put an existing node via a raw `Map.set()`, which does
+  not move an existing key to the end of a JS `Map`'s iteration order (only
+  `putNode`'s delete-then-set did). Since `PolyGraph.flush()`/`save()`
+  prefer `applyChanges` when available, a frequently-updated node could
+  still be evicted as if untouched. Both paths now route through the same
+  touch-then-set helper as `putNode`.
+
+### Documentation
+
+- README, `docs/API.md`, and per-package docs (`python/README.md`,
+  `crates/polypack-core/README.md`, `packages/node-native/README.md`)
+  updated to cover all three distribution channels (npm, PyPI's
+  `polypack-db`, crates.io's `polypack-core`) and to describe recent
+  additions (`addNodes`, adaptive compaction, secondary indexes,
+  `createVectorIndex`, `HNSWIndex`, `markVectorDirty`, `VectorIndex.hydrate`,
+  `MemoryAdapter`'s eviction behavior).
+- Added missing JSDoc/rustdoc/docstrings across the TypeScript, Rust, and
+  Python public API surfaces, and merged three duplicate/leftover doc
+  comments found on `SyncClient`, `SyncServer`, and `MemoryTransport`.
+
 ## [2.4.5] - 2026-08-01
 
 ### Fixed

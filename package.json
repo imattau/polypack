@@ -1,6 +1,6 @@
 {
   "name": "@0xx0lostcause0xx0/polypack",
-  "version": "2.4.5",
+  "version": "2.4.6",
   "description": "Generic property graph engine with vector similarity search — extracted from scrollstr's PolyGraph",
   "keywords": [
     "graph",
