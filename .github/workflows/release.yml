@@ -196,6 +196,20 @@ jobs:
             cargo publish -p polypack-core
           fi
         working-directory: crates
+      - name: Publish polypack-graph to crates.io
+        env:
+          CARGO_REGISTRIES_CRATES_IO_TOKEN: ${{ secrets.CRATES_IO_TOKEN || steps.oidc.outputs.oidc_token }}
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN || steps.oidc.outputs.oidc_token }}
+        run: |
+          set -euo pipefail
+          VERSION=$(cargo metadata --no-deps --format-version 1 --manifest-path polypack-graph/Cargo.toml | jq -r '.packages[0].version')
+          test -n "$VERSION" && [ "$VERSION" != "null" ]
+          if curl -sf -A "polypack-release" "https://crates.io/api/v1/crates/polypack-graph/$VERSION" >/dev/null 2>&1; then
+            echo "skip polypack-graph@$VERSION (already published)"
+          else
+            cargo publish -p polypack-graph
+          fi
+        working-directory: crates
 
   wheel-publish:
     needs: release-candidate
