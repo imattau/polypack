@@ -34,7 +34,9 @@ export class PolyGraph {
   protected edges: EdgeIndex = new Map()
   protected nodeToEdgeMap = new Map<string, Set<string>>()
 
+  /** The vector engine (default `VectorIndex`, or the `createVectorIndex` override). Mutating it directly bypasses persistence tracking — call {@link markVectorDirty} afterwards. */
   readonly vectors: VectorIndexLike
+  /** Emits a {@link GraphChangeEvent} per mutation, coalesced by {@link startBatch}/{@link endBatch}. */
   readonly changes = new Subject<GraphChangeEvent>()
   readonly persistence: PersistenceAdapter
   readonly hotCacheMax: number
@@ -60,10 +62,12 @@ export class PolyGraph {
   protected batchDepth = 0
   protected pendingBatchEvents: GraphChangeEvent[] = []
 
+  /** Queue change-event notifications until the matching {@link endBatch}. Nestable. */
   startBatch(): void {
     this.batchDepth++
   }
 
+  /** Flush queued notifications from {@link startBatch}. Throws if no batch is open. */
   endBatch(): void {
     if (this.batchDepth === 0) throw new Error('endBatch without startBatch')
     this.batchDepth--
@@ -113,6 +117,7 @@ export class PolyGraph {
     }, 2000)
   }
 
+  /** Immediately persist queued mutations. Concurrent calls are serialized. */
   async flush(): Promise<void> {
     if (this.flushInFlight) {
       await this.flushInFlight
@@ -232,6 +237,7 @@ export class PolyGraph {
 
   // ── Node CRUD ──
 
+  /** Insert or replace a node. Replacement updates type/vector indexes; data and vector are structured-cloned on entry. */
   addNode(node: PolyNode): void {
     const stored = this.prepareNode(node)
     this.insertNode(stored)
@@ -341,6 +347,7 @@ export class PolyGraph {
    *  subclass decides what to do (clean up, log, ignore). */
   protected onOrphan?(id: string): void
 
+  /** Return a detached snapshot of a currently loaded node. Does not restore evicted nodes; see {@link getNodeSafe}. */
   getNode(id: string): PolyNode | undefined {
     const node = this.nodes.get(id)
     if (node) {
@@ -350,6 +357,7 @@ export class PolyGraph {
     return undefined
   }
 
+  /** Like {@link getNode}, but restores the node from persistence first if it was evicted. */
   async getNodeSafe(id: string): Promise<PolyNode | undefined> {
     if (this.removedNodeIds.has(id)) return undefined
     const node = this.nodes.get(id)
@@ -377,6 +385,7 @@ export class PolyGraph {
     return this.applyDeserialize(clonePolyNode(restored))
   }
 
+  /** Shallow-merge `data` into a loaded node and optionally replace its vector. No-op (returns `undefined`) if the node isn't loaded; see {@link updateNodeSafe}. */
   updateNode(id: string, data: Partial<Record<string, unknown>>, vector?: Float64Array): PolyNode | undefined {
     const node = this.nodes.get(id)
     if (!node) return undefined
@@ -591,6 +600,7 @@ export class PolyGraph {
 
   // ── Edge CRUD ──
 
+  /** Add one directed edge. A no-op if an edge with the same source/type/target already exists (edges are unique per triple). */
   addEdge(source: string, type: string, target: string, data?: Record<string, unknown>, ownership?: EdgeOwnership): void {
     if (!source || !type || !target) throw new TypeError('Edge source, type, and target must not be empty')
     const id = edgeId(source, type, target)
@@ -611,11 +621,17 @@ export class PolyGraph {
     this.emitChange({ type: 'edge_added', edgeId: id, edgeType: type, source, target })
   }
 
+  /**
+   * Mark `id`'s vector for persistence after it was mutated directly through
+   * `vectors` (e.g. `graph.vectors.add(...)`) rather than via `addNode`/
+   * `updateNode`, which schedule persistence themselves.
+   */
   markVectorDirty(id: string): void {
     if (this.vectors.has(id)) this.dirtyVectors.add(id)
     this.schedulePersist()
   }
 
+  /** Detached snapshots of `source`'s outgoing edges, optionally filtered by type. */
   getEdges(source: string, type?: string): EdgeEntry[] {
     const edges = this.edges.get(source)
     if (!edges) return []
@@ -624,12 +640,14 @@ export class PolyGraph {
     return selected.map(edge => ({ ...edge, data: edge.data ? cloneData(edge.data) : undefined }))
   }
 
+  /** IDs of nodes reachable from `source` via outgoing edges of `type`. */
   getEdgeTargets(source: string, type: string): string[] {
     const edges = this.edges.get(source)
     if (!edges) return []
     return [...edges.values()].filter(e => e.type === type).map(e => e.target)
   }
 
+  /** IDs of nodes with an outgoing edge of `type` into `target`. */
   getEdgeSources(target: string, type: string): string[] {
     const sources = this.nodeToEdgeMap.get(target)
     if (!sources) return []
@@ -690,6 +708,7 @@ export class PolyGraph {
 
   // ── Query ──
 
+  /** Create a mutable {@link GraphQuery} over the currently loaded (hot) nodes. */
   query(): GraphQuery {
     return new GraphQuery(this.nodes, this.edges, this.nodeToEdgeMap, this.transform, this.sidecarData)
   }
@@ -748,6 +767,7 @@ export class PolyGraph {
 
   // ── Persistence ──
 
+  /** Write the complete currently loaded graph to the adapter without clearing dirty state. */
   async save(): Promise<void> {
     const nodes: SerializedNode[] = []
     const edges: SerializedEdge[] = []
@@ -788,6 +808,7 @@ export class PolyGraph {
     ])
   }
 
+  /** Alias for {@link warm}. */
   async load(): Promise<void> {
     await this.warm()
   }
@@ -812,6 +833,7 @@ export class PolyGraph {
     }
   }
 
+  /** Load persisted nodes, vectors, and edges. Idempotent — a no-op after the first call until {@link clear} or {@link dispose}. */
   async warm(): Promise<void> {
     if (this._warmed) return
     this._warmed = true
@@ -878,6 +900,7 @@ export class PolyGraph {
 
   // ── Clear / Dispose ──
 
+  /** Clear in-memory state only — does not flush pending mutations or touch the adapter's persisted contents. */
   clear(): void {
     if (this.persistTimer) {
       clearTimeout(this.persistTimer)
@@ -899,6 +922,7 @@ export class PolyGraph {
     this._warmed = false
   }
 
+  /** Flush queued mutations, clear in-memory state, then close the adapter. */
   async dispose(): Promise<void> {
     if (this.persistTimer) {
       clearTimeout(this.persistTimer)
@@ -911,6 +935,7 @@ export class PolyGraph {
 
   // ── Public Query API ──
 
+  /** Detached snapshots of currently loaded nodes of `type`. */
   whereType(type: string): PolyNode[] {
     const ids = this._byType.get(type)
     if (!ids) return []

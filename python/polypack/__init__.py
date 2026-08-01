@@ -346,6 +346,7 @@ class PolyGraph:
     # ── node CRUD ──
 
     def add_node(self, node: Node) -> None:
+        """Insert or replace a node. Replacement updates the vector index; data and vector are copied on entry."""
         _validate_id(node.get("id"), "node id")
         _validate_id(node.get("type"), "node type")
         _validate_timestamp(node.get("insertedAt"))
@@ -371,6 +372,7 @@ class PolyGraph:
             self._removed_vector_ids.add(stored["id"])
 
     def update_node(self, id_: str, data: dict, vector: Any = None) -> Optional[Node]:
+        """Shallow-merge `data` into a loaded node and optionally replace its vector. Returns `None` if the node isn't loaded."""
         node = self._nodes.get(id_)
         if node is None:
             return None
@@ -390,6 +392,9 @@ class PolyGraph:
         return [self.get_node(i) for i in ids if self.get_node(i) is not None]
 
     def remove_node(self, id_: str, _visited: Optional[set] = None) -> None:
+        """Remove `id_` and cascade through 'owned' edges. A target of an 'owned' edge is also
+        removed unless another 'owned' source keeps it alive. Cyclic owned edges are detected
+        so each node is only removed once; `_visited` is an internal recursion argument."""
         visited = _visited if _visited is not None else set()
         if id_ in visited:
             return
@@ -417,6 +422,7 @@ class PolyGraph:
         ownership: Optional[Ownership] = None,
         created_at: Optional[int] = None,
     ) -> None:
+        """Add one directed edge. A no-op if an edge with the same source/type/target already exists."""
         _validate_id(source, "edge source")
         _validate_id(edge_type, "edge type")
         _validate_id(target, "edge target")
@@ -458,6 +464,9 @@ class PolyGraph:
         return sources
 
     def remove_edges(self, source: str, edge_type: Optional[str] = None, target: Optional[str] = None) -> None:
+        """Remove edges from `source` matching `edge_type`/`target` (all outgoing edges if both omitted).
+        'owned' edges cascade-delete their target unless another source also owns it; 'shared' edges
+        invoke `on_orphan` if the target becomes disconnected."""
         edges = self._edges.get(source, {})
         to_remove = [
             (key, e)
@@ -485,9 +494,11 @@ class PolyGraph:
     # ── queries ──
 
     def query(self) -> "GraphQuery":
+        """Create a mutable `GraphQuery` over the currently loaded nodes."""
         return GraphQuery(self)
 
     def clear(self) -> None:
+        """Clear in-memory state only — does not flush pending deletions or touch the attached store."""
         self._nodes.clear()
         self._edges.clear()
         self._incoming.clear()

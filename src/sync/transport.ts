@@ -7,8 +7,7 @@ export interface SyncTransport {
   close(): void
 }
 
-/** Bidirectional in-memory transport for testing / single-process use. */
-/** Asynchronous in-process transport useful for tests and local peers. */
+/** Asynchronous, bidirectional in-memory transport for tests and single-process use. */
 export class MemoryTransport implements SyncTransport {
   private peer: MemoryTransport | null = null
   onMessage: ((msg: SyncMessage) => void) | null = null

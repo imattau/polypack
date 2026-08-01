@@ -228,3 +228,41 @@ function runAdapterTests(label: string, create: () => PersistenceAdapter) {
 
 runAdapterTests('MemoryAdapter', () => new MemoryAdapter())
 runAdapterTests('BinaryStoreAdapter', () => new BinaryStoreAdapter({ storeDir: `test-${++counter}`, compactThreshold: 1000, fileIO: new MemoryFileIO() }))
+
+describe('MemoryAdapter eviction', () => {
+  const makeNode = (id: string): SerializedNode => ({ id, type: 't', data: {}, vector: null, insertedAt: 0, updatedAt: 0 })
+
+  it('evicts the least-recently-put node via direct putNode calls', async () => {
+    const adapter = new MemoryAdapter(2)
+    await adapter.putNode(makeNode('a'))
+    await adapter.putNode(makeNode('b'))
+    await adapter.putNode(makeNode('a')) // re-put bumps 'a' to most-recently-put
+    await adapter.putNode(makeNode('c')) // should evict 'b', not 'a'
+    expect(await adapter.getNode('a')).toBeDefined()
+    expect(await adapter.getNode('b')).toBeUndefined()
+    expect(await adapter.getNode('c')).toBeDefined()
+  })
+
+  it('evicts the least-recently-put node via bulkPutNodes, matching putNode ordering', async () => {
+    const adapter = new MemoryAdapter(2)
+    await adapter.bulkPutNodes([makeNode('a')])
+    await adapter.bulkPutNodes([makeNode('b')])
+    await adapter.bulkPutNodes([makeNode('a')]) // re-put bumps 'a'
+    await adapter.bulkPutNodes([makeNode('c')]) // should evict 'b', not 'a'
+    expect(await adapter.getNode('a')).toBeDefined()
+    expect(await adapter.getNode('b')).toBeUndefined()
+    expect(await adapter.getNode('c')).toBeDefined()
+  })
+
+  it('evicts the least-recently-put node via applyChanges, matching putNode ordering', async () => {
+    const adapter = new MemoryAdapter(2)
+    const emptyChanges = { deleteNodeIds: [], deleteEdgeIds: [], deleteVectorIds: [], putEdges: [], putVectors: [] }
+    await adapter.applyChanges!({ ...emptyChanges, putNodes: [makeNode('a')] })
+    await adapter.applyChanges!({ ...emptyChanges, putNodes: [makeNode('b')] })
+    await adapter.applyChanges!({ ...emptyChanges, putNodes: [makeNode('a')] }) // re-put bumps 'a'
+    await adapter.applyChanges!({ ...emptyChanges, putNodes: [makeNode('c')] }) // should evict 'b', not 'a'
+    expect(await adapter.getNode('a')).toBeDefined()
+    expect(await adapter.getNode('b')).toBeUndefined()
+    expect(await adapter.getNode('c')).toBeDefined()
+  })
+})

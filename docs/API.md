@@ -249,7 +249,10 @@ comparisons reject vectors with mismatched dimensions.
 
 ### Persistence
 
-- `MemoryAdapter` stores serialized records in memory.
+- `MemoryAdapter(maxNodes?)` stores serialized records in memory. When
+  `maxNodes` is set, the least-recently-put node (plus its edges/vector) is
+  evicted once the cap is reached; writing a node again (via `putNode`,
+  `bulkPutNodes`, or `applyChanges`) bumps it back to most-recently-put.
 - `BinaryStoreAdapter({ storeDir, compactThreshold?, fileIO?, syncWrites? })`
   persists data as a MessagePack snapshot plus an append-only write-ahead log
   (WAL). Nodes, edges, and vectors are committed atomically per batch; the WAL

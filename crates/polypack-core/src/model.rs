@@ -8,6 +8,8 @@ fn is_finite_vec(v: &[f64]) -> bool {
     v.iter().all(|x| x.is_finite())
 }
 
+/// A typed property-graph node. Serializes as camelCase JSON matching the
+/// TypeScript `PolyNode`/`SerializedNode` shape (`type` on the wire, `node_type` in Rust).
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Node {
@@ -22,6 +24,8 @@ pub struct Node {
     pub updated_at: i64,
 }
 
+/// A directed property-graph edge. `id` is expected to be [`edge_id`] of
+/// `(source, edge_type, target)`; `validate_edge` checks this invariant.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Edge {
@@ -35,6 +39,7 @@ pub struct Edge {
     pub created_at: i64,
 }
 
+/// A single stored vector, keyed by node id.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct VectorEntry {
@@ -42,6 +47,10 @@ pub struct VectorEntry {
     pub vector: Vec<f64>,
 }
 
+/// One logical commit: puts and deletes across nodes, edges, and vectors,
+/// applied atomically by [`crate::storage::Store::apply`]. Validate with
+/// [`validate_batch`] before applying — all-or-nothing, like the TypeScript
+/// `PersistenceChanges` contract.
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ChangeBatch {

@@ -13,6 +13,13 @@ export class MemoryAdapter implements PersistenceAdapter {
   private nodeOrder = new Map<string, true>()
   private readonly maxNodes: number | undefined
 
+  /**
+   * @param maxNodes When set, evicts the least-recently-put node (and its
+   * edges/vector) once this many nodes are stored. Unbounded by default.
+   * A node's position is bumped to most-recently-put whenever it's written
+   * again, whether through `putNode`/`bulkPutNodes` or `applyChanges` (the
+   * path `PolyGraph.flush()`/`save()` use).
+   */
   constructor(maxNodes?: number) {
     this.maxNodes = maxNodes
   }
@@ -88,7 +95,7 @@ export class MemoryAdapter implements PersistenceAdapter {
     for (const id of changes.deleteNodeIds) { this.unindexNode(id); this.nodes.delete(id); this.nodeOrder.delete(id) }
     for (const id of changes.deleteEdgeIds) { this.unindexEdge(id); this.edges.delete(id) }
     for (const id of changes.deleteVectorIds) this.vectors.delete(id)
-    for (const node of changes.putNodes) { this.indexNode(node); this.nodes.set(node.id, node); this.nodeOrder.set(node.id, true) }
+    for (const node of changes.putNodes) { this.indexNode(node); this.nodes.set(node.id, node); this.touchNode(node.id) }
     for (const edge of changes.putEdges) { this.edges.set(edge.id, edge); this.indexEdge(edge) }
     for (const entry of changes.putVectors) this.vectors.set(entry.id, entry.vector)
     this.evictIfOverCap()

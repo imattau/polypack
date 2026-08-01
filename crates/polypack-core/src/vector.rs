@@ -6,6 +6,7 @@
 use crate::error::{PolypackError, Result};
 use std::collections::HashMap;
 
+/// Cosine similarity in `[0, 1]` (`0` for a zero vector). Errs on dimension mismatch.
 pub fn cosine(a: &[f64], b: &[f64]) -> Result<f64> {
     if a.len() != b.len() {
         return Err(PolypackError::DimensionMismatch { expected: a.len(), got: b.len() });
@@ -22,6 +23,7 @@ pub fn cosine(a: &[f64], b: &[f64]) -> Result<f64> {
     Ok(if denom == 0.0 { 0.0 } else { dot / denom })
 }
 
+/// Euclidean distance converted to a `[0, 1]` similarity (`1 / (1 + distance)`). Errs on dimension mismatch.
 pub fn euclidean(a: &[f64], b: &[f64]) -> Result<f64> {
     if a.len() != b.len() {
         return Err(PolypackError::DimensionMismatch { expected: a.len(), got: b.len() });
@@ -34,12 +36,14 @@ pub fn euclidean(a: &[f64], b: &[f64]) -> Result<f64> {
     Ok(1.0 / (1.0 + sum.sqrt()))
 }
 
+/// Which similarity function an index scores vectors with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DistanceFn {
     Cosine,
     Euclidean,
 }
 
+/// A query result: a node id with its similarity score (higher is better).
 #[derive(Debug, Clone)]
 pub struct ScoredId {
     pub id: String,

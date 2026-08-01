@@ -28,10 +28,10 @@ const EDGE_OPS: Record<string, SyncOp['kind']> = {
 }
 
 /**
- * Syncs a local PolyGraph with a remote server by subscribing to graph
- * change events and forwarding mutations through a transport.
+ * Syncs a local PolyGraph with a remote server: subscribes to graph change
+ * events, forwards mutations through a transport, and applies remote
+ * operations back onto the graph without echoing them.
  */
-/** Captures local graph changes and applies remote operations without echoing them. */
 export class SyncClient {
   private graph: PolyGraph
   private transport!: SyncTransport
@@ -234,6 +234,7 @@ export class SyncClient {
     })
   }
 
+  /** Last server op sequence this client has caught up to. */
   get syncCursor(): number {
     return this.serverCursor
   }
@@ -253,6 +254,7 @@ export class SyncClient {
     this.requestSync()
   }
 
+  /** Stop retrying, unsubscribe from graph changes, and close the transport. */
   disconnect(): void {
     if (this.retryTimer) clearTimeout(this.retryTimer)
     this.retryTimer = null

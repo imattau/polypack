@@ -14,6 +14,7 @@ export class OpLog {
     }
   }
 
+  /** Record a new op, stamping it with the next sequence number, this client's id, and the current time. */
   append(kind: SyncOp['kind'], payload: Record<string, unknown>): SyncOp {
     const op: SyncOp = {
       seq: this.nextSeq++,

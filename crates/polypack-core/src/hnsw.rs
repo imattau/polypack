@@ -12,9 +12,13 @@ use std::collections::{BinaryHeap, HashMap, HashSet};
 
 #[derive(Debug, Clone, Copy)]
 pub struct HnswConfig {
+    /// Max graph connections per node above layer 0. Higher = better recall, more memory.
     pub m: usize,
+    /// Max connections per node at layer 0 (usually `2*m`).
     pub mmax0: usize,
+    /// Candidate list size while inserting. Higher = better graph quality, slower builds.
     pub ef_construction: usize,
+    /// Candidate list size while querying. Higher = better recall, slower queries.
     pub ef_search: usize,
 }
 
@@ -29,6 +33,7 @@ impl Default for HnswConfig {
     }
 }
 
+/// A query result: a node id with its similarity score (higher is better).
 #[derive(Debug, Clone, PartialEq)]
 pub struct ScoredId {
     pub id: String,
@@ -73,6 +78,8 @@ impl LevelRng {
     }
 }
 
+/// Approximate, update-safe HNSW vector index. See the module docs for the
+/// remove/update semantics that differ from a naive HNSW implementation.
 pub struct HnswIndex {
     nodes: HashMap<String, Vec<f64>>,
     node_level: HashMap<String, u32>,

@@ -101,10 +101,17 @@ fn numeric_field(node: &Node, field: &str) -> f64 {
     node.data.get(field).and_then(|v| v.as_f64()).filter(|x| x.is_finite()).unwrap_or(0.0)
 }
 
+/// How far a write is guaranteed to survive. Only `Fsync` changes `Store`'s
+/// own behavior (it calls `Storage::sync`/`sync_dir` after WAL appends and
+/// snapshot writes); `Memory` and `Process` otherwise depend entirely on
+/// what the attached `Storage` implementation actually does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Durability {
+    /// Not persisted at all (e.g. `InMemoryStorage`).
     Memory,
+    /// Written to the OS but not fsynced — survives process crash, not power loss. Default.
     Process,
+    /// fsynced to disk after every WAL append and snapshot write — survives power loss, at a throughput cost.
     Fsync,
 }
 
@@ -126,6 +133,9 @@ pub trait Storage: Send + Sync {
     }
 }
 
+/// A `Storage` implementation that never touches disk. Useful for tests and
+/// ephemeral graphs; wrap in `Arc<Mutex<_>>` (a `Storage` impl is provided)
+/// to share it across threads.
 #[derive(Default)]
 pub struct InMemoryStorage {
     files: HashMap<String, Vec<u8>>,
@@ -209,6 +219,10 @@ impl Storage for InMemoryStorage {
 }
 
 pub struct StoreConfig {
+    /// Minimum WAL-entry count at which compaction is scheduled. Acts as a
+    /// lower bound — the effective threshold also grows with the store
+    /// (`max(compact_threshold, records / COMPACT_RATIO)`), so a large store
+    /// doesn't rewrite its snapshot on every batch. Default 10,000.
     pub compact_threshold: usize,
     pub durability: Durability,
 }
@@ -222,6 +236,9 @@ impl Default for StoreConfig {
     }
 }
 
+/// The persistence state machine: an in-memory graph backed by a snapshot +
+/// WAL on a `Storage` implementation. See the module docs for the
+/// load/apply/compact/close lifecycle.
 pub struct Store {
     nodes: HashMap<String, Node>,
     edges: HashMap<String, Edge>,
@@ -522,6 +539,7 @@ impl Store {
         Ok(())
     }
 
+    /// Delete all nodes, edges, and vectors, writing an empty snapshot and truncating the WAL.
     pub fn clear_all(&mut self) -> Result<()> {
         self.ensure_loaded()?;
         self.nodes.clear();
@@ -536,6 +554,7 @@ impl Store {
         Ok(())
     }
 
+    /// Compact and mark the store closed. Idempotent — safe to call repeatedly.
     pub fn close(&mut self) -> Result<()> {
         if self.closed {
             return Ok(());

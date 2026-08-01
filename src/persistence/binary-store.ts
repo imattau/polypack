@@ -13,8 +13,16 @@ const DEFAULT_COMPACT_THRESHOLD = 10_000
 const COMPACT_RATIO = 4
 
 export interface BinaryStoreConfig {
+  /** Directory holding `snapshot.msgpack` and `wal.msgpack`. */
   storeDir: string
+  /**
+   * Minimum WAL-entry count at which compaction is scheduled (default
+   * 10,000). Acts as a lower bound — the effective threshold also grows with
+   * the store (`max(compactThreshold, records / 4)`) so a large store
+   * doesn't rewrite its snapshot on every batch.
+   */
   compactThreshold?: number
+  /** Byte-storage backend. Defaults to a platform-appropriate implementation created at first use. */
   fileIO?: FileIO
   /** fsync WAL appends and snapshot writes. Off by default; see durability docs. */
   syncWrites?: boolean
@@ -27,6 +35,15 @@ interface ResolvedBinaryStoreConfig {
   syncWrites: boolean
 }
 
+/**
+ * Persists nodes, edges, and vectors as a MessagePack snapshot plus an
+ * append-only write-ahead log. Nodes, edges, and vectors are committed
+ * atomically per batch via {@link applyChanges}; the WAL is compacted into a
+ * fresh snapshot once it passes an adaptive threshold and on {@link close}.
+ * Startup replays the WAL, then writes a snapshot before deleting it, so a
+ * crash between those two steps loses nothing; a truncated WAL tail from a
+ * mid-append crash is also tolerated.
+ */
 export class BinaryStoreAdapter implements PersistenceAdapter {
   private nodes = new Map<string, SerializedNode>()
   private edges = new Map<string, SerializedEdge>()

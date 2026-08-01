@@ -1,5 +1,6 @@
 import type { PolyNode } from './types.js'
 
+/** Yield to the event loop (a zero-delay timer) so pending UI work/renders can run between large synchronous batches. */
 export function yieldToUI(): Promise<void> {
   return new Promise(r => setTimeout(r, 0))
 }
@@ -30,6 +31,7 @@ export function assertFiniteVector(vector: ArrayLike<number>, name = 'vector'): 
   }
 }
 
+/** Persistence key for an edge. `source` and `type` must not contain `::` (the separator); `target` may. */
 export function edgeId(source: string, type: string, target: string): string {
   if (source.includes('::') || type.includes('::')) {
     throw new RangeError('Edge source and type must not contain "::"')

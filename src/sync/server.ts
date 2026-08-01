@@ -7,9 +7,8 @@ export type SyncServerClient = {
 
 /**
  * Simple relay server. Receives ops from clients, stores them in an
- * in-memory op log, and broadcasts to all other connected clients.
+ * in-memory op log, and broadcasts them to all other connected clients.
  */
-/** In-memory relay that broadcasts received operations to all other clients. */
 export class SyncServer {
   private opLog: SyncOp[] = []
   private seenOps = new Set<string>()
@@ -73,6 +72,7 @@ export class SyncServer {
     }
   }
 
+  /** Every operation the server has accepted, in order. */
   get ops(): readonly SyncOp[] {
     return this.opLog
   }

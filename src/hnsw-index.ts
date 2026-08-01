@@ -3,9 +3,13 @@ import type { DistanceFunction, VectorIndexLike } from './vector-index.js'
 import { assertFiniteVector, assertNonNegativeInteger } from './utils.js'
 
 export interface HNSWConfig {
+  /** Max graph connections per node above layer 0. Higher = better recall, more memory. Default 16. */
   M?: number
+  /** Max connections per node at layer 0 (usually `2*M`). Default 32. */
   Mmax0?: number
+  /** Candidate list size while inserting. Higher = better graph quality, slower builds. Default 200. */
   efConstruction?: number
+  /** Candidate list size while querying. Higher = better recall, slower queries. Default 200. */
   efSearch?: number
 }
 
@@ -21,6 +25,12 @@ const DEF: Required<HNSWConfig> = {
   efSearch: 200,
 }
 
+/**
+ * Approximate, update-safe HNSW vector index — a faster alternative to
+ * `VectorIndex` for large datasets, at the cost of exact recall. Unlike
+ * naive HNSW implementations, `remove`/`update` physically unlink nodes
+ * (no tombstones) so repeated churn doesn't degrade the graph.
+ */
 export class HNSWIndex implements VectorIndexLike {
   private nodes = new Map<string, Float64Array>()
   private nodeLevel = new Map<string, number>()
