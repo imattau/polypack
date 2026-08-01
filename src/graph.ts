@@ -232,6 +232,31 @@ export class PolyGraph {
   // ── Node CRUD ──
 
   addNode(node: PolyNode): void {
+    const stored = this.prepareNode(node)
+    this.insertNode(stored)
+    this.schedulePersist()
+  }
+
+  /**
+   * Add several nodes in a single call. All nodes are validated before any are
+   * inserted (an invalid entry inserts nothing), change events are coalesced
+   * into one flush, and the persistence debounce is scheduled once for the
+   * whole batch. Prefer this over a loop of `addNode` for large inserts.
+   */
+  addNodes(nodes: PolyNode[]): void {
+    if (nodes.length === 0) return
+    const prepared = new Array<PolyNode>(nodes.length)
+    for (let i = 0; i < nodes.length; i++) prepared[i] = this.prepareNode(nodes[i])
+    this.startBatch()
+    try {
+      for (const stored of prepared) this.insertNode(stored)
+    } finally {
+      this.endBatch()
+    }
+    this.schedulePersist()
+  }
+
+  protected prepareNode(node: PolyNode): PolyNode {
     if (!node.id) throw new TypeError('Node id must not be empty')
     if (!node.type) throw new TypeError('Node type must not be empty')
     if (!Number.isFinite(node.insertedAt) || node.insertedAt < 0 ||
@@ -240,7 +265,10 @@ export class PolyGraph {
     }
     if (node.vector) assertFiniteVector(node.vector)
     const serializedData = this.applySerialize(node.id, node.data as Record<string, unknown>)
-    const stored = clonePolyNode({ ...node, data: serializedData })
+    return clonePolyNode({ ...node, data: serializedData })
+  }
+
+  protected insertNode(stored: PolyNode): void {
     const previous = this.nodes.get(stored.id)
     if (previous) {
       this.unindexNode(stored.id)
@@ -253,7 +281,7 @@ export class PolyGraph {
     this.removedNodeIds.delete(stored.id)
     this.nodes.set(stored.id, stored)
     this.touchHotCache(stored.id)
-    this.markDirty(stored.id)
+    this.dirtyNodes.add(stored.id)
     this.indexNode(stored)
     if (stored.vector) {
       this.removedVectorIds.delete(stored.id)
@@ -909,6 +937,7 @@ export class PolyGraph {
 
   /** Number of nodes currently stored by the persistence adapter. */
   async persistedSize(): Promise<number> {
+    if (this.persistence.countNodes) return this.persistence.countNodes({})
     return (await this.persistence.allNodeIds()).length
   }
 

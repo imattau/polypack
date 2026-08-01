@@ -10,3 +10,6 @@ __pycache__/
 *.so
 *.egg-info/
 *.node
+
+# Large-db example store
+.polypack-large-db/

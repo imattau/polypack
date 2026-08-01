@@ -7,11 +7,99 @@ use crate::error::{PolypackError, Result};
 use crate::model::{ChangeBatch, Edge, Node};
 use crate::storage::format::{decode_snapshot, decode_wal, encode_snapshot, encode_wal};
 use crate::storage::wal::WalEntry;
-use std::collections::HashMap;
+use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
 
 pub const SNAPSHOT_FILE: &str = "snapshot.msgpack";
 pub const WAL_FILE: &str = "wal.msgpack";
 pub const DEFAULT_COMPACT_THRESHOLD: usize = 10_000;
+/// Compact once the WAL holds at least this share of the store's record count.
+const COMPACT_RATIO: usize = 4;
+
+/// Numeric-range predicate used by [`NodeQuery`], matching the TypeScript
+/// `PersistedNodeQuery.attributeRanges` semantics (exclusive bounds).
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct RangeQuery {
+    #[serde(default)]
+    pub above: Option<f64>,
+    #[serde(default)]
+    pub below: Option<f64>,
+}
+
+/// Sort order used by [`NodeQuery`], mirroring `PersistedNodeQuery.orderBy`.
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct OrderBy {
+    pub field: String,
+    /// "asc" | "desc"
+    pub direction: String,
+}
+
+/// Storage-level node predicate mirroring the TypeScript
+/// `PersistedNodeQuery`. `attributes` match `node.data`, except the special
+/// key `"type"` which matches `node.node_type`.
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct NodeQuery {
+    #[serde(default)]
+    pub node_types: Option<Vec<String>>,
+    #[serde(default)]
+    pub attributes: Option<serde_json::Map<String, serde_json::Value>>,
+    #[serde(default)]
+    pub attribute_ranges: Option<HashMap<String, RangeQuery>>,
+    #[serde(default)]
+    pub order_by: Option<OrderBy>,
+    #[serde(default)]
+    pub offset: Option<usize>,
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+fn node_field(node: &Node, field: &str) -> serde_json::Value {
+    if field == "type" {
+        serde_json::Value::String(node.node_type.clone())
+    } else {
+        node.data.get(field).cloned().unwrap_or(serde_json::Value::Null)
+    }
+}
+
+fn matches_node(node: &Node, query: &NodeQuery) -> bool {
+    if let Some(types) = &query.node_types {
+        if !types.iter().any(|t| t == &node.node_type) {
+            return false;
+        }
+    }
+    if let Some(attributes) = &query.attributes {
+        for (key, expected) in attributes {
+            if &node_field(node, key) != expected {
+                return false;
+            }
+        }
+    }
+    if let Some(ranges) = &query.attribute_ranges {
+        for (key, range) in ranges {
+            let Some(value) = node.data.get(key).and_then(|v| v.as_f64()) else {
+                return false;
+            };
+            if let Some(above) = range.above {
+                if value <= above {
+                    return false;
+                }
+            }
+            if let Some(below) = range.below {
+                if value >= below {
+                    return false;
+                }
+            }
+        }
+    }
+    true
+}
+
+fn numeric_field(node: &Node, field: &str) -> f64 {
+    node.data.get(field).and_then(|v| v.as_f64()).filter(|x| x.is_finite()).unwrap_or(0.0)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Durability {
@@ -138,6 +226,9 @@ pub struct Store {
     nodes: HashMap<String, Node>,
     edges: HashMap<String, Edge>,
     vectors: HashMap<String, Vec<f64>>,
+    by_type: HashMap<String, HashSet<String>>,
+    edges_by_source: HashMap<String, HashSet<String>>,
+    edges_by_target: HashMap<String, HashSet<String>>,
     wal_entry_count: usize,
     config: StoreConfig,
     storage: Box<dyn Storage>,
@@ -151,12 +242,100 @@ impl Store {
             nodes: HashMap::new(),
             edges: HashMap::new(),
             vectors: HashMap::new(),
+            by_type: HashMap::new(),
+            edges_by_source: HashMap::new(),
+            edges_by_target: HashMap::new(),
             wal_entry_count: 0,
             config,
             storage,
             closed: false,
             loaded: false,
         }
+    }
+
+    // ── secondary indexes ──
+
+    fn index_node(&mut self, node: &Node) {
+        self.by_type
+            .entry(node.node_type.clone())
+            .or_default()
+            .insert(node.id.clone());
+    }
+
+    fn unindex_node(&mut self, id: &str) {
+        let type_key = self.nodes.get(id).map(|n| n.node_type.clone());
+        if let Some(t) = type_key {
+            if let Some(ids) = self.by_type.get_mut(&t) {
+                ids.remove(id);
+                if ids.is_empty() {
+                    self.by_type.remove(&t);
+                }
+            }
+        }
+    }
+
+    fn index_edge(&mut self, edge: &Edge) {
+        self.edges_by_source
+            .entry(edge.source.clone())
+            .or_default()
+            .insert(edge.id.clone());
+        self.edges_by_target
+            .entry(edge.target.clone())
+            .or_default()
+            .insert(edge.id.clone());
+    }
+
+    fn unindex_edge(&mut self, id: &str) {
+        let edge = self.edges.get(id);
+        let Some(edge) = edge else { return };
+        if let Some(ids) = self.edges_by_source.get_mut(&edge.source) {
+            ids.remove(id);
+            if ids.is_empty() {
+                self.edges_by_source.remove(&edge.source);
+            }
+        }
+        if let Some(ids) = self.edges_by_target.get_mut(&edge.target) {
+            ids.remove(id);
+            if ids.is_empty() {
+                self.edges_by_target.remove(&edge.target);
+            }
+        }
+    }
+
+    fn rebuild_indexes(&mut self) {
+        self.by_type.clear();
+        self.edges_by_source.clear();
+        self.edges_by_target.clear();
+        let nodes: Vec<Node> = self.nodes.values().cloned().collect();
+        for node in &nodes {
+            self.index_node(node);
+        }
+        let edges: Vec<Edge> = self.edges.values().cloned().collect();
+        for edge in &edges {
+            self.index_edge(edge);
+        }
+    }
+
+    /// Effective WAL compaction threshold, grown with the store to keep total
+    /// compaction work linear in writes instead of quadratic.
+    fn effective_compact_threshold(&self) -> usize {
+        let records = self.nodes.len() + self.edges.len() + self.vectors.len();
+        self.config.compact_threshold.max(records / COMPACT_RATIO)
+    }
+
+    /// Candidate node ids for a query when only the type index is needed.
+    fn type_only_ids(&self, query: &NodeQuery) -> Option<HashSet<String>> {
+        let types = query.node_types.as_ref()?;
+        if query.attributes.is_some() || query.attribute_ranges.is_some() {
+            return None;
+        }
+        let mut ids = HashSet::new();
+        for t in types {
+            if let Some(set) = self.by_type.get(t) {
+                ids.extend(set.iter().cloned());
+            }
+        }
+        Some(ids)
     }
 
     pub fn assert_open(&self) -> Result<()> {
@@ -185,6 +364,7 @@ impl Store {
                 self.wal_entry_count = 0;
             }
         }
+        self.rebuild_indexes();
         Ok(())
     }
 
@@ -200,15 +380,19 @@ impl Store {
     fn replay(&mut self, entry: WalEntry) {
         match entry {
             WalEntry::PutNode(node) => {
-                self.nodes.insert(node.id.clone(), node);
+                self.nodes.insert(node.id.clone(), node.clone());
+                self.index_node(&node);
             }
             WalEntry::DeleteNode(id) => {
+                self.unindex_node(&id);
                 self.nodes.remove(&id);
             }
             WalEntry::PutEdge(edge) => {
-                self.edges.insert(edge.id.clone(), edge);
+                self.edges.insert(edge.id.clone(), edge.clone());
+                self.index_edge(&edge);
             }
             WalEntry::DeleteEdge(id) => {
+                self.unindex_edge(&id);
                 self.edges.remove(&id);
             }
             WalEntry::PutVector { id, vector } => {
@@ -221,6 +405,9 @@ impl Store {
                 self.nodes.clear();
                 self.edges.clear();
                 self.vectors.clear();
+                self.by_type.clear();
+                self.edges_by_source.clear();
+                self.edges_by_target.clear();
             }
         }
     }
@@ -302,9 +489,11 @@ impl Store {
         // WAL entries are durable (or at least accepted by the host); it is
         // now safe to mutate in-memory state to match.
         for id in &changes.delete_node_ids {
+            self.unindex_node(id);
             self.nodes.remove(id);
         }
         for id in &changes.delete_edge_ids {
+            self.unindex_edge(id);
             self.edges.remove(id);
         }
         for id in &changes.delete_vector_ids {
@@ -312,15 +501,17 @@ impl Store {
         }
         for node in &changes.put_nodes {
             self.nodes.insert(node.id.clone(), node.clone());
+            self.index_node(node);
         }
         for edge in &changes.put_edges {
             self.edges.insert(edge.id.clone(), edge.clone());
+            self.index_edge(edge);
         }
         for v in &changes.put_vectors {
             self.vectors.insert(v.id.clone(), v.vector.clone());
         }
         self.wal_entry_count += entries.len();
-        if self.wal_entry_count >= self.config.compact_threshold {
+        if self.wal_entry_count >= self.effective_compact_threshold() {
             self.compact()?;
         }
         Ok(())
@@ -331,6 +522,9 @@ impl Store {
         self.nodes.clear();
         self.edges.clear();
         self.vectors.clear();
+        self.by_type.clear();
+        self.edges_by_source.clear();
+        self.edges_by_target.clear();
         self.wal_entry_count = 0;
         self.write_snapshot()?;
         self.storage.write(WAL_FILE, &[])?;
@@ -353,6 +547,108 @@ impl Store {
     pub fn node_ids(&mut self) -> Result<Vec<String>> {
         self.ensure_loaded()?;
         Ok(self.nodes.keys().cloned().collect())
+    }
+
+    /// Number of nodes in the store, without materialising ids.
+    pub fn node_count(&mut self) -> Result<usize> {
+        self.ensure_loaded()?;
+        Ok(self.nodes.len())
+    }
+
+    /// Query nodes against the store's secondary type index and full-scan
+    /// fallback, mirroring the TypeScript adapter's `queryNodes`.
+    pub fn query_nodes(&mut self, query: &NodeQuery) -> Result<Vec<Node>> {
+        self.ensure_loaded()?;
+        let candidate_ids: Vec<String> = match self.type_only_ids(query) {
+            Some(ids) => ids.into_iter().collect(),
+            None => self.nodes.keys().cloned().collect(),
+        };
+        let mut results: Vec<Node> = candidate_ids
+            .iter()
+            .filter_map(|id| self.nodes.get(id))
+            .filter(|n| matches_node(n, query))
+            .cloned()
+            .collect();
+        if let Some(order) = &query.order_by {
+            results.sort_by(|a, b| {
+                let av = numeric_field(a, &order.field);
+                let bv = numeric_field(b, &order.field);
+                let ord = av.partial_cmp(&bv).unwrap_or(std::cmp::Ordering::Equal);
+                if order.direction == "desc" {
+                    ord.reverse()
+                } else {
+                    ord
+                }
+            });
+        }
+        if let Some(offset) = query.offset {
+            results = results.into_iter().skip(offset).collect();
+        }
+        if let Some(limit) = query.limit {
+            results.truncate(limit);
+        }
+        Ok(results)
+    }
+
+    /// Count nodes matching `query`, with type-index and empty-query fast
+    /// paths mirroring the TypeScript adapter's `countNodes`.
+    pub fn count_nodes(&mut self, query: &NodeQuery) -> Result<usize> {
+        self.ensure_loaded()?;
+        let no_filters =
+            query.node_types.is_none() && query.attributes.is_none() && query.attribute_ranges.is_none();
+        let count = if no_filters {
+            self.nodes.len()
+        } else if let Some(ids) = self.type_only_ids(query) {
+            ids.len()
+        } else {
+            self.nodes.values().filter(|n| matches_node(n, query)).count()
+        };
+        let after_offset = match query.offset {
+            None => count,
+            Some(offset) => count.saturating_sub(offset),
+        };
+        Ok(match query.limit {
+            None => after_offset,
+            Some(limit) => after_offset.min(limit),
+        })
+    }
+
+    /// Edges from the given sources, using the source index.
+    pub fn get_edges_by_sources(&mut self, sources: &[String], edge_type: Option<&str>) -> Result<Vec<Edge>> {
+        self.ensure_loaded()?;
+        let mut out = Vec::new();
+        let mut seen = HashSet::new();
+        for source in sources {
+            if let Some(ids) = self.edges_by_source.get(source) {
+                for id in ids {
+                    if let Some(edge) = self.edges.get(id) {
+                        if edge_type.map_or(true, |t| t == edge.edge_type) && seen.insert(edge.id.clone()) {
+                            out.push(edge.clone());
+                        }
+                    }
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Edges targeting the given nodes, using the target index.
+    pub fn get_edges_by_targets(&mut self, targets: &[String], edge_type: Option<&str>) -> Result<Vec<Edge>> {
+        self.ensure_loaded()?;
+        let mut out = Vec::new();
+        let mut seen = HashSet::new();
+        for target in targets {
+            if let Some(ids) = self.edges_by_target.get(target) {
+                for id in ids {
+                    if let Some(edge) = self.edges.get(id) {
+                        if edge_type.map_or(true, |t| t == edge.edge_type) && seen.insert(edge.id.clone()) {
+                            out.push(edge.clone());
+                        }
+                    }
+                }
+            }
+        }
+        Ok(out)
     }
 
     pub fn get_node(&mut self, id: &str) -> Result<Option<Node>> {
@@ -520,5 +816,195 @@ mod tests {
         s.close().unwrap();
         let mut s2 = Store::new(Box::new(storage.clone()), StoreConfig::default());
         assert!(s2.node_ids().unwrap().is_empty());
+    }
+
+    fn book(id: &str, genre: &str, price: f64) -> Node {
+        Node {
+            id: id.into(),
+            node_type: "book".into(),
+            data: serde_json::json!({ "genre": genre, "price": price })
+                .as_object()
+                .cloned()
+                .unwrap(),
+            vector: None,
+            inserted_at: 1,
+            updated_at: 1,
+        }
+    }
+
+    #[test]
+    fn counts_and_queries_nodes_via_type_index() {
+        let storage = shared();
+        let mut s = Store::new(Box::new(storage.clone()), StoreConfig::default());
+        s.apply(&batch(&[
+            book("a", "sci-fi", 20.0),
+            book("b", "sci-fi", 10.0),
+            book("c", "fantasy", 15.0),
+        ]))
+        .unwrap();
+        s.apply(&batch(&[node("u")])).unwrap();
+        // u is type "doc" (node() helper); add a genuine user type via put
+        s.apply(&ChangeBatch {
+            put_nodes: vec![Node {
+                id: "u2".into(),
+                node_type: "user".into(),
+                data: Default::default(),
+                vector: None,
+                inserted_at: 1,
+                updated_at: 1,
+            }],
+            ..Default::default()
+        })
+        .unwrap();
+
+        assert_eq!(s.node_count().unwrap(), 5);
+        assert_eq!(s.count_nodes(&NodeQuery::default()).unwrap(), 5);
+        assert_eq!(
+            s.count_nodes(&NodeQuery { node_types: Some(vec!["book".into()]), ..Default::default() })
+                .unwrap(),
+            3
+        );
+
+        // attribute + range + order + pagination
+        let q = NodeQuery {
+            node_types: Some(vec!["book".into()]),
+            attributes: Some(serde_json::json!({ "genre": "sci-fi" }).as_object().cloned().unwrap()),
+            attribute_ranges: Some(HashMap::from([(
+                "price".into(),
+                RangeQuery { above: Some(5.0), below: Some(25.0) },
+            )])),
+            order_by: Some(OrderBy { field: "price".into(), direction: "asc".into() }),
+            ..Default::default()
+        };
+        let nodes = s.query_nodes(&q).unwrap();
+        assert_eq!(nodes.iter().map(|n| n.id.as_str()).collect::<Vec<_>>(), vec!["b", "a"]);
+        assert_eq!(s.count_nodes(&q).unwrap(), 2);
+
+        // offset/limit
+        let page = s
+            .query_nodes(&NodeQuery {
+                node_types: Some(vec!["book".into()]),
+                offset: Some(1),
+                limit: Some(1),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(page.len(), 1);
+        assert_eq!(s.count_nodes(&NodeQuery { node_types: Some(vec!["book".into()]), limit: Some(1), ..Default::default() }).unwrap(), 1);
+
+        // type index survives delete/re-put
+        s.apply(&ChangeBatch { delete_node_ids: vec!["a".into()], ..Default::default() }).unwrap();
+        assert_eq!(s.count_nodes(&NodeQuery { node_types: Some(vec!["book".into()]), ..Default::default() }).unwrap(), 2);
+        s.apply(&batch(&[book("a", "sci-fi", 20.0)])).unwrap();
+        assert_eq!(s.count_nodes(&NodeQuery { node_types: Some(vec!["book".into()]), ..Default::default() }).unwrap(), 3);
+
+        // indexes are rebuilt after reopen from the persisted store
+        s.close().unwrap();
+        let mut s2 = Store::new(Box::new(storage.clone()), StoreConfig::default());
+        assert_eq!(s2.count_nodes(&NodeQuery { node_types: Some(vec!["book".into()]), ..Default::default() }).unwrap(), 3);
+        assert_eq!(s2.count_nodes(&NodeQuery { node_types: Some(vec!["user".into()]), ..Default::default() }).unwrap(), 1);
+    }
+
+    #[test]
+    fn edges_by_source_and_target_indexes() {
+        let storage = shared();
+        let mut s = Store::new(Box::new(storage.clone()), StoreConfig::default());
+        let edge = |id: &str, source: &str, target: &str, etype: &str| Edge {
+            id: id.into(),
+            source: source.into(),
+            target: target.into(),
+            edge_type: etype.into(),
+            data: None,
+            created_at: 1,
+        };
+        s.apply(&ChangeBatch {
+            put_edges: vec![
+                edge("a::R::b", "a", "b", "R"),
+                edge("a::S::c", "a", "c", "S"),
+                edge("d::R::b", "d", "b", "R"),
+            ],
+            ..Default::default()
+        })
+        .unwrap();
+
+        let by_source = s.get_edges_by_sources(&["a".into()], Some("R")).unwrap();
+        assert_eq!(by_source.iter().map(|e| e.id.as_str()).collect::<Vec<_>>(), vec!["a::R::b"]);
+        let mut by_target = s.get_edges_by_targets(&["b".into()], Some("R")).unwrap();
+        by_target.sort_by(|a, b| a.id.cmp(&b.id));
+        assert_eq!(
+            by_target.iter().map(|e| e.id.as_str()).collect::<Vec<_>>(),
+            vec!["a::R::b", "d::R::b"]
+        );
+
+        // delete keeps the indexes consistent
+        s.apply(&ChangeBatch { delete_edge_ids: vec!["a::R::b".into()], ..Default::default() })
+            .unwrap();
+        assert_eq!(s.get_edges_by_sources(&["a".into()], None).unwrap().len(), 1);
+        assert_eq!(s.get_edges_by_targets(&["b".into()], None).unwrap().len(), 1);
+        assert_eq!(
+            s.get_edges_by_targets(&["b".into()], Some("R")).unwrap()[0].id,
+            "d::R::b"
+        );
+
+        s.close().unwrap();
+        let mut s2 = Store::new(Box::new(storage.clone()), StoreConfig::default());
+        assert_eq!(s2.get_edges_by_sources(&["a".into()], None).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn grows_compaction_threshold_with_store() {
+        let snapshots = Arc::new(Mutex::new(0usize));
+
+        struct CountingStorage {
+            inner: InMemoryStorage,
+            snapshots: Arc<Mutex<usize>>,
+        }
+        impl Storage for CountingStorage {
+            fn read(&self, name: &str) -> Result<Option<Vec<u8>>> {
+                self.inner.read(name)
+            }
+            fn write(&mut self, name: &str, data: &[u8]) -> Result<()> {
+                if name == SNAPSHOT_FILE {
+                    *self.snapshots.lock().unwrap() += 1;
+                }
+                self.inner.write(name, data)
+            }
+            fn append(&mut self, name: &str, data: &[u8]) -> Result<()> {
+                self.inner.append(name, data)
+            }
+            fn delete(&mut self, name: &str) -> Result<()> {
+                self.inner.delete(name)
+            }
+            fn exists(&self, name: &str) -> Result<bool> {
+                self.inner.exists(name)
+            }
+        }
+
+        let storage = CountingStorage {
+            inner: InMemoryStorage::new(),
+            snapshots: snapshots.clone(),
+        };
+        let config = StoreConfig { compact_threshold: 2, ..Default::default() };
+        let mut s = Store::new(Box::new(storage), StoreConfig { compact_threshold: 2, ..Default::default() });
+        // A naive fixed threshold of 2 would rewrite the snapshot ~21 times for
+        // 40 single-node applies; the adaptive max(2, records/4) keeps it lower.
+        for i in 0..40 {
+            s.apply(&batch(&[node(&format!("n{i}"))])).unwrap();
+        }
+        s.close().unwrap();
+        let writes = *snapshots.lock().unwrap();
+        assert!(writes > 1, "compaction must still run");
+        assert!(writes < 15, "adaptive threshold must slow compaction: got {writes}");
+
+        // Verify the adaptive path keeps data intact within a store lifetime.
+        let mut s3 = Store::new(
+            Box::new(CountingStorage { inner: InMemoryStorage::new(), snapshots: snapshots.clone() }),
+            config,
+        );
+        for i in 0..40 {
+            s3.apply(&batch(&[node(&format!("n{i}"))])).unwrap();
+        }
+        assert_eq!(s3.node_count().unwrap(), 40);
+        s3.close().unwrap();
     }
 }

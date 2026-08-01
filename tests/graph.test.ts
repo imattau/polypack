@@ -150,6 +150,69 @@ describe('PolyGraph', () => {
     })
   })
 
+  describe('addNodes batch', () => {
+    it('adds all nodes and keeps the type/vector indexes consistent', () => {
+      graph.addNodes([
+        { id: 'a', type: 'book', data: { genre: 'sci-fi' }, vector: new Float64Array([1, 0]), insertedAt: 1, updatedAt: 1 },
+        { id: 'b', type: 'book', data: { genre: 'fantasy' }, vector: new Float64Array([0, 1]), insertedAt: 2, updatedAt: 2 },
+        { id: 'c', type: 'user', data: {}, insertedAt: 3, updatedAt: 3 },
+      ])
+      expect(graph.size).toBe(3)
+      expect(graph.getNode('a')?.data.genre).toBe('sci-fi')
+      expect(graph.vectors.size).toBe(2)
+      expect(graph.query().whereNodeType('book').toArray().map(n => n.id).sort()).toEqual(['a', 'b'])
+    })
+
+    it('validates every node before inserting any', () => {
+      graph.addNode({ id: 'ok', type: 't', data: {}, insertedAt: 1, updatedAt: 1 })
+      expect(() =>
+        graph.addNodes([
+          { id: 'x', type: 't', data: {}, insertedAt: 2, updatedAt: 2 },
+          { id: '', type: 't', data: {}, insertedAt: 3, updatedAt: 3 },
+        ]),
+      ).toThrow(TypeError)
+      // Fail-fast: the valid first node was not inserted.
+      expect(graph.getNode('x')).toBeUndefined()
+      expect(graph.size).toBe(1)
+    })
+
+    it('coalesces change events into a single flush', () => {
+      const events: any[] = []
+      const sub = graph.changes.subscribe(e => events.push(e))
+      graph.startBatch()
+      try {
+        graph.addNodes([
+          { id: 'a', type: 't', data: {}, insertedAt: 1, updatedAt: 1 },
+          { id: 'b', type: 't', data: {}, insertedAt: 2, updatedAt: 2 },
+        ])
+        expect(events).toHaveLength(0)
+      } finally {
+        graph.endBatch()
+      }
+      expect(events).toHaveLength(2)
+      expect(events.every(e => e.type === 'node_added')).toBe(true)
+      sub.unsubscribe()
+    })
+
+    it('upserts existing nodes like addNode', async () => {
+      const adapter = new MemoryAdapter()
+      const g = new PolyGraph(adapter)
+      g.addNode({ id: 'a', type: 'old', data: { v: 1 }, vector: new Float64Array([1, 0]), insertedAt: 1, updatedAt: 1 })
+      g.addNodes([{ id: 'a', type: 'new', data: { v: 2 }, insertedAt: 2, updatedAt: 2 }])
+      expect(g.getNode('a')?.type).toBe('new')
+      expect(g.getNode('a')?.data.v).toBe(2)
+      expect(g.vectors.size).toBe(0)
+      await g.flush()
+      const persisted = await adapter.getNode('a')
+      expect(persisted?.type).toBe('new')
+    })
+
+    it('is a no-op for an empty array', () => {
+      expect(() => graph.addNodes([])).not.toThrow()
+      expect(graph.size).toBe(0)
+    })
+  })
+
   describe('edge CRUD', () => {
     it('adds and retrieves outgoing edges', () => {
       graph.addNode({ id: 'src', type: 'node', data: {}, insertedAt: 1, updatedAt: 1 })

@@ -1,6 +1,6 @@
 import type { SerializedNode, SerializedEdge } from '../types.js'
 import type { PersistenceAdapter, PersistenceChanges, PersistedNodeQuery } from './adapter.js'
-import { applyPersistedNodeQuery } from './query.js'
+import { applyPersistedCountPagination, applyPersistedNodeQuery, matchesPersistedNode } from './query.js'
 import type { WalEntry } from './binary-format.js'
 import { encodeWalEntries, decodeWalEntries, encodeSnapshot, decodeSnapshot } from './binary-format.js'
 import type { FileIO } from './file-io.js'
@@ -9,6 +9,8 @@ import { createFileIO } from './file-io.js'
 const SNAPSHOT_FILE = 'snapshot.msgpack'
 const WAL_FILE = 'wal.msgpack'
 const DEFAULT_COMPACT_THRESHOLD = 10_000
+/** Compact once the WAL holds at least this share of the store's record count. */
+const COMPACT_RATIO = 4
 
 export interface BinaryStoreConfig {
   storeDir: string
@@ -29,6 +31,9 @@ export class BinaryStoreAdapter implements PersistenceAdapter {
   private nodes = new Map<string, SerializedNode>()
   private edges = new Map<string, SerializedEdge>()
   private vectors = new Map<string, number[]>()
+  private byType = new Map<string, Set<string>>()
+  private edgesBySource = new Map<string, Set<string>>()
+  private edgesByTarget = new Map<string, Set<string>>()
   private io!: FileIO
   private config: ResolvedBinaryStoreConfig
   private walEntryCount = 0
@@ -51,6 +56,84 @@ export class BinaryStoreAdapter implements PersistenceAdapter {
     const run = this.queue.then(fn)
     this.queue = run.then(() => undefined, () => undefined)
     return run
+  }
+
+  // ── secondary indexes ──
+
+  private indexNode(node: SerializedNode): void {
+    let ids = this.byType.get(node.type)
+    if (!ids) {
+      ids = new Set()
+      this.byType.set(node.type, ids)
+    }
+    ids.add(node.id)
+  }
+
+  private unindexNode(id: string, type?: string): void {
+    const node = this.nodes.get(id)
+    const ids = this.byType.get(type ?? node?.type ?? '')
+    if (ids) {
+      ids.delete(id)
+      if (ids.size === 0) this.byType.delete(type ?? node?.type ?? '')
+    }
+  }
+
+  private indexEdge(edge: SerializedEdge): void {
+    let bySource = this.edgesBySource.get(edge.source)
+    if (!bySource) {
+      bySource = new Set()
+      this.edgesBySource.set(edge.source, bySource)
+    }
+    bySource.add(edge.id)
+    let byTarget = this.edgesByTarget.get(edge.target)
+    if (!byTarget) {
+      byTarget = new Set()
+      this.edgesByTarget.set(edge.target, byTarget)
+    }
+    byTarget.add(edge.id)
+  }
+
+  private unindexEdge(id: string): void {
+    const edge = this.edges.get(id)
+    if (!edge) return
+    const bySource = this.edgesBySource.get(edge.source)
+    if (bySource) {
+      bySource.delete(id)
+      if (bySource.size === 0) this.edgesBySource.delete(edge.source)
+    }
+    const byTarget = this.edgesByTarget.get(edge.target)
+    if (byTarget) {
+      byTarget.delete(id)
+      if (byTarget.size === 0) this.edgesByTarget.delete(edge.target)
+    }
+  }
+
+  /** Rebuild the secondary indexes from the full record maps. */
+  private rebuildIndexes(): void {
+    this.byType.clear()
+    this.edgesBySource.clear()
+    this.edgesByTarget.clear()
+    for (const node of this.nodes.values()) this.indexNode(node)
+    for (const edge of this.edges.values()) this.indexEdge(edge)
+  }
+
+  /** Effective WAL compaction threshold, grown with the store to keep total
+   *  compaction work linear in writes instead of quadratic. */
+  private effectiveCompactThreshold(): number {
+    const records = this.nodes.size + this.edges.size + this.vectors.size
+    return Math.max(this.config.compactThreshold, Math.floor(records / COMPACT_RATIO))
+  }
+
+  /** Candidate node ids for a query when only the type index is needed. */
+  private typeCandidateIds(query: PersistedNodeQuery): string[] | null {
+    if (!query.nodeTypes || query.nodeTypes.length === 0) return null
+    if (query.attributes || query.attributeRanges) return null
+    const ids = new Set<string>()
+    for (const type of query.nodeTypes) {
+      const set = this.byType.get(type)
+      if (set) for (const id of set) ids.add(id)
+    }
+    return [...ids]
   }
 
   private ensureLoaded(): Promise<void> {
@@ -89,6 +172,7 @@ export class BinaryStoreAdapter implements PersistenceAdapter {
       await this.io.deleteFile(WAL_FILE)
       this.walEntryCount = 0
     }
+    this.rebuildIndexes()
   }
 
   private replayEntry(entry: WalEntry): void {
@@ -161,10 +245,13 @@ export class BinaryStoreAdapter implements PersistenceAdapter {
       await this.ensureLoaded()
       const entries: WalEntry[] = []
       for (const id of changes.deleteNodeIds) {
+        const node = this.nodes.get(id)
+        this.unindexNode(id, node?.type)
         this.nodes.delete(id)
         entries.push({ kind: 'deleteNode', id })
       }
       for (const id of changes.deleteEdgeIds) {
+        this.unindexEdge(id)
         this.edges.delete(id)
         entries.push({ kind: 'deleteEdge', id })
       }
@@ -174,10 +261,12 @@ export class BinaryStoreAdapter implements PersistenceAdapter {
       }
       for (const node of changes.putNodes) {
         this.nodes.set(node.id, node)
+        this.indexNode(node)
         entries.push({ kind: 'putNode', node })
       }
       for (const edge of changes.putEdges) {
         this.edges.set(edge.id, edge)
+        this.indexEdge(edge)
         entries.push({ kind: 'putEdge', edge })
       }
       for (const entry of changes.putVectors) {
@@ -188,7 +277,7 @@ export class BinaryStoreAdapter implements PersistenceAdapter {
         const encoded = encodeWalEntries(entries)
         await this.io.appendFile(WAL_FILE, encoded)
         this.walEntryCount += entries.length
-        if (this.walEntryCount >= this.config.compactThreshold) {
+        if (this.walEntryCount >= this.effectiveCompactThreshold()) {
           this.scheduleCompact()
         }
       }
@@ -241,7 +330,11 @@ export class BinaryStoreAdapter implements PersistenceAdapter {
     this.assertOpen()
     return this.enqueue(async () => {
       await this.ensureLoaded()
-      return applyPersistedNodeQuery([...this.nodes.values()], query)
+      const candidates = this.typeCandidateIds(query)
+      const nodes = candidates
+        ? candidates.map(id => this.nodes.get(id)).filter((n): n is SerializedNode => !!n)
+        : [...this.nodes.values()]
+      return applyPersistedNodeQuery(nodes, query)
     })
   }
 
@@ -249,9 +342,23 @@ export class BinaryStoreAdapter implements PersistenceAdapter {
     this.assertOpen()
     return this.enqueue(async () => {
       await this.ensureLoaded()
-      const all = [...this.nodes.values()]
-      const filtered = applyPersistedNodeQuery(all, query)
-      return filtered.length
+      const isTypeOnly = !!query.nodeTypes && query.nodeTypes.length > 0 &&
+        !query.attributes && !query.attributeRanges
+      let count: number
+      if (!query.nodeTypes && !query.attributes && !query.attributeRanges) {
+        count = this.nodes.size
+      } else if (isTypeOnly) {
+        count = 0
+        for (const type of query.nodeTypes!) {
+          count += this.byType.get(type)?.size ?? 0
+        }
+      } else {
+        count = 0
+        for (const node of this.nodes.values()) {
+          if (matchesPersistedNode(node, query)) count++
+        }
+      }
+      return applyPersistedCountPagination(count, query)
     })
   }
 
@@ -276,8 +383,20 @@ export class BinaryStoreAdapter implements PersistenceAdapter {
     this.assertOpen()
     return this.enqueue(async () => {
       await this.ensureLoaded()
-      const sourceSet = new Set(sources)
-      return [...this.edges.values()].filter(e => sourceSet.has(e.source) && (type === undefined || e.type === type))
+      const out: SerializedEdge[] = []
+      const seen = new Set<string>()
+      for (const source of sources) {
+        const ids = this.edgesBySource.get(source)
+        if (!ids) continue
+        for (const id of ids) {
+          const edge = this.edges.get(id)
+          if (edge && (type === undefined || edge.type === type) && !seen.has(id)) {
+            seen.add(id)
+            out.push(edge)
+          }
+        }
+      }
+      return out
     })
   }
 
@@ -285,8 +404,20 @@ export class BinaryStoreAdapter implements PersistenceAdapter {
     this.assertOpen()
     return this.enqueue(async () => {
       await this.ensureLoaded()
-      const targetSet = new Set(targets)
-      return [...this.edges.values()].filter(e => targetSet.has(e.target) && (type === undefined || e.type === type))
+      const out: SerializedEdge[] = []
+      const seen = new Set<string>()
+      for (const target of targets) {
+        const ids = this.edgesByTarget.get(target)
+        if (!ids) continue
+        for (const id of ids) {
+          const edge = this.edges.get(id)
+          if (edge && (type === undefined || edge.type === type) && !seen.has(id)) {
+            seen.add(id)
+            out.push(edge)
+          }
+        }
+      }
+      return out
     })
   }
 
@@ -340,6 +471,9 @@ export class BinaryStoreAdapter implements PersistenceAdapter {
       this.nodes.clear()
       this.edges.clear()
       this.vectors.clear()
+      this.byType.clear()
+      this.edgesBySource.clear()
+      this.edgesByTarget.clear()
       this.walEntryCount = 0
       await this.io.writeFile(SNAPSHOT_FILE, encodeSnapshot(this.nodes, this.edges, this.vectors))
       await this.io.writeFile(WAL_FILE, new Uint8Array(0))

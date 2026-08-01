@@ -81,8 +81,12 @@ no acknowledged change is lost. The old delete-first ordering is prohibited.
   in the batch's deterministic order (deletions first, then insertions, per the
   change-batch contract).
 - The in-memory count of WAL entries since the last snapshot is tracked.
-- When the count reaches `compactThreshold` (default 10,000), compaction is
-  scheduled (debounced).
+- Compaction is scheduled (debounced) when the count reaches an **adaptive
+  threshold**: `max(compactThreshold, recordCount / 4)`, where `recordCount`
+  is the current number of nodes plus edges plus vectors in the store. The
+  configured `compactThreshold` (default 10,000) is therefore a lower bound;
+  the effective threshold grows with the store so total compaction work stays
+  linear in writes instead of quadratic.
 
 ## 7. Compaction
 

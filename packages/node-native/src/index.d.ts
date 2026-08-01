@@ -118,6 +118,11 @@ export class NativeStore {
   constructor(directory: string, compactThreshold?: number)
   apply(changes: NativeChangeBatch): void
   nodeIds(): string[]
+  nodeCount(): number
+  queryNodes(query: Record<string, unknown>): Array<Record<string, unknown>>
+  countNodes(query: Record<string, unknown>): number
+  getEdgesBySources(sources: string[], edgeType?: string): Array<Record<string, unknown>>
+  getEdgesByTargets(targets: string[], edgeType?: string): Array<Record<string, unknown>>
   getNode(id: string): Record<string, unknown> | undefined
   allEdges(): Array<Record<string, unknown>>
   allVectors(): Array<[string, number[]]>

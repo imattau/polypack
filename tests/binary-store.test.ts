@@ -21,6 +21,15 @@ class DelayedMemoryFileIO extends MemoryFileIO {
   }
 }
 
+class CountingMemoryFileIO extends MemoryFileIO {
+  snapshotWrites = 0
+
+  override async writeFile(name: string, data: Uint8Array): Promise<void> {
+    if (name === 'snapshot.msgpack') this.snapshotWrites++
+    return super.writeFile(name, data)
+  }
+}
+
 function createAdapter() {
   return new BinaryStoreAdapter({
     storeDir: 'test',
@@ -262,6 +271,24 @@ describe('BinaryStoreAdapter', () => {
     })
 
   describe('concurrency and crash safety', () => {
+    it('grows the compaction threshold with the store', async () => {
+      const io = new CountingMemoryFileIO()
+      const a = new BinaryStoreAdapter({ storeDir: 'test', compactThreshold: 2, fileIO: io })
+      // Write in batches separated by >100ms so the debounced compaction runs.
+      // A naive fixed threshold of 2 would rewrite the whole snapshot after
+      // every batch (15 writes); the adaptive max(2, records/4) keeps that low.
+      for (let i = 0; i < 60; i += 4) {
+        await a.bulkPutNodes([0, 1, 2, 3].map(k => serNode(`n${i + k}`)))
+        await new Promise(r => setTimeout(r, 130))
+      }
+      await a.close()
+      expect(io.snapshotWrites).toBeGreaterThan(3)
+      expect(io.snapshotWrites).toBeLessThan(12)
+      const b = new BinaryStoreAdapter({ storeDir: 'test', compactThreshold: 2, fileIO: io })
+      expect(await b.countNodes!({})).toBe(60)
+      await b.close()
+    })
+
     it('serialises concurrent startup with immediate reads and writes', async () => {
       const io = new MemoryFileIO()
       const a = new BinaryStoreAdapter({ storeDir: 'test', fileIO: io })

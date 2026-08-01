@@ -354,7 +354,9 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
 // ── Storage / NativeStore ──
 
-use polypack_core::storage::{Durability, Store as CoreStore, StoreConfig, Storage};
+use polypack_core::storage::{
+    Durability, NodeQuery, Store as CoreStore, StoreConfig, Storage,
+};
 use std::sync::Mutex;
 
 /// Host storage implemented by a Python object exposing `read(name) -> bytes|None`,
@@ -544,6 +546,74 @@ impl NativeStore {
 
     fn all_node_ids(&self) -> PyResult<Vec<String>> {
         self.inner.lock().unwrap().node_ids().map_err(to_pyerr)
+    }
+
+    /// Total persisted node count, without materialising ids.
+    fn node_count(&self) -> PyResult<usize> {
+        self.inner.lock().unwrap().node_count().map_err(to_pyerr)
+    }
+
+    /// Query nodes with a storage-level query dict:
+    /// `{"nodeTypes": [...], "attributes": {...}, "attributeRanges": {...},
+    /// "orderBy": {"field", "direction"}, "offset", "limit"}`.
+    fn query_nodes(&self, py: Python<'_>, query: Bound<'_, PyAny>) -> PyResult<Py<PyList>> {
+        let q: NodeQuery = py_to_polypack(&query)?;
+        let nodes = self.inner.lock().unwrap().query_nodes(&q).map_err(to_pyerr)?;
+        let list = PyList::empty(py);
+        for node in nodes {
+            let json = serde_json::to_value(node).map_err(|e| PolypackStorageError::new_err(e.to_string()))?;
+            list.append(json_to_py(py, &json)?)?;
+        }
+        Ok(list.unbind())
+    }
+
+    /// Count nodes matching a storage-level query dict (same shape as
+    /// `query_nodes`).
+    fn count_nodes(&self, query: Bound<'_, PyAny>) -> PyResult<usize> {
+        let q: NodeQuery = py_to_polypack(&query)?;
+        self.inner.lock().unwrap().count_nodes(&q).map_err(to_pyerr)
+    }
+
+    /// Edges from the given sources, optionally filtered by edge type.
+    fn get_edges_by_sources(
+        &self,
+        py: Python<'_>,
+        sources: Vec<String>,
+        edge_type: Option<String>,
+    ) -> PyResult<Py<PyList>> {
+        let edges = self
+            .inner
+            .lock()
+            .unwrap()
+            .get_edges_by_sources(&sources, edge_type.as_deref())
+            .map_err(to_pyerr)?;
+        let list = PyList::empty(py);
+        for edge in edges {
+            let json = serde_json::to_value(edge).map_err(|e| PolypackStorageError::new_err(e.to_string()))?;
+            list.append(json_to_py(py, &json)?)?;
+        }
+        Ok(list.unbind())
+    }
+
+    /// Edges targeting the given nodes, optionally filtered by edge type.
+    fn get_edges_by_targets(
+        &self,
+        py: Python<'_>,
+        targets: Vec<String>,
+        edge_type: Option<String>,
+    ) -> PyResult<Py<PyList>> {
+        let edges = self
+            .inner
+            .lock()
+            .unwrap()
+            .get_edges_by_targets(&targets, edge_type.as_deref())
+            .map_err(to_pyerr)?;
+        let list = PyList::empty(py);
+        for edge in edges {
+            let json = serde_json::to_value(edge).map_err(|e| PolypackStorageError::new_err(e.to_string()))?;
+            list.append(json_to_py(py, &json)?)?;
+        }
+        Ok(list.unbind())
     }
 
     fn get_node(&self, py: Python<'_>, id: String) -> PyResult<Option<PyObject>> {

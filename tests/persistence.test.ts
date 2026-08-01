@@ -78,6 +78,30 @@ function runAdapterTests(label: string, create: () => PersistenceAdapter) {
         expect((await adapter.queryNodes!({ nodeTypes: ['book'], offset: 1, limit: 1 })).map(node => node.id)).toEqual(['b'])
         expect(await adapter.countNodes!({ nodeTypes: ['book'], offset: 1, limit: 1 })).toBe(1)
       })
+
+      it('counts the whole store with an empty query', async () => {
+        await adapter.bulkPutNodes([
+          { id: 'a', type: 't', data: {}, vector: null, insertedAt: 1, updatedAt: 1 },
+          { id: 'b', type: 't', data: {}, vector: null, insertedAt: 2, updatedAt: 2 },
+        ])
+        expect(await adapter.countNodes!({})).toBe(2)
+        expect(await adapter.countNodes!({ limit: 1 })).toBe(1)
+      })
+
+      it('keeps the type index consistent through mutations', async () => {
+        await adapter.bulkPutNodes([
+          { id: 'a', type: 'book', data: {}, vector: null, insertedAt: 1, updatedAt: 1 },
+          { id: 'b', type: 'book', data: {}, vector: null, insertedAt: 2, updatedAt: 2 },
+          { id: 'c', type: 'user', data: {}, vector: null, insertedAt: 3, updatedAt: 3 },
+        ])
+        expect(await adapter.countNodes!({ nodeTypes: ['book'] })).toBe(2)
+        await adapter.deleteNode('a')
+        expect(await adapter.countNodes!({ nodeTypes: ['book'] })).toBe(1)
+        await adapter.putNode({ id: 'a', type: 'book', data: {}, vector: null, insertedAt: 4, updatedAt: 4 })
+        expect(await adapter.countNodes!({ nodeTypes: ['book'] })).toBe(2)
+        expect((await adapter.queryNodes!({ nodeTypes: ['book'] })).map(n => n.id).sort()).toEqual(['a', 'b'])
+        expect(await adapter.countNodes!({ nodeTypes: ['user'] })).toBe(1)
+      })
     })
 
     describe('atomic changes', () => {
@@ -143,6 +167,21 @@ function runAdapterTests(label: string, create: () => PersistenceAdapter) {
 
         expect((await adapter.getEdgesBySources!(['a'], 'R')).map(edge => edge.id)).toEqual(['a::R::b'])
         expect((await adapter.getEdgesByTargets!(['b'], 'R')).map(edge => edge.id).sort()).toEqual(['a::R::b', 'd::R::b'])
+      })
+
+      it('keeps the edge indexes consistent through deletes', async () => {
+        await adapter.bulkPutEdges([
+          { id: 'a::R::b', source: 'a', target: 'b', type: 'R', data: null, createdAt: 1 },
+          { id: 'a::R::c', source: 'a', target: 'c', type: 'R', data: null, createdAt: 2 },
+        ])
+        await adapter.deleteEdge('a::R::b')
+        expect((await adapter.getEdgesBySources!(['a'])).map(e => e.id)).toEqual(['a::R::c'])
+        expect(await adapter.getEdgesByTargets!(['b'])).toHaveLength(0)
+        await adapter.applyChanges!({
+          putNodes: [], deleteNodeIds: [], putEdges: [{ id: 'a::R::b', source: 'a', target: 'b', type: 'R', data: null, createdAt: 3 }],
+          deleteEdgeIds: [], putVectors: [], deleteVectorIds: [],
+        })
+        expect(await adapter.getEdgesByTargets!(['b'])).toHaveLength(1)
       })
     })
 

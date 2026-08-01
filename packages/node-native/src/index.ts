@@ -404,6 +404,31 @@ export class NativeStore {
     return callNative(() => this.inner.nodeIds())
   }
 
+  /** Total persisted node count, without materialising ids. */
+  nodeCount(): number {
+    return callNative(() => this.inner.nodeCount())
+  }
+
+  /** Query persisted nodes with a `PersistedNodeQuery`-shaped object. */
+  queryNodes(query: Record<string, unknown>): Array<Record<string, unknown>> {
+    return callNative(() => this.inner.queryNodes(query))
+  }
+
+  /** Count persisted nodes matching a `PersistedNodeQuery`-shaped object. */
+  countNodes(query: Record<string, unknown>): number {
+    return callNative(() => this.inner.countNodes(query))
+  }
+
+  /** Edges from the given sources, optionally filtered by edge type. */
+  getEdgesBySources(sources: string[], edgeType?: string): Array<Record<string, unknown>> {
+    return callNative(() => this.inner.getEdgesBySources(sources, edgeType))
+  }
+
+  /** Edges targeting the given nodes, optionally filtered by edge type. */
+  getEdgesByTargets(targets: string[], edgeType?: string): Array<Record<string, unknown>> {
+    return callNative(() => this.inner.getEdgesByTargets(targets, edgeType))
+  }
+
   getNode(id: string): Record<string, unknown> | undefined {
     return callNative(() => this.inner.getNode(id))
   }

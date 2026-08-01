@@ -3,6 +3,29 @@
 All notable changes to this project are documented here. This project follows
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- `PolyGraph.addNodes(nodes)` batches node inserts: validation happens for the
+  whole batch before any insert, change events coalesce into one flush, and
+  the persistence debounce is scheduled once. Prefer it over a loop of
+  `addNode` for large loads.
+- Persisted-query fast paths in `MemoryAdapter` and `BinaryStoreAdapter`:
+  `countNodes({})` returns the total without materialising ids, type-only
+  queries use a secondary type index, and `getEdgesBySources`/`getEdgesByTargets`
+  are backed by source/target edge indexes instead of scanning every edge.
+- `polypack-core` `Store` mirrors the above: `node_count`, `query_nodes`,
+  `count_nodes`, `get_edges_by_sources`, and `get_edges_by_targets`, exposed
+  through the Python and Node native bindings.
+
+### Changed
+
+- WAL compaction now uses an adaptive threshold (`max(compactThreshold,
+  records / 4)`) in both the TypeScript adapter and the Rust `Store`, keeping
+  total compaction work linear in writes instead of quadratic. The
+  `compactThreshold` config is now a lower bound rather than a fixed count.
+
 ## [2.4.3] - 2026-08-01
 
 Version-only re-release. `@0xx0lostcause0xx0/polypack-native@2.4.2` was

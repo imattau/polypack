@@ -278,7 +278,7 @@ impl NativeHnswIndex {
 // ── Storage / NativeStore ──
 
 use polypack_core::model::ChangeBatch as CoreChangeBatch;
-use polypack_core::storage::{Durability, Store as CoreStore, StoreConfig, Storage};
+use polypack_core::storage::{Durability, NodeQuery, Store as CoreStore, StoreConfig, Storage};
 use std::path::PathBuf;
 
 /// Filesystem byte storage used by the native store (host adapter for Node).
@@ -397,6 +397,69 @@ impl NativeStore {
     #[napi]
     pub fn node_ids(&self) -> Result<Vec<String>> {
         self.inner.borrow_mut().node_ids().map_err(to_napi_err)
+    }
+
+    /// Total persisted node count, without materialising ids.
+    #[napi]
+    pub fn node_count(&self) -> Result<u32> {
+        self.inner.borrow_mut().node_count().map(|n| n as u32).map_err(to_napi_err)
+    }
+
+    /// Query nodes with a storage-level query object:
+    /// `{ nodeTypes, attributes, attributeRanges, orderBy, offset, limit }`.
+    #[napi]
+    pub fn query_nodes(&self, query: serde_json::Value) -> Result<Vec<serde_json::Value>> {
+        let q: NodeQuery =
+            serde_json::from_value(query).map_err(|e| Error::from_reason(e.to_string()))?;
+        let nodes = self.inner.borrow_mut().query_nodes(&q).map_err(to_napi_err)?;
+        nodes
+            .into_iter()
+            .map(|n| serde_json::to_value(n).map_err(|e| Error::from_reason(e.to_string())))
+            .collect()
+    }
+
+    /// Count nodes matching a storage-level query object.
+    #[napi]
+    pub fn count_nodes(&self, query: serde_json::Value) -> Result<u32> {
+        let q: NodeQuery =
+            serde_json::from_value(query).map_err(|e| Error::from_reason(e.to_string()))?;
+        self.inner.borrow_mut().count_nodes(&q).map(|n| n as u32).map_err(to_napi_err)
+    }
+
+    /// Edges from the given sources, optionally filtered by edge type.
+    #[napi]
+    pub fn get_edges_by_sources(
+        &self,
+        sources: Vec<String>,
+        edge_type: Option<String>,
+    ) -> Result<Vec<serde_json::Value>> {
+        let edges = self
+            .inner
+            .borrow_mut()
+            .get_edges_by_sources(&sources, edge_type.as_deref())
+            .map_err(to_napi_err)?;
+        edges
+            .into_iter()
+            .map(|e| serde_json::to_value(e).map_err(|e| Error::from_reason(e.to_string())))
+            .collect()
+    }
+
+    /// Edges targeting the given nodes, optionally filtered by edge type.
+    #[napi]
+    pub fn get_edges_by_targets(
+        &self,
+        targets: Vec<String>,
+        edge_type: Option<String>,
+    ) -> Result<Vec<serde_json::Value>> {
+        let edges = self
+            .inner
+            .borrow_mut()
+            .get_edges_by_targets(&targets, edge_type.as_deref())
+            .map_err(to_napi_err)?;
+        edges
+            .into_iter()
+            .map(|e| serde_json::to_value(e).map_err(|e| Error::from_reason(e.to_string())))
+            .collect()
     }
 
     #[napi]

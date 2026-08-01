@@ -37,6 +37,10 @@ Nodes:
 
 - `addNode(node)` inserts or replaces a node. Replacement updates type/vector
   indexes. Node data and vectors are structured-cloned on entry.
+- `addNodes(nodes)` inserts a batch of nodes. All inputs are validated before
+  any are inserted (an invalid entry inserts nothing), change events are
+  coalesced into one flush, and the persistence debounce is scheduled once for
+  the whole batch. Prefer this over a loop of `addNode` for large inserts.
 - `getNode(id)` returns a detached snapshot of a loaded node synchronously.
 - `getNodeSafe(id)` restores an evicted node from persistence when necessary.
 - `updateNode(id, data, vector?)` shallow-merges data and optionally replaces its vector.
@@ -153,7 +157,10 @@ Adapters may implement `queryNodes(query)` and `countNodes(query)` for optimized
 storage-level execution, plus `getEdgesBySources(ids, type?)` and
 `getEdgesByTargets(ids, type?)` for indexed graph operations. When absent,
 Polypack falls back to the original node and edge methods, preserving
-compatibility with existing custom adapters.
+compatibility with existing custom adapters. `countNodes({})` returns the total
+persisted node count without materialising ids, and type-only queries use a
+secondary type index. `getEdgesBySources`/`getEdgesByTargets` are backed by
+source/target edge indexes, so persisted traversal no longer scans every edge.
 
 For node-only queries, offset and limit are delegated to the adapter.
 `BinaryStoreAdapter` uses an in-memory snapshot for persisted queries. Queries
@@ -212,10 +219,13 @@ comparisons reject vectors with mismatched dimensions.
 - `BinaryStoreAdapter({ storeDir, compactThreshold?, fileIO?, syncWrites? })`
   persists data as a MessagePack snapshot plus an append-only write-ahead log
   (WAL). Nodes, edges, and vectors are committed atomically per batch; the WAL
-  is compacted into a snapshot once it passes `compactThreshold` (default 10,000
-  entries) and on `close()`. Startup replays the WAL, then persists a snapshot
-  before deleting it so a crash between those steps loses nothing. Recovery
-  also tolerates a truncated WAL tail from a mid-append crash.
+  is compacted into a snapshot once it passes an adaptive threshold and on
+  `close()`. `compactThreshold` is the minimum WAL-entry count at which
+  compaction is scheduled (default 10,000); the effective threshold also grows
+  with the store (`max(threshold, records / 4)`), so a 1M-node build no longer
+  rewrites the snapshot quadratically. Startup replays the WAL, then persists a
+  snapshot before deleting it so a crash between those steps loses nothing.
+  Recovery also tolerates a truncated WAL tail from a mid-append crash.
 - `syncWrites: true` fsyncs WAL appends and snapshot writes (including the
   containing directory) for crash durability at a throughput cost.
 - `BinaryStoreAdapter` lives behind platform subpaths so the core entry point
