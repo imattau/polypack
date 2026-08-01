@@ -1001,6 +1001,36 @@ impl Graph {
         PersistedGraphQuery::new(&mut self.store)
     }
 
+    /// Start an in-memory similarity query from text, embedded with the
+    /// configured provider. Mirrors `PolyGraph.queryText`.
+    pub fn query_text(&self, text: &str, threshold: f64, top_k: Option<usize>) -> Result<GraphQuery<'_>> {
+        let vector = self.embed(text)?;
+        Ok(self.query().similar_to(vector, threshold, top_k))
+    }
+
+    /// Start a persisted similarity query from text, embedded with the
+    /// configured provider. Mirrors `PolyGraph.queryPersistedText`.
+    pub fn query_persisted_text(
+        &mut self,
+        text: &str,
+        threshold: f64,
+        top_k: Option<usize>,
+    ) -> Result<PersistedGraphQuery<'_>> {
+        let vector = self.embed(text)?;
+        Ok(self.query_persisted().similar_to(vector, threshold, top_k))
+    }
+
+    /// Quick full-text search across persisted nodes of a single type.
+    /// Shorthand for
+    /// `query_persisted_text(text, threshold, top_k).where_node_type(vec![node_type]).to_array()`.
+    /// Mirrors `PolyGraph.searchNodes`.
+    pub fn search_nodes(&mut self, text: &str, node_type: &str, threshold: f64, top_k: Option<usize>) -> Result<Vec<Node>> {
+        if text.trim().is_empty() {
+            return Ok(Vec::new());
+        }
+        self.query_persisted_text(text, threshold, top_k)?.where_node_type(vec![node_type.to_string()]).to_array()
+    }
+
     /// Build a `query_exec::GraphSnapshot` from the current hot node/edge
     /// working set. `created_at` on the reconstructed `Edge`s is a
     /// placeholder — `query_exec` never reads it, only `edge_type`/
@@ -2672,5 +2702,68 @@ mod tests {
         let mut patch = serde_json::Map::new();
         patch.insert("title".into(), serde_json::json!("hello"));
         assert!(g.update_node_safe_with_embedding("missing", patch, "text").unwrap().is_none());
+    }
+
+    #[test]
+    fn query_text_ranks_by_embedded_similarity() {
+        let mut g = test_graph();
+        g.add_node_with_embedding(node("a"), "hello world").unwrap();
+        g.add_node_with_embedding(node("b"), "goodbye moon").unwrap();
+
+        let results = g.query_text("hello world", 0.99, None).unwrap().to_array();
+
+        assert_eq!(ids_of(results), vec!["a"], "only the identically-embedded text clears a 0.99 threshold");
+    }
+
+    #[test]
+    fn query_text_returns_a_chainable_graphquery() {
+        let mut g = test_graph();
+        g.add_node_with_embedding(node_of_type("a", "doc"), "hello world").unwrap();
+        g.add_node_with_embedding(node_of_type("b", "other"), "hello world").unwrap();
+
+        let results = g.query_text("hello world", 0.0, None).unwrap().where_node_type(vec!["doc".into()]).to_array();
+
+        assert_eq!(ids_of(results), vec!["a"]);
+    }
+
+    #[test]
+    fn query_persisted_text_ranks_by_embedded_similarity() {
+        let mut g = test_graph();
+        g.add_node_with_embedding(node("a"), "hello world").unwrap();
+        g.add_node_with_embedding(node("b"), "goodbye moon").unwrap();
+        g.flush().unwrap();
+
+        let results = g.query_persisted_text("hello world", 0.99, None).unwrap().to_array().unwrap();
+
+        assert_eq!(ids_of(results), vec!["a"]);
+    }
+
+    #[test]
+    fn search_nodes_filters_by_type_and_similarity() {
+        let mut g = test_graph();
+        g.add_node_with_embedding(node_of_type("a", "doc"), "hello world").unwrap();
+        g.add_node_with_embedding(node_of_type("b", "other"), "hello world").unwrap();
+        g.flush().unwrap();
+
+        let results = g.search_nodes("hello world", "doc", 0.99, None).unwrap();
+
+        assert_eq!(ids_of(results), vec!["a"], "b is excluded despite matching text, wrong node type");
+    }
+
+    #[test]
+    fn search_nodes_respects_the_similarity_threshold() {
+        let mut g = test_graph();
+        g.add_node_with_embedding(node_of_type("a", "doc"), "hello world").unwrap();
+        g.flush().unwrap();
+
+        let results = g.search_nodes("completely unrelated text", "doc", 0.9, None).unwrap();
+
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn search_nodes_returns_empty_for_blank_text_without_embedding() {
+        let mut g = test_graph();
+        assert!(g.search_nodes("   ", "doc", 0.0, None).unwrap().is_empty());
     }
 }
