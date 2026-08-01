@@ -61,6 +61,8 @@ export class BinaryStoreAdapter implements PersistenceAdapter {
   // ── secondary indexes ──
 
   private indexNode(node: SerializedNode): void {
+    const existing = this.nodes.get(node.id)
+    if (existing && existing.type !== node.type) this.unindexNode(node.id, existing.type)
     let ids = this.byType.get(node.type)
     if (!ids) {
       ids = new Set()
@@ -260,8 +262,8 @@ export class BinaryStoreAdapter implements PersistenceAdapter {
         entries.push({ kind: 'deleteVector', id })
       }
       for (const node of changes.putNodes) {
-        this.nodes.set(node.id, node)
         this.indexNode(node)
+        this.nodes.set(node.id, node)
         entries.push({ kind: 'putNode', node })
       }
       for (const edge of changes.putEdges) {

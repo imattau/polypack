@@ -256,6 +256,11 @@ impl Store {
     // ── secondary indexes ──
 
     fn index_node(&mut self, node: &Node) {
+        if let Some(existing) = self.nodes.get(&node.id) {
+            if existing.node_type != node.node_type {
+                self.unindex_node(&node.id);
+            }
+        }
         self.by_type
             .entry(node.node_type.clone())
             .or_default()
@@ -380,8 +385,8 @@ impl Store {
     fn replay(&mut self, entry: WalEntry) {
         match entry {
             WalEntry::PutNode(node) => {
-                self.nodes.insert(node.id.clone(), node.clone());
                 self.index_node(&node);
+                self.nodes.insert(node.id.clone(), node.clone());
             }
             WalEntry::DeleteNode(id) => {
                 self.unindex_node(&id);
@@ -500,8 +505,8 @@ impl Store {
             self.vectors.remove(id);
         }
         for node in &changes.put_nodes {
-            self.nodes.insert(node.id.clone(), node.clone());
             self.index_node(node);
+            self.nodes.insert(node.id.clone(), node.clone());
         }
         for edge in &changes.put_edges {
             self.edges.insert(edge.id.clone(), edge.clone());
@@ -1006,5 +1011,23 @@ mod tests {
         }
         assert_eq!(s3.node_count().unwrap(), 40);
         s3.close().unwrap();
+    }
+
+    #[test]
+    fn type_index_drops_stale_entry_when_a_node_changes_type() {
+        let storage = shared();
+        let mut s = Store::new(Box::new(storage), StoreConfig::default());
+        let n1 = Node { id: "a".into(), node_type: "draft".into(), data: Default::default(), vector: None, inserted_at: 1, updated_at: 1 };
+        let n2 = Node { id: "a".into(), node_type: "published".into(), data: Default::default(), vector: None, inserted_at: 2, updated_at: 2 };
+        s.apply(&ChangeBatch { put_nodes: vec![n1], ..Default::default() }).unwrap();
+        s.apply(&ChangeBatch { put_nodes: vec![n2], ..Default::default() }).unwrap();
+        assert_eq!(
+            s.count_nodes(&NodeQuery { node_types: Some(vec!["draft".into()]), ..Default::default() }).unwrap(),
+            0
+        );
+        assert_eq!(
+            s.count_nodes(&NodeQuery { node_types: Some(vec!["published".into()]), ..Default::default() }).unwrap(),
+            1
+        );
     }
 }

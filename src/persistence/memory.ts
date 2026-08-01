@@ -23,6 +23,8 @@ export class MemoryAdapter implements PersistenceAdapter {
   }
 
   private indexNode(node: SerializedNode): void {
+    const existing = this.nodes.get(node.id)
+    if (existing && existing.type !== node.type) this.unindexNode(node.id, existing.type)
     let ids = this.byType.get(node.type)
     if (!ids) {
       ids = new Set()
@@ -86,21 +88,21 @@ export class MemoryAdapter implements PersistenceAdapter {
     for (const id of changes.deleteNodeIds) { this.unindexNode(id); this.nodes.delete(id); this.nodeOrder.delete(id) }
     for (const id of changes.deleteEdgeIds) { this.unindexEdge(id); this.edges.delete(id) }
     for (const id of changes.deleteVectorIds) this.vectors.delete(id)
-    for (const node of changes.putNodes) { this.nodes.set(node.id, node); this.indexNode(node); this.nodeOrder.set(node.id, true) }
+    for (const node of changes.putNodes) { this.indexNode(node); this.nodes.set(node.id, node); this.nodeOrder.set(node.id, true) }
     for (const edge of changes.putEdges) { this.edges.set(edge.id, edge); this.indexEdge(edge) }
     for (const entry of changes.putVectors) this.vectors.set(entry.id, entry.vector)
     this.evictIfOverCap()
   }
 
   async putNode(node: SerializedNode): Promise<void> {
-    this.nodes.set(node.id, node)
     this.indexNode(node)
+    this.nodes.set(node.id, node)
     this.touchNode(node.id)
     this.evictIfOverCap()
   }
 
   async bulkPutNodes(nodes: SerializedNode[]): Promise<void> {
-    for (const node of nodes) { this.nodes.set(node.id, node); this.indexNode(node); this.touchNode(node.id) }
+    for (const node of nodes) { this.indexNode(node); this.nodes.set(node.id, node); this.touchNode(node.id) }
     this.evictIfOverCap()
   }
 
