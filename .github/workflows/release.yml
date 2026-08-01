@@ -100,6 +100,9 @@ jobs:
         # compound `napi build && rm ...` script, and npm would append the
         # extra args to the end of that whole string (onto `rm`), not onto
         # `napi build`. Invoke napi directly instead.
+        # shell: bash — windows-latest defaults to PowerShell, which doesn't
+        # understand the `\` line-continuation used below.
+        shell: bash
         run: |
           npx napi build --platform --release \
             --manifest-path ../../crates/polypack-node/Cargo.toml \
