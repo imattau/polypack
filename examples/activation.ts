@@ -10,6 +10,9 @@
  *   - semantic pulse: a query scores the region around itself (vector matches +
  *     recency + usage), and `absorb` reinforces the relevant nodes
  *   - spreading activation: reading an article warms its related neighbours
+ *   - attention promotion: small local signals accumulate and only become
+ *     durable (and syncable) once they cross a meaningful threshold
+ *   - query integration: activation composes with the regular query builder
  *   - decay: activation fades over time as a pure function of elapsed time
  *   - working memory: the "mental state" is just the most-active loaded nodes
  *
@@ -22,7 +25,7 @@ import { PolyGraph, MemoryAdapter, FeatureHashEmbedding, ActivationEngine } from
 // SETUP: a small knowledge graph of interests, authors, topics
 // ────────────────────────────────────────────────────────────
 
-const graph = new PolyGraph(new MemoryAdapter(), undefined, new FeatureHashEmbedding(256))
+const graph = new PolyGraph(new MemoryAdapter(), undefined, new FeatureHashEmbedding({ dimensions: 256 }))
 const engine = new ActivationEngine(graph)
 
 const add = async (id: string, type: string, text: string, data: Record<string, unknown> = {}) => {
@@ -123,7 +126,40 @@ console.log(`    engine.pulse(text | vector)                 — semantic region
 console.log(`    engine.workingMemory(limit)                 — current mental state\n`)
 
 // ────────────────────────────────────────────────────────────
-// 5. Decay: nothing stays hot forever
+// 5. Attention promotion: small local signals, promoted once meaningful
+// ────────────────────────────────────────────────────────────
+
+console.log('── 5. Transient attention, promoted past the threshold ──')
+await add('event:789', 'event', 'Another local AI model release')
+
+// A couple of small, sub-threshold signals (e.g. the user glanced at the
+// card). These never touch durable state or the sync layer.
+engine.bumpAttention('event:789', 0.02)
+console.log(`  bumpAttention(0.02) → local attention = ${engine.attentionOf('event:789').toFixed(2)}, durable = ${(graph.getActivationState('event:789')?.score ?? 0).toFixed(2)}`)
+
+engine.bumpAttention('event:789', 0.02)
+console.log(`  bumpAttention(0.02) → local attention = ${engine.attentionOf('event:789').toFixed(2)}, durable = ${(graph.getActivationState('event:789')?.score ?? 0).toFixed(2)}`)
+
+// This delta pushes the accumulated total past minReinforceDelta (0.05):
+// it's promoted into durable reinforcement and local attention resets to 0.
+engine.bumpAttention('event:789', 0.03)
+console.log(`  bumpAttention(0.03) → local attention = ${engine.attentionOf('event:789').toFixed(2)}, durable = ${(graph.getActivationState('event:789')?.score ?? 0).toFixed(2)}  (promoted!)`)
+console.log('  Small events stayed local; only the accumulated, meaningful total became durable + syncable.\n')
+
+// ────────────────────────────────────────────────────────────
+// 6. Query integration: activation as a first-class filter/sort
+// ────────────────────────────────────────────────────────────
+
+console.log('── 6. Querying by activation ──')
+const feed = graph.query().whereActivated(0.05).orderByActivation('desc').toArray()
+console.log('  query().whereActivated(0.05).orderByActivation("desc")')
+for (const n of feed) {
+  console.log(`    ${n.id.padEnd(22)} ${engine.effective(n.id).toFixed(2)}  [${n.type}]`)
+}
+console.log('  Same shape as any other query — activation composes with whereNodeType, traverse, limit, etc.\n')
+
+// ────────────────────────────────────────────────────────────
+// 7. Decay: nothing stays hot forever
 // ────────────────────────────────────────────────────────────
 
 const before = engine.effective('event:123')
@@ -131,7 +167,7 @@ const before = engine.effective('event:123')
 const now = Date.now()
 const state = graph.getActivationState('event:123')!
 const decayed = state.score * Math.pow(0.5, (now - state.lastMeaningfulActivation) / (24 * 3_600_000))
-console.log('── 5. Decay is a pure function of elapsed time ──')
+console.log('── 7. Decay is a pure function of elapsed time ──')
 console.log(`  event:123 now ${before.toFixed(2)}; after one 24h half-life → ~${decayed.toFixed(2)}`)
 console.log('  It can be reinforced again at any time.\n')
 
