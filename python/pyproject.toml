@@ -19,6 +19,16 @@ python-source = "."
 module-name = "polypack._core"
 manifest-path = "../crates/polypack-python/Cargo.toml"
 features = ["pyo3/extension-module"]
+# bench.py/conformance.py are repo-relative dev tooling (they read fixtures
+# from ../tests/conformance and ../benchmarks, which don't exist post-install)
+# — keep them importable for local dev (`maturin develop`) but never ship
+# them, or any bytecode cache, in the published wheel/sdist.
+exclude = [
+    "polypack/bench.py",
+    "polypack/conformance.py",
+    "**/__pycache__/**",
+    "**/*.pyc",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

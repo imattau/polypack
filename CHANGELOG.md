@@ -106,6 +106,14 @@ All notable changes to this project are documented here. This project follows
   `GraphQuery`/`PersistedGraphQuery`'s `traverse`/`join` require as a
   parameter but previously couldn't be named without an explicit
   `polypack-core` dependency.
+- The Python wheel/sdist (`maturin`) no longer bundles `bench.py`/
+  `conformance.py` (repo-relative dev tooling that doesn't work
+  post-install) or `__pycache__`/`.pyc` files; both stay importable for
+  local development via `maturin develop`.
+- `@0xx0lostcause0xx0/polypack-native`'s `files` field now excludes
+  `dist/*.node`, so a locally-built platform binary left in `dist/` can't
+  accidentally ship in the root npm package — only the per-platform
+  `optionalDependencies` packages should carry a binary.
 
 ## [2.4.7] - 2026-08-01
 
