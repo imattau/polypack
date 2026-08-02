@@ -32,8 +32,8 @@ The release workflow publishes, in order:
 - **npm per-platform packages** then the **native wrapper** (`native-publish`
   builds every addon on a matching runner; `native-package-publish` stages and
   publishes with npm provenance).
-- **`polypack-core`** to crates.io (`crate-publish`, uses the
-  `CRATES_IO_TOKEN` secret).
+- **`polypack-core` and `polypack-graph`** to crates.io (`crate-publish`,
+  uses the `CRATES_IO_TOKEN` secret).
 - **Python wheels** to PyPI (`wheel-publish` builds abi3 wheels per OS;
   `wheel-publish-upload` publishes via OIDC trusted publishing for the
   `release` environment).
