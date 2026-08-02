@@ -87,7 +87,11 @@ filter/order by current activation. `merge_activation` and `decay_factor` are
 exposed for parity with the TypeScript/Rust implementations.
 
 `save()` writes the complete current graph and flushes any deletions
-recorded since the last save; `close_store()` compacts and closes explicitly.
+recorded since the last save. `close_store()` — and exiting the `with`
+block, which calls it — saves any unsaved changes first, then compacts
+and closes; you don't need to call `save()` yourself before it, though
+doing so periodically (as above) still bounds how much a single close
+has to write and how much a crash before that could lose.
 
 ## Vector indexes
 

@@ -237,10 +237,13 @@ vectors are copied, and `get()`/`entries()` return detached arrays.
 `HNSWIndex` (`new HNSWIndex(onChange?, distanceFn?, config?, rng?)`) is an
 approximate, update-safe alternative implementing the same `VectorIndexLike`
 surface (`add`/`addMany`/`hydrate`/`remove`/`removeMany`/`query`/`clear`/
-`has`/`get`/`entries`/`size`), plus `update(id, vector)` for in-place
-replacement. `config` accepts `M`, `Mmax0`, `efConstruction`, and `efSearch`
-(all optional, cosine distance by default). It can be passed directly to
-`PolyGraph`'s `createVectorIndex` hook — see the constructor section above.
+`has`/`get`/`entries`/`size`). `config` accepts `M`, `Mmax0`, `efConstruction`,
+and `efSearch` (all optional, cosine distance by default) — each, if given,
+must be a positive integer, or the constructor throws `RangeError`. It can be
+passed directly to `PolyGraph`'s `createVectorIndex` hook — see the
+constructor section above. `update(id, vector)` also exists but is
+`@deprecated`: it's identical to `add()` (which already overwrites an
+existing id) and isn't part of `VectorIndexLike`, so prefer `add()`.
 
 ### Text embeddings
 
@@ -413,10 +416,16 @@ stale results are discarded after dependency changes or unmounting, and one
 follow-up run is retained when mutations arrive during an asynchronous query.
 React 18 and 19 are supported as an optional peer dependency.
 
-`useWorkingMemory(graph, limit?, deps?, delay?, nodeTypes?)` is a live view of
-the current working memory: the `limit` most-activated loaded nodes, re-queried
-after any graph change (including `activation_updated`). `deps` controls re-runs
-and must include `limit` when it can change.
+`useWorkingMemory(graph, limit?, deps?, delay?, nodeTypes?, engine?)` is a live
+view of the current working memory: the `limit` most-activated loaded nodes,
+re-queried after any graph change (including `activation_updated`). `deps`
+controls re-runs and must include `limit` when it can change. Without `engine`
+it ranks by `graph.topActivated` (durable score only); pass an
+`ActivationEngine` to rank by `engine.workingMemory` instead (durable score
+plus transient attention from `bumpAttention`). Sub-threshold `bumpAttention`
+calls never emit a graph change event, so they won't trigger an automatic
+re-run on their own — include something that changes after a bump in `deps`
+if the view needs to reflect it immediately.
 
 ## `@0xx0lostcause0xx0/polypack/activation`
 
@@ -486,14 +495,17 @@ payloads** — activation is accumulated knowledge, not last-write-wins data.
   `since(seq)`, `all`, `latestSeq`, and `size`.
 - `SyncAdapter(inner, clientId)` wraps persistence and records successful node
   and edge writes in its `oplog`; set `onOp` to observe them.
-- `SyncClient({ graph, transport, clientId?, autoFlush?, retryMs? })` captures
-  graph events, retains operations until acknowledged, retries unacknowledged
-  deltas, detects server-cursor gaps, and applies remote operations with echo
-  suppression. `retryMs` defaults
-  to 1,000 ms and `0` disables automatic retry. Use `flush()` for manual sends,
+- `SyncClient({ graph, transport, clientId?, autoFlush?, retryMs?,
+  activationSyncThreshold? })` captures graph events, retains operations until
+  acknowledged, retries unacknowledged deltas, detects server-cursor gaps, and
+  applies remote operations with echo suppression. `retryMs` defaults
+  to 1,000 ms and `0` disables automatic retry. `activationSyncThreshold`
+  (default 0.05) drops coalesced activation deltas below that magnitude
+  instead of syncing them. Use `flush()` for manual sends,
   inspect `pendingOps`, call `requestSync(fromStart?)` for catch-up, inspect
   `syncCursor`, call `reconnect(transport)` to replace a transport, resend pending
-  work, and request missing server operations, and use `disconnect()` to close.
+  work, and request missing server operations, and use `disconnect()` to flush
+  any pending operations and close.
 - `SyncServer` is an in-memory relay. `addClient(handle)` returns that client's
   incoming-message handler, `removeClient(handle)` unregisters it, and `ops`
   exposes the received log. The server deduplicates operations by client and
