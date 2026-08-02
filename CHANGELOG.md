@@ -262,22 +262,6 @@ project.
 
 ## [2.4.0] - 2026-07-31
 
-### Added
-
-- Release hardening: per-platform native npm packages
-  (`polypack-native-<triple>`) with `optionalDependencies`, an abi3 Python
-  wheel build, a clean-venv 100K-vector example, cross-platform CI
-  (macOS/Windows) for Rust, native, and Python, a `package` job running the
-  release-candidate suite (clean Rust-free native install + clean-venv wheel
-  install), and `RELEASING.md` documenting the coordinated versioning and
-  release rules.
-- Rust persistence state machine with byte-compatible v1 codecs, query-plan
-  executor, Node native (NAPI-RS) and Python (PyO3) bindings, and the
-  conformance harness shipped as part of the multi-language roadmap
-  (Phases 0-5).
-
-## [Unreleased]
-
 ### Breaking changes
 
 - `BinaryStoreAdapter` and `BinaryStoreConfig` are no longer exported from the
@@ -302,24 +286,6 @@ project.
   cleanly, while the node-only persistence subpath is rejected.
 - `tests/browser-entry.test.ts` smoke-testing the browser-safe entry points
   under a browser-like environment.
-
-### Fixed
-
-- `BinaryStoreAdapter` now serialises startup, mutations, compaction, and
-  shutdown through an internal queue, preventing lost writes during recovery
-  or compaction and making `close()` idempotent.
-- WAL recovery now persists a snapshot before deleting the replayed WAL, and
-  tolerates a truncated WAL tail from a mid-append crash.
-
-### Changed
-
-- The stress suite now uses a fixed-seed PRNG for reproducible runs, asserts
-  `recall@10` against the exact index (100K/4-dim and 5K/384-dim), reports
-  p50/p95/p99 query latencies, and runs with `--expose-gc` so heap numbers are
-  accurate.
-
-### Added
-
 - `crates/polypack-node` — NAPI-RS bindings exposing the Rust vector core
   (exact + HNSW) to Node, with a `packages/node-native` wrapper that provides
   drop-in `NativeVectorIndex`/`NativeHnswIndex` classes, a `createNativeVectorIndex`
@@ -366,6 +332,21 @@ project.
   install), and `RELEASING.md` documenting the coordinated versioning and
   release rules.
 
+### Fixed
+
+- `BinaryStoreAdapter` now serialises startup, mutations, compaction, and
+  shutdown through an internal queue, preventing lost writes during recovery
+  or compaction and making `close()` idempotent.
+- WAL recovery now persists a snapshot before deleting the replayed WAL, and
+  tolerates a truncated WAL tail from a mid-append crash.
+
+### Changed
+
+- The stress suite now uses a fixed-seed PRNG for reproducible runs, asserts
+  `recall@10` against the exact index (100K/4-dim and 5K/384-dim), reports
+  p50/p95/p99 query latencies, and runs with `--expose-gc` so heap numbers are
+  accurate.
+
 ## [2.3.0] - 2026-07-20
 
 ### Breaking changes
@@ -400,20 +381,6 @@ project.
 
 ## [2.2.0] - 2026-07-20
 
-### Added
-
-- `DataTransform` serialize/deserialize hooks for non-cloneable data (Blob,
-  File, etc.) applied transparently across `addNode`, `updateNode`, `getNode`,
-  and query results.
-- Idempotent `warm()` — safe to call repeatedly.
-- `defineEdges()`: typed frozen edge-constant utility.
-- `buildEmbeddingText()`: weighted field repetition for feature-hash embeddings.
-- `walkAncestors()` / `walkDescendants()`: linear traversal with cycle
-  detection.
-- `searchNodes()`: shorthand for `queryPersistedText` + `whereNodeType`.
-- Node-type query helpers: `getNodesByType`, `getNodesByTypeOrdered`,
-  `countNodesByType`, `deleteNodesByType`.
-
 ### Breaking changes
 
 - Public node, edge, query, and vector reads now return detached snapshots.
@@ -430,6 +397,17 @@ project.
 
 ### Added
 
+- `DataTransform` serialize/deserialize hooks for non-cloneable data (Blob,
+  File, etc.) applied transparently across `addNode`, `updateNode`, `getNode`,
+  and query results.
+- Idempotent `warm()` — safe to call repeatedly.
+- `defineEdges()`: typed frozen edge-constant utility.
+- `buildEmbeddingText()`: weighted field repetition for feature-hash embeddings.
+- `walkAncestors()` / `walkDescendants()`: linear traversal with cycle
+  detection.
+- `searchNodes()`: shorthand for `queryPersistedText` + `whereNodeType`.
+- Node-type query helpers: `getNodesByType`, `getNodesByTypeOrdered`,
+  `countNodesByType`, `deleteNodesByType`.
 - Pluggable synchronous or asynchronous text embedding providers, graph helpers
   for embedding-backed node mutations and queries, and a default normalized
   384-dimensional feature-hash embedding requiring no model or dependency.
