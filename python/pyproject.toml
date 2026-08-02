@@ -19,13 +19,11 @@ python-source = "."
 module-name = "polypack._core"
 manifest-path = "../crates/polypack-python/Cargo.toml"
 features = ["pyo3/extension-module"]
-# bench.py/conformance.py are repo-relative dev tooling (they read fixtures
-# from ../tests/conformance and ../benchmarks, which don't exist post-install)
-# — keep them importable for local dev (`maturin develop`) but never ship
-# them, or any bytecode cache, in the published wheel/sdist.
+# CI builds a real (non-editable) wheel and runs the full pytest suite
+# against it — including test_conformance.py (imports polypack.conformance)
+# and examples/100k.py (imports polypack.bench) — so those two modules must
+# stay in the built wheel. Only exclude genuine build-environment leakage.
 exclude = [
-    "polypack/bench.py",
-    "polypack/conformance.py",
     "**/__pycache__/**",
     "**/*.pyc",
 ]
