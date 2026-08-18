@@ -141,7 +141,7 @@ export class PolyGraph {
       }
       const tx: GraphTransaction = {
         id,
-        addNode: node => inTransaction(() => this.addNode(node)),
+        addNode: (node, options) => inTransaction(() => this.addNode(node, options)),
         addEdge: edge => inTransaction(() => this.addEdge(edge)),
         updateNode: (nodeId, data, options) => inTransaction(() => this.updateNode(nodeId, data, undefined, undefined, options)),
         patchNode: (nodeId, patch, options) => inTransaction(() => this.patchNode(nodeId, patch, options)),
@@ -665,10 +665,10 @@ export class PolyGraph {
   // ── Node CRUD ──
 
   /** Insert or replace a node. Replacement updates type/vector indexes; data and vector are structured-cloned on entry. */
-  addNode(node: PolyNode): void {
+  addNode(node: PolyNode, options?: WriteOptions): void {
     this.assertMutationAllowed()
     const stored = this.prepareNode(node)
-    this.insertNode(stored)
+    this.insertNode(stored, options?.expectedRevision)
     this.schedulePersist()
   }
 
@@ -714,8 +714,11 @@ export class PolyGraph {
     return prepared
   }
 
-  protected insertNode(stored: PolyNode): void {
+  protected insertNode(stored: PolyNode, expectedRevision?: number): void {
     const previous = this.nodes.get(stored.id)
+    if (expectedRevision !== undefined && (previous?.revision ?? 0) !== expectedRevision) {
+      throw new ConflictError(stored.id, expectedRevision, previous?.revision)
+    }
     this.validateSecondaryNode(stored, previous?.id)
     if (previous) {
       this.unindexNode(stored.id)

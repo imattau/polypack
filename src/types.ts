@@ -203,7 +203,7 @@ export interface GraphResourceLimits {
 
 export interface GraphTransaction {
   readonly id: string
-  addNode(node: PolyNode): void
+  addNode(node: PolyNode, options?: WriteOptions): void
   addEdge(edge: PolyEdge): void
   updateNode(id: string, data: Partial<Record<string, unknown>>, options?: WriteOptions): PolyNode | undefined
   patchNode(id: string, patch: NodePatch, options?: WriteOptions): PolyNode | undefined

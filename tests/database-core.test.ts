@@ -68,6 +68,16 @@ describe('database-core mutation API', () => {
     expect(() => graph.removeNode('n', { expectedRevision: 0 })).toThrow(ConflictError)
   })
 
+  it('supports conditional replacement through addNode and transactions', async () => {
+    const graph = new PolyGraph()
+    graph.addNode(node('n', { value: 1 }))
+    expect(() => graph.addNode(node('n', { value: 2 }), { expectedRevision: 0 })).not.toThrow()
+    expect(graph.getNode('n')?.data.value).toBe(2)
+    await expect(graph.transaction(tx => tx.addNode(node('n', { value: 3 }), { expectedRevision: 0 })))
+      .rejects.toThrow(ConflictError)
+    expect(graph.getNode('n')?.data.value).toBe(2)
+  })
+
   it('applies nested set, unset, increment, and compare-and-set patches', () => {
     const graph = new PolyGraph()
     graph.addNode(node('n', { profile: { name: 'Alice', temporary: true }, views: 2 }))
