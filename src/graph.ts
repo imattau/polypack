@@ -7,6 +7,7 @@ import { VectorIndex } from './vector-index.js'
 import type { VectorIndexLike } from './vector-index.js'
 import { GraphQuery } from './query.js'
 import { PersistedGraphQuery } from './persisted-query.js'
+import { MigrationRegistry } from './migrations.js'
 import {
   ACTIVATION_DEFAULTS,
   activationScoreOf,
@@ -81,6 +82,7 @@ export class PolyGraph {
   readonly hotCacheMax: number
   readonly embedding: EmbeddingProvider
   readonly transform?: DataTransform
+  readonly migrations = new MigrationRegistry()
 
   protected sidecarData = new Map<string, unknown>()
   protected hotCacheOrder = new Map<string, true>()

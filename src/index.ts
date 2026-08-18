@@ -2,6 +2,7 @@ export { PolyGraph, GraphSnapshot } from './graph.js'
 export { ConflictError } from './errors.js'
 export { UniqueConstraintError } from './index-errors.js'
 export { SchemaValidationError } from './schema-errors.js'
+export { MigrationError, MigrationRegistry } from './migrations.js'
 export { QueryLimitError, QueryAbortedError } from './query-errors.js'
 export { VectorIndex, cosineSimilarity, euclideanSimilarity } from './vector-index.js'
 export { HNSWIndex } from './hnsw-index.js'
@@ -42,5 +43,6 @@ export type {
   NodeTypeDefinition,
   EdgeTypeDefinition,
 } from './types.js'
+export type { MigrationDefinition, MigrationOptions, MigrationProgress, MigrationReport } from './migrations.js'
 export { defineEdges } from './types.js'
 export { yieldToUI, edgeId } from './utils.js'
