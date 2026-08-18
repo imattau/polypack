@@ -6,10 +6,13 @@ import { encodeWalEntries, decodeWalEntries, encodeSnapshot, decodeSnapshot, enc
 import type { FileIO } from './file-io.js'
 import { createFileIO } from './file-io.js'
 import { mutationRecordFromChanges } from './mutation-log.js'
+import { ReadOnlyStoreError } from './lock-errors.js'
 
 const SNAPSHOT_FILE = 'snapshot.msgpack'
 const WAL_FILE = 'wal.msgpack'
 const MUTATION_LOG_FILE = 'mutations.msgpack'
+const LOCK_FILE = 'store.lock'
+const DEFAULT_STALE_LOCK_MS = 30_000
 const DEFAULT_COMPACT_THRESHOLD = 10_000
 /** Compact once the WAL holds at least this share of the store's record count. */
 const COMPACT_RATIO = 4
@@ -28,6 +31,10 @@ export interface BinaryStoreConfig {
   fileIO?: FileIO
   /** fsync WAL appends and snapshot writes. Off by default; see durability docs. */
   syncWrites?: boolean
+  /** Open without a writer lock and reject mutations. */
+  readOnly?: boolean
+  /** Age after which an abandoned writer lock may be recovered. */
+  staleLockMs?: number
 }
 
 interface ResolvedBinaryStoreConfig {
@@ -35,6 +42,8 @@ interface ResolvedBinaryStoreConfig {
   compactThreshold: number
   fileIO?: FileIO
   syncWrites: boolean
+  readOnly: boolean
+  staleLockMs: number
 }
 
 /**
@@ -64,6 +73,7 @@ export class BinaryStoreAdapter implements PersistenceAdapter {
   private initPromise: Promise<void> | null = null
   private closed = false
   private queue: Promise<unknown> = Promise.resolve()
+  private releaseLock?: () => Promise<void>
 
   constructor(config: BinaryStoreConfig) {
     this.config = {
@@ -71,6 +81,8 @@ export class BinaryStoreAdapter implements PersistenceAdapter {
       compactThreshold: config.compactThreshold ?? DEFAULT_COMPACT_THRESHOLD,
       fileIO: config.fileIO,
       syncWrites: config.syncWrites ?? false,
+      readOnly: config.readOnly ?? false,
+      staleLockMs: config.staleLockMs ?? DEFAULT_STALE_LOCK_MS,
     }
     this.capabilities = {
       atomicBatches: true,
@@ -185,8 +197,15 @@ export class BinaryStoreAdapter implements PersistenceAdapter {
     if (this.closed) throw new Error('BinaryStoreAdapter is closed')
   }
 
+  private assertWritable(): void {
+    if (this.config.readOnly) throw new ReadOnlyStoreError()
+  }
+
   private async doLoad(): Promise<void> {
     this.io = this.config.fileIO ?? (await createFileIO(this.config.storeDir, this.config.syncWrites))
+    if (!this.config.readOnly && this.io.acquireExclusiveLock) {
+      this.releaseLock = await this.io.acquireExclusiveLock(LOCK_FILE, { storeDir: this.config.storeDir }, this.config.staleLockMs)
+    }
     const snapshotData = await this.io.readFile(SNAPSHOT_FILE)
     if (snapshotData) {
       const { nodes, edges, vectors, indexes } = decodeSnapshot(snapshotData)
@@ -204,9 +223,11 @@ export class BinaryStoreAdapter implements PersistenceAdapter {
       for (const entry of decodeWalEntries(walData)) {
         this.replayEntry(entry)
       }
-      await this.writeSnapshot()
-      await this.io.deleteFile(WAL_FILE)
-      this.walEntryCount = 0
+      if (!this.config.readOnly) {
+        await this.writeSnapshot()
+        await this.io.deleteFile(WAL_FILE)
+        this.walEntryCount = 0
+      }
     }
     this.rebuildIndexes()
     const mutationData = await this.io.readFile(MUTATION_LOG_FILE)
@@ -287,6 +308,7 @@ export class BinaryStoreAdapter implements PersistenceAdapter {
 
   async applyChanges(changes: PersistenceChanges): Promise<void> {
     this.assertOpen()
+    this.assertWritable()
     await this.enqueue(async () => {
       await this.ensureLoaded()
       if (changes.operationId && this.mutationRecords.some(record => record.operationId === changes.operationId)) return
@@ -350,6 +372,7 @@ export class BinaryStoreAdapter implements PersistenceAdapter {
   /** Force the current state into a snapshot and compact the recovery WAL. */
   async checkpoint(): Promise<void> {
     this.assertOpen()
+    this.assertWritable()
     await this.enqueue(async () => {
       await this.ensureLoaded()
       await this.compact()
@@ -398,7 +421,12 @@ export class BinaryStoreAdapter implements PersistenceAdapter {
 
   /** Copy a checkpointed store into another FileIO directory. */
   async backup(destination: FileIO): Promise<void> {
-    await this.checkpoint()
+    if (this.config.readOnly) {
+      this.assertOpen()
+      await this.enqueue(() => this.ensureLoaded())
+    } else {
+      await this.checkpoint()
+    }
     for (const name of [SNAPSHOT_FILE, WAL_FILE, MUTATION_LOG_FILE]) {
       const data = await this.io.readFile(name)
       if (data) await destination.writeFile(name, data)
@@ -610,6 +638,7 @@ export class BinaryStoreAdapter implements PersistenceAdapter {
 
   async clearAll(): Promise<void> {
     this.assertOpen()
+    this.assertWritable()
     await this.enqueue(async () => {
       await this.ensureLoaded()
       this.nodes.clear()
@@ -637,7 +666,11 @@ export class BinaryStoreAdapter implements PersistenceAdapter {
     await this.enqueue(async () => {
       if (this.initPromise) {
         await this.ensureLoaded()
-        await this.compact()
+        if (!this.config.readOnly) await this.compact()
+      }
+      if (this.releaseLock) {
+        await this.releaseLock()
+        this.releaseLock = undefined
       }
     })
   }

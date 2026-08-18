@@ -4,6 +4,7 @@ export interface FileIO {
   appendFile(name: string, data: Uint8Array): Promise<void>
   deleteFile(name: string): Promise<void>
   fileExists(name: string): Promise<boolean>
+  acquireExclusiveLock?(name: string, metadata: Record<string, unknown>, staleAfterMs: number): Promise<() => Promise<void>>
 }
 
 export function isNode(): boolean {
