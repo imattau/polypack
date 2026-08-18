@@ -66,6 +66,16 @@ describe('SyncAdapter', () => {
     expect(adapter.oplog.all.map(op => op.kind)).toEqual(['addNode'])
   })
 
+  it('preserves committed transaction identity in adapter sync operations', async () => {
+    const adapter = new SyncAdapter(new MemoryAdapter(), 'identity-client')
+    await adapter.applyChanges({
+      transactionId: 'tx-1', operationId: 'commit-1',
+      putNodes: [{ id: 'a', type: 't', data: {}, vector: null, insertedAt: 1, updatedAt: 1 }],
+      deleteNodeIds: [], putEdges: [], deleteEdgeIds: [], putVectors: [], deleteVectorIds: [],
+    })
+    expect(adapter.oplog.all[0]).toMatchObject({ transactionId: 'tx-1', operationId: 'commit-1:put-node:a' })
+  })
+
   it('records node mutations in the op log', async () => {
     const inner = new MemoryAdapter()
     const adapter = new SyncAdapter(inner, 'client-1')
@@ -185,6 +195,34 @@ describe('SyncServer + SyncClient', () => {
     expect(broadcasts).toHaveLength(1)
     expect(acknowledgements).toHaveLength(2)
     expect(acknowledgements[1]).toMatchObject({ type: 'ack', clientId: 'sender', fromSeq: 1 })
+  })
+
+  it('deduplicates logical operations by operation ID across sequence changes', () => {
+    const server = new SyncServer()
+    const acknowledgements: SyncMessage[] = []
+    const receive = server.addClient({ clientId: 'sender', send: message => acknowledgements.push(message) })
+    const operation = (seq: number): SyncOp => ({
+      seq, timestamp: 1, clientId: 'sender', operationId: 'logical-1', kind: 'addNode',
+      payload: { id: 'logical', type: 't', data: {}, insertedAt: 1, updatedAt: 1 },
+    })
+    receive({ type: 'delta', clientId: 'sender', fromSeq: 0, ops: [operation(1)] })
+    receive({ type: 'delta', clientId: 'sender', fromSeq: 1, ops: [operation(2)] })
+
+    expect(server.ops).toHaveLength(1)
+    expect(acknowledgements[1]).toMatchObject({ type: 'ack', fromSeq: 2 })
+  })
+
+  it('does not deduplicate equal operation IDs from different clients', () => {
+    const server = new SyncServer()
+    const receiveA = server.addClient({ clientId: 'a', send: () => undefined })
+    const receiveB = server.addClient({ clientId: 'b', send: () => undefined })
+    const op = (clientId: string, seq: number): SyncOp => ({
+      seq, timestamp: 1, clientId, operationId: 'same-local-id', kind: 'addNode',
+      payload: { id: `${clientId}-node`, type: 't', data: {}, insertedAt: 1, updatedAt: 1 },
+    })
+    receiveA({ type: 'delta', clientId: 'a', fromSeq: 0, ops: [op('a', 1)] })
+    receiveB({ type: 'delta', clientId: 'b', fromSeq: 0, ops: [op('b', 1)] })
+    expect(server.ops).toHaveLength(2)
   })
 
   it('retries an unacknowledged operation until an acknowledgement arrives', async () => {

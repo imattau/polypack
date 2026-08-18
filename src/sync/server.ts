@@ -29,6 +29,7 @@ export interface SyncSubscriptionOptions {
 export class SyncServer {
   private opLog: SyncOp[] = []
   private seenOps = new Set<string>()
+  private seenOperationIds = new Set<string>()
   private clients: SyncServerClient[] = []
   private clientFilters = new Map<SyncServerClient, SyncSubscriptionOptions['filter']>()
   private baseCursor = 0
@@ -51,6 +52,7 @@ export class SyncServer {
         this.opLog = state.ops.slice(-this.options.maxOps)
         this.baseCursor += state.ops.length - this.opLog.length
         this.seenOps = new Set(state.ops.map(op => `${op.clientId}:${op.seq}`))
+        this.seenOperationIds = new Set(state.ops.flatMap(op => op.operationId ? [`${op.clientId}:${op.operationId}`] : []))
       })
     }
     await this.readyPromise
@@ -153,8 +155,10 @@ export class SyncServer {
       const accepted: SyncOp[] = []
       for (const op of msg.ops) {
         const key = `${op.clientId}:${op.seq}`
-        if (this.seenOps.has(key)) continue
+        const operationKey = op.operationId ? `${op.clientId}:${op.operationId}` : undefined
+        if (this.seenOps.has(key) || (operationKey && this.seenOperationIds.has(operationKey))) continue
         this.seenOps.add(key)
+        if (operationKey) this.seenOperationIds.add(operationKey)
         this.opLog.push(op)
         accepted.push(op)
         this.onOp?.(op)
@@ -197,9 +201,11 @@ export class SyncServer {
     const accepted: SyncOp[] = []
     for (const op of msg.ops) {
       const key = `${op.clientId}:${op.seq}`
-      if (this.seenOps.has(key)) continue
+      const operationKey = op.operationId ? `${op.clientId}:${op.operationId}` : undefined
+      if (this.seenOps.has(key) || (operationKey && this.seenOperationIds.has(operationKey))) continue
       await this.options.operationLog!.append(op)
       this.seenOps.add(key)
+      if (operationKey) this.seenOperationIds.add(operationKey)
       this.opLog.push(op)
       accepted.push(op)
       this.onOp?.(op)

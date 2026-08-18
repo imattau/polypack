@@ -23,8 +23,12 @@ export class SyncAdapter implements PersistenceAdapter {
     this.oplog = new OpLog(clientId)
   }
 
-  private record(kind: import('./types').SyncOp['kind'], payload: Record<string, unknown>) {
-    const op = this.oplog.append(kind, payload)
+  private record(
+    kind: import('./types').SyncOp['kind'],
+    payload: Record<string, unknown>,
+    identity?: { transactionId?: string; operationId?: string },
+  ) {
+    const op = this.oplog.append(kind, payload, identity)
     this.onOp?.(op)
   }
 
@@ -46,15 +50,21 @@ export class SyncAdapter implements PersistenceAdapter {
       await this.inner.bulkPutEdges(changes.putEdges)
       await this.inner.bulkPutVectors(changes.putVectors)
     }
-    for (const id of changes.deleteNodeIds) this.record('removeNode', { id })
+    const transactionId = changes.transactionId
+    const operationId = changes.operationId
+    const identity = (suffix: string) => transactionId || operationId ? {
+      transactionId,
+      operationId: operationId ? `${operationId}:${suffix}` : undefined,
+    } : undefined
+    for (const id of changes.deleteNodeIds) this.record('removeNode', { id }, identity(`delete-node:${id}`))
     for (const id of changes.deleteEdgeIds) {
-      this.record('removeEdges', this.edgeRemovalPayload(id))
+      this.record('removeEdges', this.edgeRemovalPayload(id), identity(`delete-edge:${id}`))
     }
     for (const node of changes.putNodes) {
-      this.record('addNode', node as unknown as Record<string, unknown>)
+      this.record('addNode', node as unknown as Record<string, unknown>, identity(`put-node:${node.id}`))
     }
     for (const edge of changes.putEdges) {
-      this.record('addEdge', edge as unknown as Record<string, unknown>)
+      this.record('addEdge', edge as unknown as Record<string, unknown>, identity(`put-edge:${edge.id}`))
     }
   }
 

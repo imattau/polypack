@@ -245,6 +245,22 @@ describe('database-core mutation API', () => {
     await restored.close()
   })
 
+  it('keeps direct snapshot reads isolated from later graph mutations', async () => {
+    const graph = new PolyGraph()
+    graph.addNode(node('a', { value: 1 }))
+    graph.addNode(node('b', { value: 2 }))
+    graph.addEdge({ id: 'ab', source: 'a', target: 'b', type: 'RELATED', data: { stable: true }, createdAt: 1 })
+    const snapshot = await graph.snapshot()
+
+    graph.updateNode('a', { value: 9 })
+    graph.removeEdge('ab')
+
+    expect(snapshot.getNodes().map(item => item.id)).toEqual(['a', 'b'])
+    expect(snapshot.getNode('a')?.data.value).toBe(1)
+    expect(snapshot.getEdges('a')).toHaveLength(1)
+    expect(snapshot.getEdges('a')[0].data).toEqual({ stable: true })
+  })
+
   it('reports persisted vector dimensionality corruption during verification', async () => {
     const io = new MemoryFileIO()
     const adapter = new BinaryStoreAdapter({ storeDir: 'verify-vector', fileIO: io })

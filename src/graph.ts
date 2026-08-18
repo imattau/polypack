@@ -62,6 +62,30 @@ export class GraphSnapshot {
     }
     return copy
   }
+
+  getNodes(): PolyNode[] {
+    return [...this.nodes.keys()].map(id => this.getNode(id)).filter((node): node is PolyNode => node !== undefined)
+  }
+
+  getEdges(source?: string, type?: string): PolyEdge[] {
+    const sources = source === undefined ? [...this.edges.keys()] : [source]
+    const result: PolyEdge[] = []
+    for (const currentSource of sources) {
+      for (const edge of this.edges.get(currentSource)?.values() ?? []) {
+        if (type !== undefined && edge.type !== type) continue
+        result.push({
+          id: edge.id,
+          source: currentSource,
+          target: edge.target,
+          type: edge.type,
+          data: edge.data ? cloneData(edge.data) : undefined,
+          createdAt: edge.createdAt,
+          revision: edge.revision,
+        })
+      }
+    }
+    return result
+  }
 }
 
 /**
