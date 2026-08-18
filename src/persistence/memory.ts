@@ -131,6 +131,15 @@ export class MemoryAdapter implements PersistenceAdapter {
     return this.nextMutation - 1n
   }
 
+  async stats() {
+    return {
+      persistedNodeCount: this.nodes.size,
+      edgeCount: this.edges.size,
+      vectorCount: this.vectors.size,
+      mutationCount: this.mutations.length,
+    }
+  }
+
   async putNode(node: SerializedNode): Promise<void> {
     this.indexNode(node)
     this.nodes.set(node.id, node)

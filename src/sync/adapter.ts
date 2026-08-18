@@ -78,6 +78,10 @@ export class SyncAdapter implements PersistenceAdapter {
     return this.inner.latestMutationSequence ? this.inner.latestMutationSequence() : 0n
   }
 
+  async stats() {
+    return this.inner.stats ? this.inner.stats() : {}
+  }
+
   async putNode(node: SerializedNode): Promise<void> {
     await this.inner.putNode(node)
     this.record('addNode', node as unknown as Record<string, unknown>)

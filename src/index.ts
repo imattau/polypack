@@ -33,6 +33,8 @@ export type {
   QueryExplain,
   GraphOperation,
   MutationRecord,
+  VerificationReport,
+  GraphStats,
 } from './types.js'
 export { defineEdges } from './types.js'
 export { yieldToUI, edgeId } from './utils.js'

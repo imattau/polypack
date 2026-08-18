@@ -1,4 +1,4 @@
-import type { SerializedNode, SerializedEdge, IndexDefinition, MutationRecord } from '../types.js'
+import type { SerializedNode, SerializedEdge, IndexDefinition, MutationRecord, VerificationReport, GraphStats } from '../types.js'
 import type { AdapterCapabilities } from '../types.js'
 
 /** Storage-level node predicates used by persisted queries. */
@@ -31,6 +31,9 @@ export interface PersistenceAdapter {
   getIndexDefinitions?(): Promise<IndexDefinition[]>
   getMutationsSince?(sequence: bigint): Promise<MutationRecord[]>
   latestMutationSequence?(): Promise<bigint>
+  checkpoint?(): Promise<void>
+  verify?(): Promise<VerificationReport>
+  stats?(): Promise<Partial<GraphStats>>
   /** Optional atomic commit hook used in preference to individual bulk methods. */
   applyChanges?(changes: PersistenceChanges): Promise<void>
   putNode(node: SerializedNode): Promise<void>

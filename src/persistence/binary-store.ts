@@ -1,4 +1,4 @@
-import type { SerializedNode, SerializedEdge, AdapterCapabilities, IndexDefinition, MutationRecord } from '../types.js'
+import type { SerializedNode, SerializedEdge, AdapterCapabilities, IndexDefinition, MutationRecord, VerificationReport } from '../types.js'
 import type { PersistenceAdapter, PersistenceChanges, PersistedNodeQuery } from './adapter.js'
 import { applyPersistedCountPagination, applyPersistedNodeQuery, matchesPersistedNode } from './query.js'
 import type { WalEntry } from './binary-format.js'
@@ -345,6 +345,73 @@ export class BinaryStoreAdapter implements PersistenceAdapter {
     this.assertOpen()
     await this.enqueue(() => this.ensureLoaded())
     return this.indexDefinitions.map(index => ({ ...index, fields: [...index.fields] }))
+  }
+
+  /** Force the current state into a snapshot and compact the recovery WAL. */
+  async checkpoint(): Promise<void> {
+    this.assertOpen()
+    await this.enqueue(async () => {
+      await this.ensureLoaded()
+      await this.compact()
+      if (this.walEntryCount === 0) await this.writeSnapshot()
+    })
+  }
+
+  /** Verify decoded records, indexes, vectors, and logical mutation history. */
+  async verify(): Promise<VerificationReport> {
+    this.assertOpen()
+    await this.enqueue(() => this.ensureLoaded())
+    const errors: string[] = []
+    for (const node of this.nodes.values()) {
+      if (!node.id || !node.type) errors.push(`invalid node identity: ${node.id}`)
+      if (!Number.isFinite(node.insertedAt) || !Number.isFinite(node.updatedAt)) errors.push(`invalid timestamps: ${node.id}`)
+    }
+    for (const edge of this.edges.values()) {
+      if (!edge.id || !edge.source || !edge.target || !edge.type) errors.push(`invalid edge identity: ${edge.id}`)
+      if (!this.nodes.has(edge.source)) errors.push(`edge ${edge.id} has missing source ${edge.source}`)
+      if (!this.nodes.has(edge.target)) errors.push(`edge ${edge.id} has missing target ${edge.target}`)
+    }
+    for (const [id, vector] of this.vectors) {
+      if (!vector.every(value => Number.isFinite(value))) errors.push(`invalid vector values: ${id}`)
+    }
+    for (const [type, ids] of this.byType) {
+      for (const id of ids) if (this.nodes.get(id)?.type !== type) errors.push(`stale type index entry: ${type}/${id}`)
+    }
+    for (const [id, edgeIds] of this.edgesBySource) {
+      for (const edgeId of edgeIds) if (this.edges.get(edgeId)?.source !== id) errors.push(`stale source edge index entry: ${id}/${edgeId}`)
+    }
+    return { ok: errors.length === 0, errors, nodeCount: this.nodes.size, edgeCount: this.edges.size, vectorCount: this.vectors.size, mutationCount: this.mutationRecords.length }
+  }
+
+  async stats() {
+    this.assertOpen()
+    await this.enqueue(() => this.ensureLoaded())
+    const wal = await this.io.readFile(WAL_FILE)
+    return {
+      persistedNodeCount: this.nodes.size,
+      edgeCount: this.edges.size,
+      vectorCount: this.vectors.size,
+      mutationCount: this.mutationRecords.length,
+      walBytes: wal?.byteLength ?? 0,
+    }
+  }
+
+  /** Copy a checkpointed store into another FileIO directory. */
+  async backup(destination: FileIO): Promise<void> {
+    await this.checkpoint()
+    for (const name of [SNAPSHOT_FILE, WAL_FILE, MUTATION_LOG_FILE]) {
+      const data = await this.io.readFile(name)
+      if (data) await destination.writeFile(name, data)
+    }
+  }
+
+  /** Restore all store files from one FileIO directory into another. */
+  static async restore(source: FileIO, destination: FileIO): Promise<void> {
+    for (const name of [SNAPSHOT_FILE, WAL_FILE, MUTATION_LOG_FILE]) {
+      const data = await source.readFile(name)
+      if (data) await destination.writeFile(name, data)
+      else await destination.deleteFile(name)
+    }
   }
 
   async getMutationsSince(sequence: bigint): Promise<MutationRecord[]> {

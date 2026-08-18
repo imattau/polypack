@@ -142,6 +142,28 @@ export interface MutationRecord {
   metadata?: Record<string, unknown>
 }
 
+export interface VerificationReport {
+  ok: boolean
+  errors: string[]
+  nodeCount: number
+  edgeCount: number
+  vectorCount: number
+  mutationCount: number
+}
+
+export interface GraphStats {
+  loadedNodeCount: number
+  persistedNodeCount: number
+  edgeCount: number
+  vectorCount: number
+  dirtyRecordCount: number
+  pendingPersistence: boolean
+  indexCount: number
+  mutationCount?: number
+  walBytes?: number
+  memoryEstimateBytes?: number
+}
+
 export interface GraphTransaction {
   readonly id: string
   addNode(node: PolyNode): void

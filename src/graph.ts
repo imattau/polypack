@@ -1,5 +1,5 @@
 import { Subject } from 'rxjs'
-import type { PolyNode, PolyEdge, EdgeOwnership, GraphChangeEvent, SerializedNode, SerializedEdge, DataTransform, NodeActivation, WriteOptions, NodePatch, GraphTransaction, IndexDefinition } from './types.js'
+import type { PolyNode, PolyEdge, EdgeOwnership, GraphChangeEvent, SerializedNode, SerializedEdge, DataTransform, NodeActivation, WriteOptions, NodePatch, GraphTransaction, IndexDefinition, GraphStats } from './types.js'
 import { ConflictError } from './errors.js'
 import { UniqueConstraintError } from './index-errors.js'
 import { VectorIndex } from './vector-index.js'
@@ -1085,6 +1085,27 @@ export class PolyGraph {
   /** Create a mutable {@link GraphQuery} over the currently loaded (hot) nodes. */
   query(): GraphQuery {
     return new GraphQuery(this.nodes, this.edges, this.nodeToEdgeMap, this.transform, this.sidecarData, this.indexes, this.indexCandidates.bind(this))
+  }
+
+  /** Return operational counters without binding the graph to a metrics package. */
+  async stats(): Promise<GraphStats> {
+    const adapterStats = this.persistence.stats ? await this.persistence.stats() : {}
+    const persistedNodeCount = adapterStats.persistedNodeCount ?? (await this.persistence.allNodeIds()).length
+    const edgeCount = adapterStats.edgeCount ?? (await this.persistence.getAllEdges()).length
+    const vectorCount = adapterStats.vectorCount ?? (await this.persistence.getAllVectors()).length
+    let memoryEstimateBytes = 0
+    try { memoryEstimateBytes = JSON.stringify([...this.nodes.values()]).length * 2 } catch { /* non-JSON sidecars are excluded */ }
+    return {
+      loadedNodeCount: this.nodes.size,
+      persistedNodeCount,
+      edgeCount,
+      vectorCount,
+      dirtyRecordCount: this.dirtyNodes.size + this.dirtyEdges.size + this.dirtyVectors.size + this.removedNodeIds.size + this.removedEdgeIds.size + this.removedVectorIds.size,
+      pendingPersistence: this.hasPendingPersistence(),
+      indexCount: this.secondaryIndexes.size,
+      memoryEstimateBytes,
+      ...adapterStats,
+    }
   }
 
   /** Capture a detached, queryable view of the currently warmed graph state. */
