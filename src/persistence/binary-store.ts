@@ -388,6 +388,14 @@ export class BinaryStoreAdapter implements PersistenceAdapter {
     for (const node of this.nodes.values()) {
       if (!node.id || !node.type) errors.push(`invalid node identity: ${node.id}`)
       if (!Number.isFinite(node.insertedAt) || !Number.isFinite(node.updatedAt)) errors.push(`invalid timestamps: ${node.id}`)
+      if (node.activation) {
+        if (!Number.isFinite(node.activation.score) || node.activation.score < 0 || node.activation.score > 1) errors.push(`invalid activation score: ${node.id}`)
+        if (!Number.isFinite(node.activation.importance) || node.activation.importance < 0 || node.activation.importance > 1) errors.push(`invalid activation importance: ${node.id}`)
+        if (!Number.isInteger(node.activation.reinforcementCount) || node.activation.reinforcementCount < 0) errors.push(`invalid activation count: ${node.id}`)
+        if (!Number.isFinite(node.activation.lastMeaningfulActivation) || node.activation.lastMeaningfulActivation < 0) errors.push(`invalid activation timestamp: ${node.id}`)
+      }
+      const storedVector = this.vectors.get(node.id)
+      if (node.vector && storedVector && node.vector.length !== storedVector.length) errors.push(`vector dimensionality mismatch: ${node.id}`)
     }
     for (const edge of this.edges.values()) {
       if (!edge.id || !edge.source || !edge.target || !edge.type) errors.push(`invalid edge identity: ${edge.id}`)
@@ -402,6 +410,12 @@ export class BinaryStoreAdapter implements PersistenceAdapter {
     }
     for (const [id, edgeIds] of this.edgesBySource) {
       for (const edgeId of edgeIds) if (this.edges.get(edgeId)?.source !== id) errors.push(`stale source edge index entry: ${id}/${edgeId}`)
+    }
+    for (const [id, edgeIds] of this.edgesByTarget) {
+      for (const edgeId of edgeIds) if (this.edges.get(edgeId)?.target !== id) errors.push(`stale target edge index entry: ${id}/${edgeId}`)
+    }
+    for (let i = 1; i < this.mutationRecords.length; i++) {
+      if (this.mutationRecords[i].sequence <= this.mutationRecords[i - 1].sequence) errors.push(`non-monotonic mutation sequence at index ${i}`)
     }
     return { ok: errors.length === 0, errors, nodeCount: this.nodes.size, edgeCount: this.edges.size, vectorCount: this.vectors.size, mutationCount: this.mutationRecords.length }
   }

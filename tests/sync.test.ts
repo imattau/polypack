@@ -142,6 +142,32 @@ describe('SyncServer + SyncClient', () => {
     cleanup()
   })
 
+  it('preserves transaction identity on every operation in a transaction', async () => {
+    const sent: SyncMessage[] = []
+    const graph = new PolyGraph()
+    const client = new SyncClient({
+      graph,
+      clientId: 'transaction-client',
+      autoFlush: false,
+      retryMs: 0,
+      transport: { send: message => sent.push(message), close: () => undefined, onMessage: null },
+    })
+
+    await graph.transaction(tx => {
+      tx.addNode({ id: 'a', type: 't', data: {}, insertedAt: 1, updatedAt: 1 })
+      tx.addNode({ id: 'b', type: 't', data: {}, insertedAt: 1, updatedAt: 1 })
+    })
+
+    const pending = client.pendingOps
+    expect(pending).toHaveLength(2)
+    expect(pending[0].transactionId).toBeTruthy()
+    expect(pending[1].transactionId).toBe(pending[0].transactionId)
+    expect(pending[0].operationId).not.toBe(pending[1].operationId)
+    client.flush()
+    expect(sent[0].ops.map(op => op.transactionId)).toEqual([pending[0].transactionId, pending[1].transactionId])
+    client.disconnect()
+  })
+
   it('deduplicates retried operations while acknowledging every delivery', () => {
     const server = new SyncServer()
     const acknowledgements: SyncMessage[] = []
@@ -593,5 +619,97 @@ describe('SyncServer + SyncClient', () => {
     const recovery: SyncMessage[] = []
     server.addClient({ clientId: 'recovery', send: message => recovery.push(message) })({ type: 'request-snapshot', clientId: 'recovery', fromSeq: 0, ops: [] })
     expect(recovery[0].errors?.[0].code).toBe('cursor_expired')
+  })
+
+  it('advances filtered clients using the global server cursor', () => {
+    const server = new SyncServer()
+    const graph = new PolyGraph()
+    const client = new SyncClient({
+      graph,
+      clientId: 'filtered-client',
+      retryMs: 0,
+      transport: { send: () => undefined, close: () => undefined, onMessage: null },
+    })
+    const sender = { clientId: 'sender', send: () => undefined }
+    const received: SyncMessage[] = []
+    const receiver = { clientId: 'filtered-client', send: (message: SyncMessage) => received.push(message) }
+    const send = server.addClient(sender)
+    server.addClient(receiver, { filter: op => op.kind === 'addNode' })
+
+    send({ type: 'delta', clientId: 'sender', fromSeq: 0, ops: [
+      { seq: 1, timestamp: 1, clientId: 'sender', kind: 'addNode', payload: { id: 'visible', type: 't', data: {}, insertedAt: 1, updatedAt: 1 } },
+      { seq: 2, timestamp: 1, clientId: 'sender', kind: 'removeNode', payload: { id: 'hidden' } },
+    ] })
+    client.handleMessage(received[0])
+
+    expect(received[0].cursor).toBe(2)
+    expect(client.syncCursor).toBe(2)
+    client.disconnect()
+  })
+
+  it('bounds sync batches and splits client flushes', async () => {
+    const responses: SyncMessage[] = []
+    const server = new SyncServer({ maxBatchOps: 1 })
+    const receive = server.addClient({ clientId: 'bounded', send: message => responses.push(message) })
+    receive({ type: 'delta', clientId: 'bounded', fromSeq: 0, ops: [
+      { seq: 1, timestamp: 1, clientId: 'bounded', kind: 'addNode', payload: { id: 'a' } },
+      { seq: 2, timestamp: 1, clientId: 'bounded', kind: 'addNode', payload: { id: 'b' } },
+    ], protocolVersion: 1 })
+    expect(responses[0].errors?.[0].code).toBe('batch_too_large')
+
+    const sent: SyncMessage[] = []
+    const graph = new PolyGraph()
+    const client = new SyncClient({
+      graph,
+      clientId: 'split',
+      autoFlush: false,
+      maxOpsPerMessage: 1,
+      transport: { send: message => sent.push(message), close: () => undefined, onMessage: null },
+    })
+    graph.addNode({ id: 'a', type: 't', data: {}, insertedAt: 1, updatedAt: 1 })
+    graph.addNode({ id: 'b', type: 't', data: {}, insertedAt: 1, updatedAt: 1 })
+    client.flush()
+    expect(sent).toHaveLength(1)
+    expect(sent[0].ops).toHaveLength(1)
+    client.disconnect()
+  })
+
+  it('paginates oversized server recovery snapshots', () => {
+    const server = new SyncServer({ maxBatchOps: 1 })
+    const sent: SyncMessage[] = []
+    const sender = { clientId: 'sender', send: () => undefined }
+    const request = server.addClient(sender)
+    request({ type: 'delta', clientId: 'sender', fromSeq: 0, ops: [
+      { seq: 1, timestamp: 1, clientId: 'sender', kind: 'addNode', payload: { id: 'a' } },
+    ] })
+    request({ type: 'delta', clientId: 'sender', fromSeq: 1, ops: [
+      { seq: 2, timestamp: 1, clientId: 'sender', kind: 'addNode', payload: { id: 'b' } },
+    ] })
+    const recovery = server.addClient({ clientId: 'recovery', send: message => sent.push(message) })
+
+    recovery({ type: 'request-snapshot', clientId: 'recovery', fromSeq: 0, ops: [] })
+    expect(sent[0]).toMatchObject({ type: 'snapshot', cursor: 1, more: true })
+    expect(sent[0].ops).toHaveLength(1)
+
+    recovery({ type: 'request-snapshot', clientId: 'recovery', fromSeq: sent[0].cursor, ops: [] })
+    expect(sent[1]).toMatchObject({ type: 'delta', cursor: 2, more: false })
+    expect(sent[1].ops[0].payload).toMatchObject({ id: 'b' })
+  })
+
+  it('detects corrupted server deltas and requests recovery', () => {
+    const requested: SyncMessage[] = []
+    const client = new SyncClient({
+      graph: new PolyGraph(),
+      clientId: 'checksum-client',
+      onError: error => expect(error.code).toBe('checksum_mismatch'),
+      transport: { send: message => requested.push(message), close: () => undefined, onMessage: null },
+    })
+    client.handleMessage({
+      type: 'delta', clientId: 'server', fromSeq: 0,
+      ops: [{ seq: 1, timestamp: 1, clientId: 'server', kind: 'addNode', payload: { id: 'n' } }],
+      checksum: 'corrupt', protocolVersion: 1,
+    })
+    expect(requested[0]).toMatchObject({ type: 'request-snapshot', fromSeq: 0 })
+    client.disconnect()
   })
 })

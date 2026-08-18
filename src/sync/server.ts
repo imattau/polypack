@@ -1,6 +1,7 @@
 import type { SyncConflictResult, SyncContext, SyncError, SyncMessage, SyncOp } from './types.js'
 import { SYNC_PROTOCOL_VERSION } from './types.js'
 import type { SyncOperationLog } from './log.js'
+import { syncChecksum } from './checksum.js'
 
 export interface SyncServerOptions {
   protocolVersion?: number
@@ -9,6 +10,7 @@ export interface SyncServerOptions {
   conflict?: (operation: SyncOp, context: SyncContext) => Promise<SyncConflictResult> | SyncConflictResult
   clientMetadata?: (client: SyncServerClient) => Record<string, unknown> | undefined
   operationLog?: SyncOperationLog
+  maxBatchOps?: number
 }
 
 export type SyncServerClient = {
@@ -30,13 +32,14 @@ export class SyncServer {
   private clients: SyncServerClient[] = []
   private clientFilters = new Map<SyncServerClient, SyncSubscriptionOptions['filter']>()
   private baseCursor = 0
-  private readonly options: SyncServerOptions & { protocolVersion: number; maxOps: number }
+  private readonly options: SyncServerOptions & { protocolVersion: number; maxOps: number; maxBatchOps: number }
   private readyPromise: Promise<void> | null = null
   onOp?: (op: SyncOp) => void
 
   constructor(options: SyncServerOptions = {}) {
-    this.options = { ...options, protocolVersion: options.protocolVersion ?? SYNC_PROTOCOL_VERSION, maxOps: options.maxOps ?? Number.POSITIVE_INFINITY }
+    this.options = { ...options, protocolVersion: options.protocolVersion ?? SYNC_PROTOCOL_VERSION, maxOps: options.maxOps ?? Number.POSITIVE_INFINITY, maxBatchOps: options.maxBatchOps ?? Number.POSITIVE_INFINITY }
     if ((this.options.maxOps !== Number.POSITIVE_INFINITY && !Number.isInteger(this.options.maxOps)) || this.options.maxOps < 1) throw new RangeError('maxOps must be a positive integer or Infinity')
+    if ((this.options.maxBatchOps !== Number.POSITIVE_INFINITY && !Number.isInteger(this.options.maxBatchOps)) || this.options.maxBatchOps < 1) throw new RangeError('maxBatchOps must be a positive integer or Infinity')
   }
 
   /** Load durable server history before accepting requests. */
@@ -83,6 +86,10 @@ export class SyncServer {
       return
     }
     if (msg.type === 'delta') {
+      if (msg.ops.length > this.options.maxBatchOps) {
+        sender.send({ type: 'ack', clientId: msg.clientId, fromSeq: msg.fromSeq, ops: [], protocolVersion: this.options.protocolVersion, errors: [{ code: 'batch_too_large', message: `Batch contains ${msg.ops.length} operations; maximum is ${this.options.maxBatchOps}` }] })
+        return
+      }
       if (this.options.authorize || this.options.conflict) {
         void this.authorizeAndProcess(msg, sender)
         return
@@ -95,11 +102,16 @@ export class SyncServer {
     const cursorIsValid = msg.fromSeq >= this.baseCursor && msg.fromSeq <= this.cursor
     const requestedCursor = cursorIsValid ? msg.fromSeq : 0
     const offset = requestedCursor === 0 ? 0 : requestedCursor - this.baseCursor
+    const available = this.opLog.slice(offset)
+    const ops = available.slice(0, this.options.maxBatchOps)
     sender.send({
       type: requestedCursor === 0 ? 'snapshot' : 'delta',
       clientId: 'server',
       fromSeq: requestedCursor,
-      ops: this.opLog.slice(offset),
+      cursor: requestedCursor + ops.length,
+      more: ops.length < available.length,
+      ops,
+      checksum: syncChecksum(ops),
       protocolVersion: this.options.protocolVersion,
       errors: cursorIsValid ? undefined : [{ code: 'cursor_expired', message: 'Requested cursor is no longer available' }],
     })
@@ -171,7 +183,9 @@ export class SyncServer {
           type: 'delta',
           clientId: 'server',
           fromSeq: broadcastCursor,
+          cursor: this.cursor,
           ops: visible,
+          checksum: syncChecksum(visible),
           protocolVersion: this.options.protocolVersion,
         })
       }
@@ -204,7 +218,7 @@ export class SyncServer {
       const context: SyncContext = { clientId: client.clientId ?? 'unknown', protocolVersion: this.options.protocolVersion }
       const visible = filter ? accepted.filter(op => filter(op, context)) : accepted
       if (visible.length === 0) continue
-      client.send({ type: 'delta', clientId: 'server', fromSeq: broadcastCursor, ops: visible, protocolVersion: this.options.protocolVersion })
+      client.send({ type: 'delta', clientId: 'server', fromSeq: broadcastCursor, cursor: this.cursor, ops: visible, checksum: syncChecksum(visible), protocolVersion: this.options.protocolVersion })
     }
   }
 

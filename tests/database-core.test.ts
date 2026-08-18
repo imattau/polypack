@@ -225,6 +225,17 @@ describe('database-core mutation API', () => {
     expect((await restored.getMutationsSince!(0n)).length).toBeGreaterThan(0)
   })
 
+  it('reports persisted vector dimensionality corruption during verification', async () => {
+    const io = new MemoryFileIO()
+    const adapter = new BinaryStoreAdapter({ storeDir: 'verify-vector', fileIO: io })
+    await adapter.putNode({ id: 'n', type: 'record', data: {}, vector: [1, 2], insertedAt: 1, updatedAt: 1 })
+    await adapter.putVector('n', [1])
+    const report = await adapter.verify()
+    expect(report.ok).toBe(false)
+    expect(report.errors).toContain('vector dimensionality mismatch: n')
+    await adapter.close()
+  })
+
   it('reports graph and storage statistics', async () => {
     const graph = new PolyGraph(new MemoryAdapter())
     graph.defineIndex({ name: 'value', fields: ['value'] })

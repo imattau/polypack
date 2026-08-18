@@ -63,6 +63,8 @@ export interface GraphChangeEvent {
   delta?: number
   /** Present on `activation_updated` events: an optional reinforcement reason. */
   reason?: string
+  /** Transaction that produced this event, when the mutation ran in one. */
+  transactionId?: string
 }
 
 /** Persistence-safe node representation using plain arrays for vectors. */

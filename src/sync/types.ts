@@ -7,7 +7,7 @@ export interface SyncContext {
 }
 
 export interface SyncError {
-  code: 'unauthorized' | 'conflict' | 'protocol_version' | 'cursor_expired'
+  code: 'unauthorized' | 'conflict' | 'protocol_version' | 'cursor_expired' | 'batch_too_large' | 'checksum_mismatch'
   message: string
   operationId?: string
 }
@@ -34,7 +34,12 @@ export interface SyncMessage {
   type: 'delta' | 'snapshot' | 'ack' | 'request-snapshot'
   clientId: string
   fromSeq: number
+  /** Global server cursor after applying this envelope. Required for filtered deltas. */
+  cursor?: number
+  /** More server operations are available after this envelope. */
+  more?: boolean
   ops: SyncOp[]
   protocolVersion?: number
+  checksum?: string
   errors?: SyncError[]
 }

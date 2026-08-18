@@ -476,6 +476,7 @@ export class PolyGraph {
   }
 
   protected emitChange(event: GraphChangeEvent): void {
+    if (this.currentTransactionId && !event.transactionId) event = { ...event, transactionId: this.currentTransactionId }
     if (this.batchDepth > 0) {
       this.pendingBatchEvents.push(event)
     } else {

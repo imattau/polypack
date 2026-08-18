@@ -7,6 +7,7 @@ import type { SyncError, SyncMessage, SyncOp } from './types.js'
 import { SYNC_PROTOCOL_VERSION } from './types.js'
 import { edgeId } from '../utils.js'
 import { OpLog } from './oplog.js'
+import { syncChecksum } from './checksum.js'
 
 /** Configuration for a graph synchronization client. */
 export interface SyncClientOptions {
@@ -24,6 +25,8 @@ export interface SyncClientOptions {
   activationSyncThreshold?: number
   protocolVersion?: number
   onError?: (error: SyncError) => void
+  /** Maximum operations sent in one transport message. Defaults to Infinity. */
+  maxOpsPerMessage?: number
 }
 
 const NODE_OPS: Record<string, SyncOp['kind']> = {
@@ -61,6 +64,7 @@ export class SyncClient {
   private applyingRemote = false
   private protocolVersion: number
   private onError?: (error: SyncError) => void
+  private maxOpsPerMessage: number
 
   constructor(options: SyncClientOptions) {
     this.graph = options.graph
@@ -71,6 +75,8 @@ export class SyncClient {
     this.activationSyncThreshold = options.activationSyncThreshold ?? DEFAULT_ACTIVATION_SYNC_THRESHOLD
     this.protocolVersion = options.protocolVersion ?? SYNC_PROTOCOL_VERSION
     this.onError = options.onError
+    this.maxOpsPerMessage = options.maxOpsPerMessage ?? Number.POSITIVE_INFINITY
+    if (this.maxOpsPerMessage !== Number.POSITIVE_INFINITY && (!Number.isInteger(this.maxOpsPerMessage) || this.maxOpsPerMessage < 1)) throw new RangeError('maxOpsPerMessage must be a positive integer or Infinity')
     this.bindTransport(options.transport)
 
     this.subscription = this.graph.changes.subscribe((event) => {
@@ -149,7 +155,10 @@ export class SyncClient {
 
     if (!kind || !payload) return
 
-    this.oplog.append(kind, payload)
+    this.oplog.append(kind, payload, event.transactionId ? {
+      transactionId: event.transactionId,
+      operationId: `${event.transactionId}:${this.oplog.latestSeq + 1}`,
+    } : undefined)
     if (this.autoFlush) this.flush()
   }
 
@@ -268,7 +277,7 @@ export class SyncClient {
       type: 'delta',
       clientId: this.oplog.clientId,
       fromSeq: this.lastAckedSeq,
-      ops,
+      ops: ops.slice(0, this.maxOpsPerMessage),
       protocolVersion: this.protocolVersion,
     })
     this.scheduleRetry()
@@ -293,11 +302,22 @@ export class SyncClient {
       return
     }
     if (msg.type === 'snapshot' && msg.clientId === 'server') {
+      if (msg.checksum && msg.checksum !== syncChecksum(msg.ops)) {
+        this.onError?.({ code: 'checksum_mismatch', message: 'Snapshot checksum mismatch' })
+        this.requestSync(true)
+        return
+      }
       this.applyRemote(msg.ops)
-      this.serverCursor = msg.fromSeq + msg.ops.length
+      this.serverCursor = msg.cursor ?? msg.fromSeq + msg.ops.length
+      if (msg.more) this.requestSync()
       return
     }
     if (msg.type === 'delta' && msg.clientId === 'server') {
+      if (msg.checksum && msg.checksum !== syncChecksum(msg.ops)) {
+        this.onError?.({ code: 'checksum_mismatch', message: 'Delta checksum mismatch' })
+        this.requestSync(true)
+        return
+      }
       if (msg.fromSeq > this.serverCursor) {
         this.requestSync()
         return
@@ -305,7 +325,8 @@ export class SyncClient {
       const alreadyApplied = Math.max(0, this.serverCursor - msg.fromSeq)
       const unseen = msg.ops.slice(alreadyApplied)
       this.applyRemote(unseen)
-      this.serverCursor = Math.max(this.serverCursor, msg.fromSeq + msg.ops.length)
+      this.serverCursor = Math.max(this.serverCursor, msg.cursor ?? msg.fromSeq + msg.ops.length)
+      if (msg.more) this.requestSync()
       return
     }
     if (msg.type === 'delta' || msg.type === 'snapshot') {

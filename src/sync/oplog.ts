@@ -15,13 +15,14 @@ export class OpLog {
   }
 
   /** Record a new op, stamping it with the next sequence number, this client's id, and the current time. */
-  append(kind: SyncOp['kind'], payload: Record<string, unknown>): SyncOp {
+  append(kind: SyncOp['kind'], payload: Record<string, unknown>, options: Pick<SyncOp, 'transactionId' | 'operationId' | 'baseRevision'> = {}): SyncOp {
     const op: SyncOp = {
       seq: this.nextSeq++,
       clientId: this.clientId,
       timestamp: Date.now(),
       kind,
       payload,
+      ...options,
     }
     this.ops.push(op)
     return op

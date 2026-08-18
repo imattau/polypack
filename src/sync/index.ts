@@ -1,5 +1,6 @@
 export { OpLog } from './oplog.js'
 export { FileSyncOperationLog, MemorySyncOperationLog } from './log.js'
+export { syncChecksum } from './checksum.js'
 export { SyncAdapter } from './adapter.js'
 export { SyncServer } from './server.js'
 export type { SyncServerClient, SyncServerOptions, SyncSubscriptionOptions } from './server.js'
