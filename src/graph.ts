@@ -1,7 +1,8 @@
 import { Subject } from 'rxjs'
-import type { PolyNode, PolyEdge, EdgeOwnership, GraphChangeEvent, SerializedNode, SerializedEdge, DataTransform, NodeActivation, WriteOptions, NodePatch, GraphTransaction, IndexDefinition, GraphStats, QueryResourceLimits } from './types.js'
+import type { PolyNode, PolyEdge, EdgeOwnership, GraphChangeEvent, SerializedNode, SerializedEdge, DataTransform, NodeActivation, WriteOptions, NodePatch, GraphTransaction, IndexDefinition, GraphStats, QueryResourceLimits, NodeTypeDefinition, EdgeTypeDefinition, EdgeCardinality } from './types.js'
 import { ConflictError } from './errors.js'
 import { UniqueConstraintError } from './index-errors.js'
+import { SchemaValidationError } from './schema-errors.js'
 import { VectorIndex } from './vector-index.js'
 import type { VectorIndexLike } from './vector-index.js'
 import { GraphQuery } from './query.js'
@@ -86,6 +87,8 @@ export class PolyGraph {
   protected _byType = new Map<string, Set<string>>()
   private secondaryIndexes = new Map<string, IndexDefinition>()
   private secondaryIndexData = new Map<string, Map<string, Set<string>>>()
+  private nodeTypeDefinitions = new Map<string, NodeTypeDefinition>()
+  private edgeTypeDefinitions = new Map<string, EdgeTypeDefinition>()
   private indexDefinitionsDirty = false
   protected evictedDirtyNodes = new Map<string, SerializedNode>()
 
@@ -159,6 +162,121 @@ export class PolyGraph {
     if (this.transactionActive && this.transactionMutationDepth === 0) {
       throw new Error('A transaction is active; mutate through its transaction context')
     }
+  }
+
+  private toPolyEdge(source: string, edge: EdgeEntry): PolyEdge {
+    return {
+      id: edge.id,
+      source,
+      target: edge.target,
+      type: edge.type,
+      data: edge.data ? cloneData(edge.data) : undefined,
+      createdAt: edge.createdAt,
+      revision: edge.revision,
+    }
+  }
+
+  /** Register optional validation and constraints for a node type. */
+  registerNodeType(type: string, definition: NodeTypeDefinition = {}): void {
+    if (!type) throw new TypeError('Node type must not be empty')
+    const previous = this.nodeTypeDefinitions.get(type)
+    this.nodeTypeDefinitions.set(type, { ...definition, indexes: definition.indexes ? [...definition.indexes] : undefined })
+    try {
+      for (const node of this.nodes.values()) if (node.type === type) this.validateNodeSchema(node)
+    } catch (error) {
+      if (previous) this.nodeTypeDefinitions.set(type, previous)
+      else this.nodeTypeDefinitions.delete(type)
+      throw error
+    }
+    for (const field of definition.indexes ?? []) {
+      this.defineIndex({ name: `${type}.${field}`, nodeType: type, fields: [field] })
+    }
+  }
+
+  /** Register optional endpoint, cardinality, and validation constraints for an edge type. */
+  registerEdgeType(type: string, definition: EdgeTypeDefinition = {}): void {
+    if (!type) throw new TypeError('Edge type must not be empty')
+    const previous = this.edgeTypeDefinitions.get(type)
+    const normalized = {
+      ...definition,
+      sourceTypes: definition.sourceTypes ? [...definition.sourceTypes] : undefined,
+      targetTypes: definition.targetTypes ? [...definition.targetTypes] : undefined,
+    }
+    this.edgeTypeDefinitions.set(type, normalized)
+    try {
+      for (const [source, entries] of this.edges) {
+        for (const edge of entries.values()) {
+          if (edge.type === type) this.validateEdgeSchema(this.toPolyEdge(source, edge))
+        }
+      }
+    } catch (error) {
+      if (previous) this.edgeTypeDefinitions.set(type, previous)
+      else this.edgeTypeDefinitions.delete(type)
+      throw error
+    }
+  }
+
+  get nodeTypes(): ReadonlyMap<string, NodeTypeDefinition> {
+    return new Map(this.nodeTypeDefinitions)
+  }
+
+  get edgeTypes(): ReadonlyMap<string, EdgeTypeDefinition> {
+    return new Map(this.edgeTypeDefinitions)
+  }
+
+  private validateNodeSchema(node: PolyNode): void {
+    const definition = this.nodeTypeDefinitions.get(node.type)
+    if (!definition?.validate) return
+    try {
+      if (definition.validate(clonePolyNode(node)) === false) throw new Error('custom validator returned false')
+    } catch (error) {
+      if (error instanceof SchemaValidationError) throw error
+      throw new SchemaValidationError('node', node.type, error instanceof Error ? error.message : String(error))
+    }
+  }
+
+  private validateEdgeSchema(edge: PolyEdge): void {
+    const definition = this.edgeTypeDefinitions.get(edge.type)
+    if (!definition) return
+    const source = this.nodes.get(edge.source)
+    const target = this.nodes.get(edge.target)
+    if (!source || !target) throw new SchemaValidationError('edge', edge.type, 'source and target nodes must exist')
+    if (definition.sourceTypes && !definition.sourceTypes.includes(source.type)) {
+      throw new SchemaValidationError('edge', edge.type, `source type ${source.type} is not permitted`)
+    }
+    if (definition.targetTypes && !definition.targetTypes.includes(target.type)) {
+      throw new SchemaValidationError('edge', edge.type, `target type ${target.type} is not permitted`)
+    }
+    this.validateCardinality(edge, definition.cardinality)
+    if (definition.validate) {
+      try {
+        if (definition.validate({ ...edge, data: edge.data ? cloneData(edge.data) : undefined }) === false) {
+          throw new Error('custom validator returned false')
+        }
+      } catch (error) {
+        if (error instanceof SchemaValidationError) throw error
+        throw new SchemaValidationError('edge', edge.type, error instanceof Error ? error.message : String(error))
+      }
+    }
+  }
+
+  private validateCardinality(edge: PolyEdge, cardinality?: EdgeCardinality): void {
+    if (!cardinality || cardinality === 'many-to-many') return
+    let outgoing = 0
+    let incoming = 0
+    for (const [candidateSource, entries] of this.edges) {
+      for (const candidate of entries.values()) {
+        if (candidate.id === edge.id || candidate.type !== edge.type) continue
+        if (candidateSource === edge.source) outgoing++
+        if (candidate.target === edge.target) incoming++
+      }
+    }
+    const violates = cardinality === 'one-to-one'
+      ? outgoing > 0 || incoming > 0
+      : cardinality === 'one-to-many'
+        ? incoming > 0
+        : outgoing > 0
+    if (violates) throw new SchemaValidationError('edge', edge.type, `cardinality ${cardinality} would be exceeded`)
   }
 
   /** Define or replace a node-data index and validate all currently loaded records. */
@@ -539,7 +657,9 @@ export class PolyGraph {
     if (node.revision !== undefined && (!Number.isInteger(node.revision) || node.revision < 0)) {
       throw new RangeError('Node revision must be a non-negative integer')
     }
-    return clonePolyNode({ ...node, data: serializedData, revision: node.revision ?? 0 })
+    const prepared = clonePolyNode({ ...node, data: serializedData, revision: node.revision ?? 0 })
+    this.validateNodeSchema(prepared)
+    return prepared
   }
 
   protected insertNode(stored: PolyNode): void {
@@ -678,6 +798,15 @@ export class PolyGraph {
     }
     const serialized = this.applySerialize(id, data as Record<string, unknown>)
     const previous = clonePolyNode(node)
+    const candidate: PolyNode = {
+      ...clonePolyNode(node),
+      data: { ...cloneData(node.data), ...cloneData(serialized) },
+      vector: vector instanceof Float64Array ? new Float64Array(vector) : node.vector,
+      activation: activation === undefined ? node.activation : { ...activation },
+      updatedAt: Date.now(),
+      revision: (node.revision ?? 0) + 1,
+    }
+    this.validateNodeSchema(candidate)
     Object.assign(node.data, cloneData(serialized))
     if (vector instanceof Float64Array) {
       node.vector = new Float64Array(vector)
@@ -967,7 +1096,18 @@ export class PolyGraph {
     const inputData = edgeData === undefined ? undefined : cloneData(edgeData)
     const fullData = ownership !== undefined ? { ...inputData, [OWNERSHIP_KEY]: ownership } : inputData
 
-    sourceEdges.set(id, { id, target: edgeTarget, type: edgeType, data: fullData, revision: edgeRevision, createdAt: objectInput ? sourceOrEdge.createdAt : Date.now() })
+    const candidate: PolyEdge = {
+      id,
+      source,
+      target: edgeTarget,
+      type: edgeType,
+      data: fullData,
+      createdAt: objectInput ? sourceOrEdge.createdAt : Date.now(),
+      revision: edgeRevision,
+    }
+    this.validateEdgeSchema(candidate)
+
+    sourceEdges.set(id, { id, target: edgeTarget, type: edgeType, data: fullData, revision: edgeRevision, createdAt: candidate.createdAt })
     if (!this.nodeToEdgeMap.has(edgeTarget)) this.nodeToEdgeMap.set(edgeTarget, new Set())
     this.nodeToEdgeMap.get(edgeTarget)!.add(source)
     this.dirtyEdges.add(id)

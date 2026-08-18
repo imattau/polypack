@@ -119,6 +119,20 @@ export interface IndexDefinition {
   sparse?: boolean
 }
 
+export type EdgeCardinality = 'one-to-one' | 'one-to-many' | 'many-to-one' | 'many-to-many'
+
+export interface NodeTypeDefinition {
+  validate?: (node: PolyNode) => void | boolean
+  indexes?: string[]
+}
+
+export interface EdgeTypeDefinition {
+  sourceTypes?: string[]
+  targetTypes?: string[]
+  cardinality?: EdgeCardinality
+  validate?: (edge: PolyEdge) => void | boolean
+}
+
 export interface QueryExplain {
   index?: string
   stages: string[]
