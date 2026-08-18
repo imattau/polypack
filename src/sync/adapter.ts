@@ -1,7 +1,6 @@
 import type { PersistenceAdapter, PersistenceChanges, PersistedNodeQuery } from '../persistence/adapter.js'
 import { applyPersistedNodeQuery } from '../persistence/query.js'
 import type { SerializedNode, SerializedEdge, MutationRecord } from '../types.js'
-import { edgeId } from '../utils.js'
 import { OpLog } from './oplog.js'
 
 export type OpCallback = (op: import('./types').SyncOp) => void
@@ -29,12 +28,6 @@ export class SyncAdapter implements PersistenceAdapter {
     this.onOp?.(op)
   }
 
-  private validateEdge(edge: SerializedEdge): void {
-    if (edge.id !== edgeId(edge.source, edge.type, edge.target)) {
-      throw new Error(`Invalid edge ID: ${edge.id}`)
-    }
-  }
-
   private validateEdgeRecord(edge: SerializedEdge): void {
     if (!edge.id || !edge.source || !edge.type || !edge.target) {
       throw new TypeError('Edge id, source, type, and target must not be empty')
@@ -55,8 +48,7 @@ export class SyncAdapter implements PersistenceAdapter {
     }
     for (const id of changes.deleteNodeIds) this.record('removeNode', { id })
     for (const id of changes.deleteEdgeIds) {
-      const [source, type, ...rest] = id.split('::')
-      this.record('removeEdges', { source, type: type ?? '', target: rest.join('::') })
+      this.record('removeEdges', this.edgeRemovalPayload(id))
     }
     for (const node of changes.putNodes) {
       this.record('addNode', node as unknown as Record<string, unknown>)
@@ -130,13 +122,13 @@ export class SyncAdapter implements PersistenceAdapter {
   }
 
   async putEdge(edge: SerializedEdge): Promise<void> {
-    this.validateEdge(edge)
+    this.validateEdgeRecord(edge)
     await this.inner.putEdge(edge)
     this.record('addEdge', edge as unknown as Record<string, unknown>)
   }
 
   async bulkPutEdges(edges: SerializedEdge[]): Promise<void> {
-    for (const edge of edges) this.validateEdge(edge)
+    for (const edge of edges) this.validateEdgeRecord(edge)
     await this.inner.bulkPutEdges(edges)
     for (const edge of edges) {
       this.record('addEdge', edge as unknown as Record<string, unknown>)
@@ -165,16 +157,20 @@ export class SyncAdapter implements PersistenceAdapter {
 
   async deleteEdge(id: string): Promise<void> {
     await this.inner.deleteEdge(id)
-    const [source, type, ...rest] = id.split('::')
-    this.record('removeEdges', { source, type: type ?? '', target: rest.join('::') })
+    this.record('removeEdges', this.edgeRemovalPayload(id))
   }
 
   async bulkDeleteEdges(ids: string[]): Promise<void> {
     await this.inner.bulkDeleteEdges(ids)
     for (const id of ids) {
-      const [source, type, ...rest] = id.split('::')
-      this.record('removeEdges', { source, type: type ?? '', target: rest.join('::') })
+      this.record('removeEdges', this.edgeRemovalPayload(id))
     }
+  }
+
+  private edgeRemovalPayload(id: string): Record<string, unknown> {
+    const parts = id.split('::')
+    if (parts.length >= 3) return { id, source: parts[0], type: parts[1], target: parts.slice(2).join('::') }
+    return { id }
   }
 
   async putVector(id: string, vector: number[]): Promise<void> {

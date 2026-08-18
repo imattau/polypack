@@ -99,14 +99,13 @@ describe('SyncAdapter', () => {
     expect(removeOps[0].payload.source).toBe('a')
   })
 
-  it('rejects edge records whose IDs cannot be reconstructed safely', async () => {
+  it('accepts independent edge IDs and rejects malformed edge records', async () => {
     const adapter = new SyncAdapter(new MemoryAdapter(), 'c1')
+    await adapter.putEdge({ id: 'claim-1', source: 'a', target: 'b', type: 'R', data: null, createdAt: 1 })
+    expect(adapter.oplog.all[0].payload.id).toBe('claim-1')
     await expect(adapter.putEdge({
-      id: 'wrong', source: 'a', target: 'b', type: 'R', data: null, createdAt: 1,
-    })).rejects.toThrow('Invalid edge ID')
-    await expect(adapter.putEdge({
-      id: 'a::part::R::b', source: 'a::part', target: 'b', type: 'R', data: null, createdAt: 1,
-    })).rejects.toThrow(RangeError)
+      id: '', source: 'a', target: 'b', type: 'R', data: null, createdAt: 1,
+    })).rejects.toThrow(TypeError)
   })
 
   it('wraps inner adapter transparently', async () => {

@@ -209,11 +209,8 @@ export class SyncClient {
         })
         break
       case 'removeEdges':
-        this.graph.removeEdges(
-          p.source as string,
-          p.type as string,
-          p.target as string | undefined,
-        )
+        if (typeof p.id === 'string') this.graph.removeEdge(p.id)
+        else this.graph.removeEdges(p.source as string, p.type as string, p.target as string | undefined)
         break
       case 'activationUpdate':
         // Activation deltas accumulate — not last-write-wins. Apply synchronously
