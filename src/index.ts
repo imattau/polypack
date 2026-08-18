@@ -40,6 +40,7 @@ export type {
   VerificationReport,
   GraphStats,
   QueryResourceLimits,
+  QueryMetrics,
   EdgeCardinality,
   NodeTypeDefinition,
   EdgeTypeDefinition,

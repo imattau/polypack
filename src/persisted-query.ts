@@ -1,4 +1,4 @@
-import type { PolyNode, SerializedEdge, SerializedNode, DataTransform, QueryResourceLimits, QueryExplain, IndexDefinition } from './types.js'
+import type { PolyNode, SerializedEdge, SerializedNode, DataTransform, QueryResourceLimits, QueryExplain, IndexDefinition, QueryMetrics } from './types.js'
 import type { PersistenceAdapter, PersistedNodeQuery } from './persistence/adapter.js'
 import { applyPersistedNodeQuery } from './persistence/query.js'
 import { cosineSimilarity } from './vector-index.js'
@@ -48,12 +48,14 @@ export class PersistedGraphQuery {
     direction: 'out' | 'in'
   }> = []
   private readonly limits: QueryResourceLimits
+  private readonly onMetrics?: (metrics: QueryMetrics) => void
 
-  constructor(adapter: PersistenceAdapter, transform?: DataTransform, sidecarData?: Map<string, unknown>, limits: QueryResourceLimits = {}) {
+  constructor(adapter: PersistenceAdapter, transform?: DataTransform, sidecarData?: Map<string, unknown>, limits: QueryResourceLimits = {}, onMetrics?: (metrics: QueryMetrics) => void) {
     this.adapter = adapter
     this.transform = transform
     this.sidecarData = sidecarData ?? new Map()
     this.limits = limits
+    this.onMetrics = onMetrics
   }
 
   private checkLimits(visited = 0, results = 0): void {
@@ -301,6 +303,7 @@ export class PersistedGraphQuery {
   }
 
   async toArray(): Promise<PolyNode[]> {
+    const startedAt = Date.now()
     this.checkLimits()
     const hasTraversal = this.traversals.length > 0
     const adapterCanPaginate = !this.similarVector && !this.edgeType && !this.edgeSource &&
@@ -350,6 +353,13 @@ export class PersistedGraphQuery {
       if (this.resultLimit !== undefined) results = results.slice(0, this.resultLimit)
     }
     this.checkLimits(results.length, results.length)
+    if (this.onMetrics) {
+      const indexes = await this.adapter.getIndexDefinitions?.() ?? []
+      const fields = new Set([...Object.keys(this.query.attributes ?? {}), ...Object.keys(this.query.attributeRanges ?? {})])
+      const nodeType = this.query.nodeTypes?.length === 1 ? this.query.nodeTypes[0] : undefined
+      const index = indexes.find(candidate => (!candidate.nodeType || candidate.nodeType === nodeType) && candidate.fields.every(field => fields.has(field) || fields.has(field.replace(/^data\./, ''))))
+      this.onMetrics({ durationMs: Date.now() - startedAt, scannedRecords: serialized.length, index: index?.name })
+    }
     return results
   }
 

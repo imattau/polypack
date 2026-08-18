@@ -176,6 +176,16 @@ export interface GraphStats {
   mutationCount?: number
   walBytes?: number
   memoryEstimateBytes?: number
+  queryCount?: number
+  queryDurationMs?: number
+  queryScannedRecords?: number
+  queryIndexUsage?: Record<string, number>
+}
+
+export interface QueryMetrics {
+  durationMs: number
+  scannedRecords: number
+  index?: string
 }
 
 export interface QueryResourceLimits {

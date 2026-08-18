@@ -1,5 +1,5 @@
 import { Subject } from 'rxjs'
-import type { PolyNode, PolyEdge, EdgeOwnership, GraphChangeEvent, SerializedNode, SerializedEdge, DataTransform, NodeActivation, WriteOptions, NodePatch, GraphTransaction, IndexDefinition, GraphStats, QueryResourceLimits, NodeTypeDefinition, EdgeTypeDefinition, EdgeCardinality } from './types.js'
+import type { PolyNode, PolyEdge, EdgeOwnership, GraphChangeEvent, SerializedNode, SerializedEdge, DataTransform, NodeActivation, WriteOptions, NodePatch, GraphTransaction, IndexDefinition, GraphStats, QueryResourceLimits, NodeTypeDefinition, EdgeTypeDefinition, EdgeCardinality, QueryMetrics } from './types.js'
 import { ConflictError } from './errors.js'
 import { UniqueConstraintError } from './index-errors.js'
 import { SchemaValidationError } from './schema-errors.js'
@@ -91,6 +91,10 @@ export class PolyGraph {
   private secondaryIndexData = new Map<string, Map<string, Set<string>>>()
   private nodeTypeDefinitions = new Map<string, NodeTypeDefinition>()
   private edgeTypeDefinitions = new Map<string, EdgeTypeDefinition>()
+  private queryCount = 0
+  private queryDurationMs = 0
+  private queryScannedRecords = 0
+  private queryIndexUsage = new Map<string, number>()
   private indexDefinitionsDirty = false
   protected evictedDirtyNodes = new Map<string, SerializedNode>()
 
@@ -1246,6 +1250,10 @@ export class PolyGraph {
       pendingPersistence: this.hasPendingPersistence(),
       indexCount: this.secondaryIndexes.size,
       memoryEstimateBytes,
+      queryCount: this.queryCount,
+      queryDurationMs: this.queryDurationMs,
+      queryScannedRecords: this.queryScannedRecords,
+      queryIndexUsage: Object.fromEntries(this.queryIndexUsage),
       ...adapterStats,
     }
   }
@@ -1279,7 +1287,14 @@ export class PolyGraph {
 
   /** Query all persisted nodes without loading them into the hot working set. */
   queryPersisted(limits?: QueryResourceLimits): PersistedGraphQuery {
-    return new PersistedGraphQuery(this.persistence, this.transform, this.sidecarData, limits)
+    return new PersistedGraphQuery(this.persistence, this.transform, this.sidecarData, limits, metrics => this.recordQueryMetrics(metrics))
+  }
+
+  private recordQueryMetrics(metrics: QueryMetrics): void {
+    this.queryCount++
+    this.queryDurationMs += metrics.durationMs
+    this.queryScannedRecords += metrics.scannedRecords
+    if (metrics.index) this.queryIndexUsage.set(metrics.index, (this.queryIndexUsage.get(metrics.index) ?? 0) + 1)
   }
 
   // ── Hot Cache ──
