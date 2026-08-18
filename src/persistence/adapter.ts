@@ -16,6 +16,9 @@ export interface PersistedNodeQuery {
 export interface PersistenceChanges {
   transactionId?: string
   operationId?: string
+  actor?: string
+  baseRevision?: number
+  metadata?: Record<string, unknown>
   indexDefinitions?: IndexDefinition[]
   putNodes: SerializedNode[]
   deleteNodeIds: string[]

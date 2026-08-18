@@ -14,5 +14,14 @@ export function mutationRecordFromChanges(changes: PersistenceChanges, sequence:
   for (const id of changes.deleteVectorIds) operations.push({ type: 'deleteVector', payload: { id } })
   if (changes.indexDefinitions) operations.push({ type: 'setIndexes', payload: { indexes: changes.indexDefinitions } })
   if (operations.length === 0) return undefined
-  return { operationId, sequence, transactionId, timestamp: Date.now(), operations }
+  return {
+    operationId,
+    sequence,
+    transactionId,
+    actor: changes.actor,
+    baseRevision: changes.baseRevision,
+    metadata: changes.metadata,
+    timestamp: Date.now(),
+    operations,
+  }
 }

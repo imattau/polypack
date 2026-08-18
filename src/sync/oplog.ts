@@ -24,6 +24,7 @@ export class OpLog {
       payload,
       ...options,
     }
+    op.operationId ??= `${this.clientId}:${op.seq}`
     this.ops.push(op)
     return op
   }

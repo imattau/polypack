@@ -1,5 +1,5 @@
 import { Subject } from 'rxjs'
-import type { PolyNode, PolyEdge, EdgeOwnership, GraphChangeEvent, SerializedNode, SerializedEdge, DataTransform, NodeActivation, WriteOptions, NodePatch, GraphTransaction, IndexDefinition, GraphStats, QueryResourceLimits, NodeTypeDefinition, EdgeTypeDefinition, EdgeCardinality, QueryMetrics, GraphResourceLimits } from './types.js'
+import type { PolyNode, PolyEdge, EdgeOwnership, GraphChangeEvent, SerializedNode, SerializedEdge, DataTransform, NodeActivation, WriteOptions, NodePatch, GraphTransaction, IndexDefinition, GraphStats, QueryResourceLimits, NodeTypeDefinition, EdgeTypeDefinition, EdgeCardinality, QueryMetrics, GraphResourceLimits, TransactionOptions, VerificationReport } from './types.js'
 import { ConflictError } from './errors.js'
 import { UniqueConstraintError } from './index-errors.js'
 import { SchemaValidationError } from './schema-errors.js'
@@ -141,6 +141,7 @@ export class PolyGraph {
   private transactionMutationDepth = 0
   private transactionMutationCount = 0
   private currentTransactionId: string | undefined
+  private currentTransactionOptions: TransactionOptions | undefined
 
   protected batchDepth = 0
   protected pendingBatchEvents: GraphChangeEvent[] = []
@@ -152,7 +153,7 @@ export class PolyGraph {
   }
 
   /** Run a group of graph mutations as one isolated, atomic commit. */
-  async transaction<T>(callback: (tx: GraphTransaction) => Promise<T> | T): Promise<T> {
+  async transaction<T>(callback: (tx: GraphTransaction) => Promise<T> | T, options?: TransactionOptions): Promise<T> {
     if (this.transactionActive) throw new Error('Nested transactions are not supported')
     if (this.persistence.capabilities && (!this.persistence.capabilities.atomicBatches || !this.persistence.capabilities.transactions)) {
       throw new AdapterCapabilityError(!this.persistence.capabilities.atomicBatches ? 'atomicBatches' : 'transactions')
@@ -168,6 +169,7 @@ export class PolyGraph {
     try {
       const id = `tx-${Date.now()}-${Math.random().toString(36).slice(2)}`
       this.currentTransactionId = id
+      this.currentTransactionOptions = options
       const inTransaction = <R>(fn: () => R): R => {
         if (this.resourceLimits.maxBatchSize !== undefined && this.transactionMutationCount >= this.resourceLimits.maxBatchSize) {
           throw new ResourceLimitError('maxBatchSize', this.resourceLimits.maxBatchSize)
@@ -202,6 +204,7 @@ export class PolyGraph {
       this.transactionActive = false
       this.transactionMutationCount = 0
       this.currentTransactionId = undefined
+      this.currentTransactionOptions = undefined
       release()
     }
   }
@@ -267,7 +270,12 @@ export class PolyGraph {
   registerNodeType(type: string, definition: NodeTypeDefinition = {}): void {
     if (!type) throw new TypeError('Node type must not be empty')
     const previous = this.nodeTypeDefinitions.get(type)
-    this.nodeTypeDefinitions.set(type, { ...definition, indexes: definition.indexes ? [...definition.indexes] : undefined })
+    this.nodeTypeDefinitions.set(type, {
+      ...definition,
+      indexes: definition.indexes ? [...definition.indexes] : undefined,
+      requiredFields: definition.requiredFields ? [...definition.requiredFields] : undefined,
+      dataTypes: definition.dataTypes ? { ...definition.dataTypes } : undefined,
+    })
     try {
       for (const node of this.nodes.values()) if (node.type === type) this.validateNodeSchema(node)
     } catch (error) {
@@ -288,6 +296,8 @@ export class PolyGraph {
       ...definition,
       sourceTypes: definition.sourceTypes ? [...definition.sourceTypes] : undefined,
       targetTypes: definition.targetTypes ? [...definition.targetTypes] : undefined,
+      requiredFields: definition.requiredFields ? [...definition.requiredFields] : undefined,
+      dataTypes: definition.dataTypes ? { ...definition.dataTypes } : undefined,
     }
     this.edgeTypeDefinitions.set(type, normalized)
     try {
@@ -304,16 +314,40 @@ export class PolyGraph {
   }
 
   get nodeTypes(): ReadonlyMap<string, NodeTypeDefinition> {
-    return new Map(this.nodeTypeDefinitions)
+    return new Map([...this.nodeTypeDefinitions].map(([type, definition]) => [type, {
+      ...definition,
+      indexes: definition.indexes ? [...definition.indexes] : undefined,
+      requiredFields: definition.requiredFields ? [...definition.requiredFields] : undefined,
+      dataTypes: definition.dataTypes ? { ...definition.dataTypes } : undefined,
+    }]))
   }
 
   get edgeTypes(): ReadonlyMap<string, EdgeTypeDefinition> {
-    return new Map(this.edgeTypeDefinitions)
+    return new Map([...this.edgeTypeDefinitions].map(([type, definition]) => [type, {
+      ...definition,
+      sourceTypes: definition.sourceTypes ? [...definition.sourceTypes] : undefined,
+      targetTypes: definition.targetTypes ? [...definition.targetTypes] : undefined,
+      requiredFields: definition.requiredFields ? [...definition.requiredFields] : undefined,
+      dataTypes: definition.dataTypes ? { ...definition.dataTypes } : undefined,
+    }]))
   }
 
   private validateNodeSchema(node: PolyNode): void {
     const definition = this.nodeTypeDefinitions.get(node.type)
-    if (!definition?.validate) return
+    if (!definition) return
+    for (const field of definition.requiredFields ?? []) {
+      if (this.indexValue(node, field) === undefined) throw new SchemaValidationError('node', node.type, `required field ${field} is missing`)
+    }
+    for (const [field, expected] of Object.entries(definition.dataTypes ?? {})) {
+      const value = this.indexValue(node, field)
+      if (value === undefined) continue
+      const actual = Array.isArray(value) ? 'array' : value === null ? 'null' : typeof value
+      const valid = expected === 'integer'
+        ? typeof value === 'number' && Number.isInteger(value)
+        : actual === expected
+      if (!valid) throw new SchemaValidationError('node', node.type, `field ${field} must be ${expected}`)
+    }
+    if (!definition.validate) return
     try {
       if (definition.validate(clonePolyNode(node)) === false) throw new Error('custom validator returned false')
     } catch (error) {
@@ -333,6 +367,16 @@ export class PolyGraph {
     }
     if (definition.targetTypes && !definition.targetTypes.includes(target.type)) {
       throw new SchemaValidationError('edge', edge.type, `target type ${target.type} is not permitted`)
+    }
+    for (const field of definition.requiredFields ?? []) {
+      if (this.dataValue(edge.data, field) === undefined) throw new SchemaValidationError('edge', edge.type, `required field ${field} is missing`)
+    }
+    for (const [field, expected] of Object.entries(definition.dataTypes ?? {})) {
+      const value = this.dataValue(edge.data, field)
+      if (value === undefined) continue
+      const actual = Array.isArray(value) ? 'array' : value === null ? 'null' : typeof value
+      const valid = expected === 'integer' ? typeof value === 'number' && Number.isInteger(value) : actual === expected
+      if (!valid) throw new SchemaValidationError('edge', edge.type, `field ${field} must be ${expected}`)
     }
     this.validateCardinality(edge, definition.cardinality)
     if (definition.validate) {
@@ -445,8 +489,12 @@ export class PolyGraph {
 
   private indexValue(node: PolyNode, field: string): unknown {
     if (field === 'type') return node.type
+    return this.dataValue(node.data, field)
+  }
+
+  private dataValue(data: Record<string, unknown> | undefined, field: string): unknown {
     const path = field.startsWith('data.') ? field.split('.').slice(1) : [field]
-    let value: any = node.data
+    let value: any = data
     for (const part of path) value = value?.[part]
     return value
   }
@@ -725,6 +773,9 @@ export class PolyGraph {
       const changes: PersistenceChanges = {
         transactionId: this.currentTransactionId,
         operationId: this.currentTransactionId,
+        actor: this.currentTransactionOptions?.actor,
+        baseRevision: this.currentTransactionOptions?.baseRevision,
+        metadata: this.currentTransactionOptions?.metadata,
         indexDefinitions: indexDefinitionsDirty ? this.indexes : undefined,
         putNodes: nodesToSave,
         deleteNodeIds: removedNodeIds,
@@ -1464,10 +1515,27 @@ export class PolyGraph {
   }
 
   /** Verify durable storage and logical graph invariants when supported. */
-  async verify() {
-    if (!this.persistence.verify) throw new AdapterCapabilityError('snapshots')
+  async verify(): Promise<VerificationReport> {
     await this.flush()
-    return this.persistence.verify()
+    if (this.persistence.verify) return this.persistence.verify()
+    const errors: string[] = []
+    for (const node of this.nodes.values()) {
+      if (!node.id || !node.type) errors.push(`invalid node identity: ${node.id}`)
+      if (!Number.isFinite(node.insertedAt) || !Number.isFinite(node.updatedAt)) errors.push(`invalid node timestamps: ${node.id}`)
+      if (node.vector && ![...node.vector].every(Number.isFinite)) errors.push(`invalid node vector: ${node.id}`)
+      if (node.vector && this.vectors.get(node.id) && this.vectors.get(node.id)!.length !== node.vector.length) errors.push(`vector dimensionality mismatch: ${node.id}`)
+    }
+    for (const [source, entries] of this.edges) {
+      for (const edge of entries.values()) {
+        if (!edge.id || !source || !edge.target || !edge.type) errors.push(`invalid edge identity: ${edge.id}`)
+        if (!this.nodes.has(source)) errors.push(`edge ${edge.id} has missing source ${source}`)
+        if (!this.nodes.has(edge.target)) errors.push(`edge ${edge.id} has missing target ${edge.target}`)
+      }
+    }
+    for (const [type, ids] of this._byType) {
+      for (const id of ids) if (this.nodes.get(id)?.type !== type) errors.push(`stale type index entry: ${type}/${id}`)
+    }
+    return { ok: errors.length === 0, errors, nodeCount: this.nodes.size, edgeCount: [...this.edges.values()].reduce((count, entries) => count + entries.size, 0), vectorCount: this.vectors.size, mutationCount: 0 }
   }
 
   /** Capture a detached, queryable view of the currently warmed graph state. */

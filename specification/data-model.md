@@ -1,6 +1,6 @@
 # Data model specification
 
-Version: 1 (draft)
+Version: 2 (draft)
 
 This document is the cross-language behavioural contract for Polypack nodes,
 edges, vectors, and the ownership rules that connect them. The TypeScript
@@ -21,6 +21,7 @@ A node is the primary entity of the graph.
 | `vector`    | array of finite f64  | no       | Uniform dimension within an index.               |
 | `insertedAt`| integer millis       | yes      | Finite, non-negative.                            |
 | `updatedAt` | integer millis       | yes      | Finite, non-negative.                            |
+| `revision`  | non-negative integer | no       | Defaults to `0`; increments on successful update. |
 | `activation`| object               | no       | Durable activation state (see 1.5).              |
 
 A node without a vector is distinct from a node whose vector is absent from the
@@ -60,17 +61,21 @@ A directed typed edge between two node IDs.
 
 | Field       | Type                 | Required | Notes                                              |
 |-------------|----------------------|----------|----------------------------------------------------|
-| `id`        | UTF-8 string         | yes      | `source::type::target` (see 1.3).                  |
-| `source`    | UTF-8 string         | yes      | Non-empty; must not contain `::`.                  |
-| `target`    | UTF-8 string         | yes      | Non-empty; may contain `::`.                       |
-| `type`      | UTF-8 string         | yes      | Non-empty; must not contain `::`.                  |
+| `id`        | UTF-8 string         | yes      | Independent edge identity; must be non-empty.      |
+| `source`    | UTF-8 string         | yes      | Non-empty node ID.                                  |
+| `target`    | UTF-8 string         | yes      | Non-empty node ID.                                  |
+| `type`      | UTF-8 string         | yes      | Non-empty edge type.                                |
 | `data`      | object \| null       | no       | May carry the reserved ownership key (1.4).        |
 | `createdAt` | integer millis       | yes      | Finite, non-negative.                              |
+| `revision`  | non-negative integer | no       | Defaults to `0`; increments on successful update. |
 
 ### 1.3 Edge identity
 
-The canonical edge ID is `source + "::" + type + "::" + target`. Source and
-type must not contain the reserved `::` separator. Target may contain it.
+Edge identity is independent from adjacency. Multiple edges may share the
+same `(source, type, target)` triple. Implementations maintain adjacency
+indexes from that triple to one or more edge IDs. The historical
+`source::type::target` value remains a deterministic compatibility helper, but
+is not required as the canonical edge ID.
 
 ### 1.4 Edge ownership
 
@@ -92,8 +97,10 @@ All validation happens before mutation; invalid input throws rather than being
 silently coerced.
 
 - Node and edge IDs, and edge source/type/target, must be non-empty strings.
-- Edge source and type must not contain `::`.
+- Edge source, target, and type are independent strings; the separator helper
+  is not a validation requirement.
 - Timestamps must be finite, non-negative integers (milliseconds).
+- Revisions must be non-negative integers when present.
 - Vectors must contain only finite values.
 - A similarity query vector and every stored vector in the queried index must
   share the same dimension; a mismatch throws.

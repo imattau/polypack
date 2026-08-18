@@ -17,6 +17,8 @@ describe('OpLog', () => {
     const op2 = log.append('addNode', { id: 'b' })
     expect(op1.seq).toBe(1)
     expect(op2.seq).toBe(2)
+    expect(op1.operationId).toBe('client-1:1')
+    expect(op2.operationId).toBe('client-1:2')
     expect(log.size).toBe(2)
   })
 

@@ -52,11 +52,47 @@ describe('schema and constraint hooks', () => {
       .toThrow(SchemaValidationError)
   })
 
+  it('supports declarative required fields and data types on edges', () => {
+    const graph = new PolyGraph()
+    graph.registerNodeType('person')
+    graph.registerEdgeType('KNOWS', { requiredFields: ['since'], dataTypes: { since: 'integer' } })
+    graph.addNode(person('a', 'A'))
+    graph.addNode(person('b', 'B'))
+    expect(() => graph.addEdge({ id: 'missing', source: 'a', target: 'b', type: 'KNOWS', data: {}, createdAt: 1 })).toThrow(SchemaValidationError)
+    expect(() => graph.addEdge({ id: 'wrong', source: 'a', target: 'b', type: 'KNOWS', data: { since: 'old' }, createdAt: 1 })).toThrow(SchemaValidationError)
+    graph.addEdge({ id: 'valid', source: 'a', target: 'b', type: 'KNOWS', data: { since: 2020 }, createdAt: 1 })
+    expect(graph.getEdges('a', 'KNOWS')).toHaveLength(1)
+  })
+
   it('enforces unique indexes together with schema registration', () => {
     const graph = new PolyGraph()
     graph.registerNodeType('person', { indexes: ['name'] })
     graph.defineIndex({ name: 'unique-person-name', nodeType: 'person', fields: ['name'], unique: true })
     graph.addNode(person('alice', 'Alice'))
     expect(() => graph.addNode(person('duplicate', 'Alice'))).toThrow(UniqueConstraintError)
+  })
+
+  it('supports declarative required fields and data types', () => {
+    const graph = new PolyGraph()
+    graph.registerNodeType('person', {
+      requiredFields: ['name', 'birthYear'],
+      dataTypes: { name: 'string', birthYear: 'integer' },
+    })
+    expect(() => graph.addNode({ id: 'missing', type: 'person', data: { name: 'A' }, insertedAt: 1, updatedAt: 1 }))
+      .toThrow(SchemaValidationError)
+    expect(() => graph.addNode({ id: 'wrong', type: 'person', data: { name: 'A', birthYear: 'old' }, insertedAt: 1, updatedAt: 1 }))
+      .toThrow(SchemaValidationError)
+    graph.addNode({ id: 'valid', type: 'person', data: { name: 'A', birthYear: 2000 }, insertedAt: 1, updatedAt: 1 })
+    expect(graph.getNode('valid')).toBeDefined()
+  })
+
+  it('returns defensive schema definitions', () => {
+    const graph = new PolyGraph()
+    graph.registerNodeType('person', { indexes: ['name'], requiredFields: ['name'] })
+    graph.registerEdgeType('KNOWS', { sourceTypes: ['person'] })
+    graph.nodeTypes.get('person')!.indexes!.push('mutated')
+    graph.edgeTypes.get('KNOWS')!.sourceTypes!.push('mutated')
+    expect(graph.nodeTypes.get('person')?.indexes).toEqual(['name'])
+    expect(graph.edgeTypes.get('KNOWS')?.sourceTypes).toEqual(['person'])
   })
 })

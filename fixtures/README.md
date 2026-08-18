@@ -5,6 +5,13 @@ Language-neutral JSON fixtures consumed by the TypeScript conformance runner
 fixtures. Fixture files are the cross-language contract; they do not reference
 TypeScript implementation details.
 
+The current behavioural specification is version 2. Existing schema-version 1
+fixtures remain valid for compatibility; new fixtures should not rely on
+separator-derived edge IDs.
+
+The database-core contract is documented in
+[`specification/database-core.md`](../specification/database-core.md).
+
 ## `conformance/` — graph behaviour
 
 Each file is one fixture:

@@ -51,8 +51,8 @@ export class SyncServer {
         this.baseCursor = state.baseCursor
         this.opLog = state.ops.slice(-this.options.maxOps)
         this.baseCursor += state.ops.length - this.opLog.length
-        this.seenOps = new Set(state.ops.map(op => `${op.clientId}:${op.seq}`))
-        this.seenOperationIds = new Set(state.ops.flatMap(op => op.operationId ? [`${op.clientId}:${op.operationId}`] : []))
+        this.seenOps = new Set(this.opLog.map(op => `${op.clientId}:${op.seq}`))
+        this.seenOperationIds = new Set(this.opLog.flatMap(op => op.operationId ? [`${op.clientId}:${op.operationId}`] : []))
       })
     }
     await this.readyPromise

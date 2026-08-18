@@ -1,6 +1,6 @@
 # Persistence specification
 
-Version: 1 (draft)
+Version: 2 (draft)
 
 ## 1. Model
 
@@ -18,6 +18,8 @@ A store directory contains two files:
 
 - `snapshot.msgpack` — MessagePack snapshot.
 - `wal.msgpack` — framed WAL entries.
+- `mutations.msgpack` — optional durable logical mutation records for audit,
+  replication, feeds, and incremental recovery.
 
 Files are treated as opaque byte streams; the storage adapter (filesystem,
 OPFS, memory) owns bytes only.
@@ -125,13 +127,35 @@ operations reject.
 - Old snapshots either migrate to the current version or fail with a precise
   version error; silent misinterpretation is prohibited.
 
-## 11. Conformance
+## 11. Logical mutation log
+
+The recovery WAL is an internal crash-recovery mechanism. An adapter may also
+persist acknowledged logical mutations with this shape:
+
+```text
+{
+  "operationId": string,
+  "sequence": unsigned integer,
+  "transactionId": string,
+  "actor"?: string,
+  "timestamp": integer millis,
+  "baseRevision"?: unsigned integer,
+  "operations": GraphOperation[],
+  "metadata"?: object
+}
+```
+
+Logical records are ordered by strictly increasing sequence and are appended
+only after the corresponding atomic graph commit succeeds. Reapplying the
+same operation ID is idempotent.
+
+## 12. Conformance
 
 Recovery fixtures exercise: clean WAL, snapshot only, partial (truncated) WAL
 tail, and corrupt mid-stream frame. Acknowledged durable batches must survive
 forced termination in every case.
 
-## 12. Implementation status
+## 13. Implementation status
 
 - The TypeScript reference (`src/persistence/binary-store.ts` +
   `binary-format.ts`) is the current production implementation.

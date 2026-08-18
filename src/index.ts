@@ -44,6 +44,7 @@ export type {
   QueryResourceLimits,
   QueryMetrics,
   GraphResourceLimits,
+  TransactionOptions,
   EdgeCardinality,
   NodeTypeDefinition,
   EdgeTypeDefinition,

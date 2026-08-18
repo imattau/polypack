@@ -245,6 +245,39 @@ describe('database-core mutation API', () => {
     await restored.close()
   })
 
+  it('persists mutation-log identity and metadata from a commit', async () => {
+    const adapter = new MemoryAdapter()
+    await adapter.applyChanges!({
+      transactionId: 'tx-metadata', operationId: 'op-metadata', actor: 'writer-1', baseRevision: 4,
+      metadata: { source: 'import' },
+      putNodes: [node('metadata', { value: true })], deleteNodeIds: [],
+      putEdges: [], deleteEdgeIds: [], putVectors: [], deleteVectorIds: [],
+    })
+    const record = (await adapter.getMutationsSince!(0n))[0]
+    expect(record).toMatchObject({
+      transactionId: 'tx-metadata', operationId: 'op-metadata', actor: 'writer-1',
+      baseRevision: 4, metadata: { source: 'import' },
+    })
+  })
+
+  it('attaches transaction metadata to the durable mutation record', async () => {
+    const adapter = new MemoryAdapter()
+    const graph = new PolyGraph(adapter)
+    await graph.transaction(tx => {
+      tx.addNode(node('transaction-metadata', { ok: true }))
+    }, { actor: 'importer', baseRevision: 7, metadata: { job: 'migration' } })
+
+    const record = (await adapter.getMutationsSince!(0n))[0]
+    expect(record).toMatchObject({ actor: 'importer', baseRevision: 7, metadata: { job: 'migration' } })
+  })
+
+  it('verifies in-memory graphs when the adapter has no verifier', async () => {
+    const graph = new PolyGraph()
+    graph.addNode(node('memory-verify', { ok: true }))
+    const report = await graph.verify()
+    expect(report).toMatchObject({ ok: true, nodeCount: 1, edgeCount: 0 })
+  })
+
   it('keeps direct snapshot reads isolated from later graph mutations', async () => {
     const graph = new PolyGraph()
     graph.addNode(node('a', { value: 1 }))

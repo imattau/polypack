@@ -126,6 +126,8 @@ export type EdgeCardinality = 'one-to-one' | 'one-to-many' | 'many-to-one' | 'ma
 export interface NodeTypeDefinition {
   validate?: (node: PolyNode) => void | boolean
   indexes?: string[]
+  requiredFields?: string[]
+  dataTypes?: Record<string, 'string' | 'number' | 'integer' | 'boolean' | 'object' | 'array'>
 }
 
 export interface EdgeTypeDefinition {
@@ -133,6 +135,8 @@ export interface EdgeTypeDefinition {
   targetTypes?: string[]
   cardinality?: EdgeCardinality
   validate?: (edge: PolyEdge) => void | boolean
+  requiredFields?: string[]
+  dataTypes?: Record<string, 'string' | 'number' | 'integer' | 'boolean' | 'object' | 'array'>
 }
 
 export interface QueryExplain {
@@ -201,6 +205,12 @@ export interface GraphResourceLimits {
   maxVectorDimensions?: number
   maxNodePayloadBytes?: number
   maxBatchSize?: number
+}
+
+export interface TransactionOptions {
+  actor?: string
+  baseRevision?: number
+  metadata?: Record<string, unknown>
 }
 
 export interface GraphTransaction {
