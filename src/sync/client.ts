@@ -34,6 +34,7 @@ const NODE_OPS: Record<string, SyncOp['kind']> = {
 
 const EDGE_OPS: Record<string, SyncOp['kind']> = {
   edge_added: 'addEdge',
+  edge_updated: 'updateEdge',
   edge_removed: 'removeEdges',
 }
 
@@ -124,9 +125,9 @@ export class SyncClient {
     } else if (event.type.startsWith('edge_')) {
       kind = EDGE_OPS[event.type]
       if (!kind) return
-      if (event.type === 'edge_added') {
+      if (event.type === 'edge_added' || event.type === 'edge_updated') {
         const edges = event.source ? this.graph.getEdges(event.source) : []
-        const edge = edges.find(e => e.target === event.target && e.type === event.edgeType)
+        const edge = event.edgeId ? edges.find(e => e.id === event.edgeId) : edges.find(e => e.target === event.target && e.type === event.edgeType)
         payload = {
           source: event.source,
           id: edge?.id,
@@ -207,6 +208,13 @@ export class SyncClient {
           createdAt: (p.createdAt as number | undefined) ?? Date.now(),
           revision: p.revision as number | undefined,
         })
+        break
+      case 'updateEdge':
+        this.graph.updateEdge(
+          p.id as string,
+          p.data as Record<string, unknown> ?? {},
+          typeof p.revision === 'number' ? { expectedRevision: p.revision - 1 } : undefined,
+        )
         break
       case 'removeEdges':
         if (typeof p.id === 'string') this.graph.removeEdge(p.id)

@@ -502,6 +502,24 @@ describe('SyncServer + SyncClient', () => {
     cb()
   })
 
+  it('encodes edge updates distinctly from edge additions', () => {
+    const graph = new PolyGraph()
+    graph.addNode({ id: 'a', type: 't', data: {}, insertedAt: 1, updatedAt: 1 })
+    graph.addNode({ id: 'b', type: 't', data: {}, insertedAt: 1, updatedAt: 1 })
+    graph.addEdge({ id: 'claim', source: 'a', target: 'b', type: 'REL', data: { state: 'new' }, createdAt: 1 })
+    const sent: SyncMessage[] = []
+    const client = new SyncClient({
+      graph,
+      transport: { send: message => sent.push(message), close: () => undefined, onMessage: null },
+      autoFlush: false,
+      clientId: 'edge-updater',
+    })
+    graph.updateEdge('claim', { state: 'reviewed' }, { expectedRevision: 0 })
+    client.flush()
+    expect(sent[0].ops.at(-1)?.kind).toBe('updateEdge')
+    client.disconnect()
+  })
+
   it('server onOp callback fires for each received op', async () => {
     const received: string[] = []
     const server = new SyncServer()

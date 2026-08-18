@@ -52,7 +52,7 @@ export interface PolyEdge<TData extends Record<string, unknown> = Record<string,
 
 /** Mutation notification emitted through {@link PolyGraph.changes}. */
 export interface GraphChangeEvent {
-  type: 'node_added' | 'node_updated' | 'node_removed' | 'edge_added' | 'edge_removed' | 'activation_updated'
+  type: 'node_added' | 'node_updated' | 'node_removed' | 'edge_added' | 'edge_updated' | 'edge_removed' | 'activation_updated'
   nodeId?: string
   nodeType?: string
   edgeId?: string
@@ -204,7 +204,8 @@ export interface GraphResourceLimits {
 export interface GraphTransaction {
   readonly id: string
   addNode(node: PolyNode, options?: WriteOptions): void
-  addEdge(edge: PolyEdge): void
+  addEdge(edge: PolyEdge, options?: WriteOptions): void
+  updateEdge(id: string, data: Partial<Record<string, unknown>>, options?: WriteOptions): PolyEdge | undefined
   updateNode(id: string, data: Partial<Record<string, unknown>>, options?: WriteOptions): PolyNode | undefined
   patchNode(id: string, patch: NodePatch, options?: WriteOptions): PolyNode | undefined
   removeNode(id: string, options?: WriteOptions): void

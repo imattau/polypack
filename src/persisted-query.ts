@@ -19,6 +19,7 @@ function restoreNode(node: SerializedNode, transform?: DataTransform, sidecarDat
     vector: node.vector ? new Float64Array(node.vector) : undefined,
     insertedAt: node.insertedAt,
     updatedAt: node.updatedAt,
+    revision: node.revision ?? 0,
     activation: node.activation ? { ...node.activation } : undefined,
   }, transform, sidecarData)
 }

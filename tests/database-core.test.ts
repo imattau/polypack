@@ -78,6 +78,20 @@ describe('database-core mutation API', () => {
     expect(graph.getNode('n')?.data.value).toBe(2)
   })
 
+  it('preserves node revisions through persisted queries and warm reloads', async () => {
+    const adapter = new MemoryAdapter()
+    const graph = new PolyGraph(adapter)
+    graph.addNode(node('n'))
+    graph.updateNode('n', { value: 2 }, { expectedRevision: 0 })
+    await graph.flush()
+    expect((await graph.queryPersisted().first())?.revision).toBe(1)
+
+    const reloaded = new PolyGraph(adapter)
+    await reloaded.warm()
+    expect(reloaded.getNode('n')?.revision).toBe(1)
+    expect(() => reloaded.updateNode('n', { value: 3 }, { expectedRevision: 0 })).toThrow(ConflictError)
+  })
+
   it('applies nested set, unset, increment, and compare-and-set patches', () => {
     const graph = new PolyGraph()
     graph.addNode(node('n', { profile: { name: 'Alice', temporary: true }, views: 2 }))
@@ -103,6 +117,28 @@ describe('database-core mutation API', () => {
     expect(graph.getEdgeTargets('a', 'LINKS')).toEqual(['b'])
     await graph.transaction(tx => { expect(tx.removeEdge('a::LINKS::b', { expectedRevision: 3 })).toBe(true) })
     expect(graph.getEdgeTargets('a', 'LINKS')).toEqual([])
+  })
+
+  it('rejects stale conditional edge additions', async () => {
+    const graph = new PolyGraph()
+    graph.addNode(node('a'))
+    graph.addNode(node('b'))
+    const edge = { id: 'claim', source: 'a', target: 'b', type: 'CLAIMS', createdAt: 1, revision: 3 }
+    graph.addEdge(edge, { expectedRevision: 0 })
+    expect(() => graph.addEdge(edge, { expectedRevision: 0 })).toThrow(ConflictError)
+    await expect(graph.transaction(tx => tx.addEdge(edge, { expectedRevision: 0 }))).rejects.toThrow(ConflictError)
+  })
+
+  it('updates edge data with revisions and rejects stale edge updates', async () => {
+    const graph = new PolyGraph()
+    graph.addNode(node('a'))
+    graph.addNode(node('b'))
+    graph.addEdge({ id: 'claim', source: 'a', target: 'b', type: 'CLAIMS', data: { source: 'archive' }, createdAt: 1 })
+    const updated = graph.updateEdge('claim', { confidence: 0.9 }, { expectedRevision: 0 })
+    expect(updated?.data).toEqual({ source: 'archive', confidence: 0.9 })
+    expect(updated?.revision).toBe(1)
+    expect(() => graph.updateEdge('claim', { confidence: 0.1 }, { expectedRevision: 0 })).toThrow(ConflictError)
+    await expect(graph.transaction(tx => tx.updateEdge('claim', { reviewed: true }, { expectedRevision: 1 }))).resolves.toBeDefined()
   })
 
   it('persists parallel edges with independent IDs and reloads them', async () => {

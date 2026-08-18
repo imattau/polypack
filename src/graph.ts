@@ -142,7 +142,8 @@ export class PolyGraph {
       const tx: GraphTransaction = {
         id,
         addNode: (node, options) => inTransaction(() => this.addNode(node, options)),
-        addEdge: edge => inTransaction(() => this.addEdge(edge)),
+        addEdge: (edge, options) => inTransaction(() => this.addEdge(edge, options)),
+        updateEdge: (edgeId, data, options) => inTransaction(() => this.updateEdge(edgeId, data, options)),
         updateNode: (nodeId, data, options) => inTransaction(() => this.updateNode(nodeId, data, undefined, undefined, options)),
         patchNode: (nodeId, patch, options) => inTransaction(() => this.patchNode(nodeId, patch, options)),
         removeNode: (nodeId, options) => inTransaction(() => this.removeNode(nodeId, options)),
@@ -1130,24 +1131,29 @@ export class PolyGraph {
   // ── Edge CRUD ──
 
   /** Add one directed edge. A no-op if an edge with the same source/type/target already exists (edges are unique per triple). */
-  addEdge(edge: PolyEdge): void
+  addEdge(edge: PolyEdge, options?: WriteOptions): void
   addEdge(source: string, type: string, target: string, data?: Record<string, unknown>, ownership?: EdgeOwnership): void
-  addEdge(sourceOrEdge: string | PolyEdge, type?: string, target?: string, data?: Record<string, unknown>, ownership?: EdgeOwnership): void {
+  addEdge(sourceOrEdge: string | PolyEdge, type?: string | WriteOptions, target?: string, data?: Record<string, unknown>, ownership?: EdgeOwnership, options?: WriteOptions): void {
     this.assertMutationAllowed()
     const objectInput = typeof sourceOrEdge !== 'string'
     const source = objectInput ? sourceOrEdge.source : sourceOrEdge
-    const edgeType = objectInput ? sourceOrEdge.type : type!
+    const edgeType = objectInput ? sourceOrEdge.type : type as string
     const edgeTarget = objectInput ? sourceOrEdge.target : target!
     const edgeData = objectInput ? sourceOrEdge.data : data
     const edgeRevision = objectInput ? sourceOrEdge.revision ?? 0 : 0
+    const expectedRevision = objectInput
+      ? (typeof type === 'object' ? type.expectedRevision : options?.expectedRevision)
+      : undefined
     if (!Number.isInteger(edgeRevision) || edgeRevision < 0) throw new RangeError('Edge revision must be a non-negative integer')
     if (!source || !edgeType || !edgeTarget) throw new TypeError('Edge source, type, and target must not be empty')
     const id = objectInput ? sourceOrEdge.id : edgeId(source, edgeType, edgeTarget)
     if (!id) throw new TypeError('Edge id must not be empty')
-    this.removedEdgeIds.delete(id)
-    if (!this.edges.has(source)) this.edges.set(source, new Map())
-    const sourceEdges = this.edges.get(source)!
-    if (sourceEdges.has(id)) return
+    const sourceEdges = this.edges.get(source)
+    const existing = sourceEdges?.get(id)
+    if (expectedRevision !== undefined && (existing?.revision ?? 0) !== expectedRevision) {
+      throw new ConflictError(id, expectedRevision, existing?.revision)
+    }
+    if (existing) return
 
     const inputData = edgeData === undefined ? undefined : cloneData(edgeData)
     const fullData = ownership !== undefined ? { ...inputData, [OWNERSHIP_KEY]: ownership } : inputData
@@ -1163,12 +1169,50 @@ export class PolyGraph {
     }
     this.validateEdgeSchema(candidate)
 
-    sourceEdges.set(id, { id, target: edgeTarget, type: edgeType, data: fullData, revision: edgeRevision, createdAt: candidate.createdAt })
+    this.removedEdgeIds.delete(id)
+    if (!this.edges.has(source)) this.edges.set(source, new Map())
+    const targetEdges = this.edges.get(source)!
+    targetEdges.set(id, { id, target: edgeTarget, type: edgeType, data: fullData, revision: edgeRevision, createdAt: candidate.createdAt })
     if (!this.nodeToEdgeMap.has(edgeTarget)) this.nodeToEdgeMap.set(edgeTarget, new Set())
     this.nodeToEdgeMap.get(edgeTarget)!.add(source)
     this.dirtyEdges.add(id)
     this.schedulePersist()
     this.emitChange({ type: 'edge_added', edgeId: id, edgeType, source, target: edgeTarget })
+  }
+
+  /** Remove one edge by its canonical ID, optionally checking its revision. */
+  updateEdge(id: string, data: Partial<Record<string, unknown>>, options?: WriteOptions): PolyEdge | undefined {
+    this.assertMutationAllowed()
+    let source: string | undefined
+    let edge: EdgeEntry | undefined
+    for (const [candidateSource, entries] of this.edges) {
+      const candidate = entries.get(id)
+      if (candidate) {
+        source = candidateSource
+        edge = candidate
+        break
+      }
+    }
+    if (!edge || source === undefined) return undefined
+    if (options?.expectedRevision !== undefined && edge.revision !== options.expectedRevision) {
+      throw new ConflictError(id, options.expectedRevision, edge.revision)
+    }
+    const candidate: PolyEdge = {
+      id: edge.id,
+      source,
+      target: edge.target,
+      type: edge.type,
+      data: { ...(edge.data ?? {}), ...cloneData(data) },
+      createdAt: edge.createdAt,
+      revision: edge.revision + 1,
+    }
+    this.validateEdgeSchema(candidate)
+    edge.data = candidate.data
+    edge.revision = candidate.revision!
+    this.dirtyEdges.add(id)
+    this.schedulePersist()
+    this.emitChange({ type: 'edge_updated', edgeId: id, edgeType: edge.type, source, target: edge.target })
+    return { ...candidate, data: candidate.data ? cloneData(candidate.data) : undefined }
   }
 
   /** Remove one edge by its canonical ID, optionally checking its revision. */
@@ -1476,6 +1520,7 @@ export class PolyGraph {
           vector: sn.vector ? new Float64Array(sn.vector) : undefined,
           insertedAt: sn.insertedAt,
           updatedAt: sn.updatedAt,
+          revision: sn.revision ?? 0,
           activation: sn.activation ? { ...sn.activation } : undefined,
         })
         this.indexNode(this.nodes.get(sn.id)!)
