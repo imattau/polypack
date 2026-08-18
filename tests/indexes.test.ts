@@ -39,6 +39,24 @@ describe('secondary indexes', () => {
     expect(plan.loadedRecords).toBe(2)
   })
 
+  it('explains persisted index selection and traversal stages', async () => {
+    const graph = new PolyGraph()
+    graph.defineIndex({ name: 'person-surname', nodeType: 'person', fields: ['surname'] })
+    graph.addNode({ id: 'a', type: 'person', data: { surname: 'Smith' }, insertedAt: 1, updatedAt: 1 })
+    graph.addNode({ id: 'b', type: 'person', data: { surname: 'Jones' }, insertedAt: 1, updatedAt: 1 })
+    await graph.flush()
+
+    const plan = await graph.queryPersisted()
+      .whereNodeType('person')
+      .where('surname', 'Smith')
+      .traverse('RELATED', 2)
+      .explain()
+    expect(plan.index).toBe('person-surname')
+    expect(plan.stages).toContain('property-index(person-surname)')
+    expect(plan.stages).toContain('traversal(depth=2)')
+    expect(plan.loadedRecords).toBe(2)
+  })
+
   it('persists index definitions in the binary store', async () => {
     const io = new MemoryFileIO()
     const graph = new PolyGraph(new BinaryStoreAdapter({ storeDir: 'index-metadata', fileIO: io }))

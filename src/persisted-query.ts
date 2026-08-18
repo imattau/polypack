@@ -1,4 +1,4 @@
-import type { PolyNode, SerializedEdge, SerializedNode, DataTransform, QueryResourceLimits } from './types.js'
+import type { PolyNode, SerializedEdge, SerializedNode, DataTransform, QueryResourceLimits, QueryExplain, IndexDefinition } from './types.js'
 import type { PersistenceAdapter, PersistedNodeQuery } from './persistence/adapter.js'
 import { applyPersistedNodeQuery } from './persistence/query.js'
 import { cosineSimilarity } from './vector-index.js'
@@ -149,6 +149,35 @@ export class PersistedGraphQuery {
     if (topK !== undefined) assertNonNegativeInteger(topK, 'topK')
     this.similarVector = { vector, threshold, topK }
     return this
+  }
+
+  /** Explain the persisted query's likely index and execution stages. */
+  async explain(): Promise<QueryExplain> {
+    const indexes = await this.adapter.getIndexDefinitions?.() ?? []
+    const fields = new Set([
+      ...Object.keys(this.query.attributes ?? {}),
+      ...Object.keys(this.query.attributeRanges ?? {}),
+    ])
+    const nodeType = this.query.nodeTypes?.length === 1 ? this.query.nodeTypes[0] : undefined
+    const index = indexes.find((candidate: IndexDefinition) =>
+      (!candidate.nodeType || candidate.nodeType === nodeType) &&
+      candidate.fields.every(field => fields.has(field) || fields.has(field.replace(/^data\./, ''))),
+    )
+    const stages = [index ? `property-index(${index.name})` : 'record-scan']
+    if (this.query.nodeTypes?.length) stages.push(`type-filter(${this.query.nodeTypes.join(',')})`)
+    if (this.edgeType) stages.push(`edge-filter(${this.edgeType})`)
+    if (this.edgeSource) stages.push(`edge-source(${this.edgeSource})`)
+    if (this.joins.length) stages.push(`join(count=${this.joins.length})`)
+    if (this.traversals.length) stages.push(`traversal(depth=${Math.max(...this.traversals.map(step => step.depth))})`)
+    if (this.query.orderBy) stages.push(`order(${this.query.orderBy.field},${this.query.orderBy.direction})`)
+    if (this.resultLimit !== undefined) stages.push(`limit(${this.resultLimit})`)
+    const loadedRecords = (await this.adapter.allNodeIds()).length
+    return {
+      index: index?.name,
+      stages,
+      loadedRecords,
+      estimatedCost: Math.max(1, loadedRecords * (index ? 0.25 : 1) + this.traversals.length * loadedRecords),
+    }
   }
 
   private async serialized(includeOrder = true, includePagination = false): Promise<SerializedNode[]> {
