@@ -44,4 +44,11 @@ export class OpLog {
   get size(): number {
     return this.ops.length
   }
+
+  /** Drop acknowledged history while retaining all later operations. */
+  dropThrough(sequence: number): void {
+    const firstPending = this.ops.findIndex(op => op.seq > sequence)
+    if (firstPending === -1) this.ops = []
+    else if (firstPending > 0) this.ops = this.ops.slice(firstPending)
+  }
 }

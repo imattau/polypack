@@ -27,6 +27,8 @@ export interface SyncClientOptions {
   onError?: (error: SyncError) => void
   /** Maximum operations sent in one transport message. Defaults to Infinity. */
   maxOpsPerMessage?: number
+  /** Maximum locally retained operations, including acknowledged history. Defaults to Infinity. */
+  maxRetainedOps?: number
 }
 
 const NODE_OPS: Record<string, SyncOp['kind']> = {
@@ -65,6 +67,9 @@ export class SyncClient {
   private protocolVersion: number
   private onError?: (error: SyncError) => void
   private maxOpsPerMessage: number
+  private maxRetainedOps: number
+  private scheduledTransactionFlushes = new Set<string>()
+  private disconnected = false
 
   constructor(options: SyncClientOptions) {
     this.graph = options.graph
@@ -77,6 +82,8 @@ export class SyncClient {
     this.onError = options.onError
     this.maxOpsPerMessage = options.maxOpsPerMessage ?? Number.POSITIVE_INFINITY
     if (this.maxOpsPerMessage !== Number.POSITIVE_INFINITY && (!Number.isInteger(this.maxOpsPerMessage) || this.maxOpsPerMessage < 1)) throw new RangeError('maxOpsPerMessage must be a positive integer or Infinity')
+    this.maxRetainedOps = options.maxRetainedOps ?? Number.POSITIVE_INFINITY
+    if (this.maxRetainedOps !== Number.POSITIVE_INFINITY && (!Number.isInteger(this.maxRetainedOps) || this.maxRetainedOps < 1)) throw new RangeError('maxRetainedOps must be a positive integer or Infinity')
     this.bindTransport(options.transport)
 
     this.subscription = this.graph.changes.subscribe((event) => {
@@ -159,7 +166,18 @@ export class SyncClient {
       transactionId: event.transactionId,
       operationId: `${event.transactionId}:${this.oplog.latestSeq + 1}`,
     } : undefined)
-    if (this.autoFlush) this.flush()
+    if (this.autoFlush) {
+      if (event.transactionId) {
+        if (this.scheduledTransactionFlushes.has(event.transactionId)) return
+        this.scheduledTransactionFlushes.add(event.transactionId)
+        queueMicrotask(() => {
+          this.scheduledTransactionFlushes.delete(event.transactionId!)
+          if (!this.disconnected) this.flush()
+        })
+      } else {
+        this.flush()
+      }
+    }
   }
 
   /** Apply remote ops to the local graph without triggering re-sync. */
@@ -298,6 +316,9 @@ export class SyncClient {
     if (msg.type === 'ack' && msg.clientId === this.oplog.clientId) {
       for (const error of msg.errors ?? []) this.onError?.(error)
       this.lastAckedSeq = Math.max(this.lastAckedSeq, Math.min(msg.fromSeq, this.oplog.latestSeq))
+      while (this.oplog.size > this.maxRetainedOps && this.oplog.all[0]?.seq <= this.lastAckedSeq) {
+        this.oplog.dropThrough(this.oplog.all[0].seq)
+      }
       this.scheduleRetry()
       return
     }
@@ -357,6 +378,7 @@ export class SyncClient {
 
   /** Replace a disconnected transport and immediately resend pending operations. */
   reconnect(transport: SyncTransport): void {
+    this.disconnected = false
     if (this.retryTimer) clearTimeout(this.retryTimer)
     this.retryTimer = null
     this.transport.close()
@@ -373,6 +395,7 @@ export class SyncClient {
    */
   disconnect(): void {
     this.flush()
+    this.disconnected = true
     if (this.retryTimer) clearTimeout(this.retryTimer)
     this.retryTimer = null
     this.subscription.unsubscribe()

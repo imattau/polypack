@@ -8,6 +8,7 @@ import { SyncClient } from '../src/sync/client'
 import { MemoryTransport } from '../src/sync/transport'
 import type { SyncMessage, SyncOp } from '../src/sync/types'
 import type { SyncTransport } from '../src/sync/transport'
+import { syncChecksum } from '../src/sync/checksum'
 
 describe('OpLog', () => {
   it('appends ops with increasing sequence numbers', () => {
@@ -38,6 +39,11 @@ describe('OpLog', () => {
     expect(log2.latestSeq).toBe(2)
     const op3 = log2.append('addNode', { id: 'c' })
     expect(op3.seq).toBe(3)
+  })
+
+  it('checksums bigint payloads without throwing', () => {
+    const op: SyncOp = { seq: 1, timestamp: 1, clientId: 'c1', kind: 'addNode', payload: { value: 1n } }
+    expect(syncChecksum([op])).toBe(syncChecksum([op]))
   })
 })
 
@@ -178,6 +184,27 @@ describe('SyncServer + SyncClient', () => {
     client.disconnect()
   })
 
+  it('coalesces auto-flush transaction events into one message', async () => {
+    const sent: SyncMessage[] = []
+    const graph = new PolyGraph()
+    const client = new SyncClient({
+      graph,
+      clientId: 'coalesced-transaction',
+      retryMs: 0,
+      transport: { send: message => sent.push(message), close: () => undefined, onMessage: null },
+    })
+    await graph.transaction(tx => {
+      tx.addNode({ id: 'a', type: 't', data: {}, insertedAt: 1, updatedAt: 1 })
+      tx.addNode({ id: 'b', type: 't', data: {}, insertedAt: 1, updatedAt: 1 })
+    })
+    await new Promise(resolve => queueMicrotask(resolve))
+
+    expect(sent).toHaveLength(1)
+    expect(sent[0].ops).toHaveLength(2)
+    expect(sent[0].ops[0].transactionId).toBe(sent[0].ops[1].transactionId)
+    client.disconnect()
+  })
+
   it('deduplicates retried operations while acknowledging every delivery', () => {
     const server = new SyncServer()
     const acknowledgements: SyncMessage[] = []
@@ -225,6 +252,18 @@ describe('SyncServer + SyncClient', () => {
     expect(server.ops).toHaveLength(2)
   })
 
+  it('bounds deduplication memory with operation-log compaction', () => {
+    const server = new SyncServer({ maxOps: 1 })
+    const receive = server.addClient({ clientId: 'compact-client', send: () => undefined })
+    const op = (seq: number): SyncOp => ({
+      seq, timestamp: 1, clientId: 'compact-client', operationId: `op-${seq}`, kind: 'addNode',
+      payload: { id: `node-${seq}`, type: 't', data: {}, insertedAt: 1, updatedAt: 1 },
+    })
+    receive({ type: 'delta', clientId: 'compact-client', fromSeq: 0, ops: [op(1)] })
+    receive({ type: 'delta', clientId: 'compact-client', fromSeq: 1, ops: [op(2)] })
+    expect(server.ops.map(item => item.operationId)).toEqual(['op-2'])
+  })
+
   it('retries an unacknowledged operation until an acknowledgement arrives', async () => {
     const graph = new PolyGraph()
     let sends = 0
@@ -247,6 +286,24 @@ describe('SyncServer + SyncClient', () => {
 
     expect(sends).toBe(2)
     expect(client.pendingOps).toHaveLength(0)
+    client.disconnect()
+  })
+
+  it('bounds retained acknowledged client operations', () => {
+    const sent: SyncMessage[] = []
+    const graph = new PolyGraph()
+    const client = new SyncClient({
+      graph, clientId: 'retained-client', autoFlush: false, retryMs: 0, maxRetainedOps: 1,
+      transport: { send: message => sent.push(message), close: () => undefined, onMessage: null },
+    })
+    graph.addNode({ id: 'a', type: 't', data: {}, insertedAt: 1, updatedAt: 1 })
+    graph.addNode({ id: 'b', type: 't', data: {}, insertedAt: 1, updatedAt: 1 })
+    client.flush()
+    sent[0].ops.length
+    client.handleMessage({ type: 'ack', clientId: 'retained-client', fromSeq: 2, ops: [] })
+
+    expect(client.pendingOps).toHaveLength(0)
+    expect(client.oplog.size).toBe(1)
     client.disconnect()
   })
 

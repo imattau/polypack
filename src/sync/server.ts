@@ -163,7 +163,7 @@ export class SyncServer {
         accepted.push(op)
         this.onOp?.(op)
         while (this.opLog.length > this.options.maxOps) {
-          this.opLog.shift()
+          this.forgetOperation(this.opLog.shift()!)
           this.baseCursor++
         }
       }
@@ -210,7 +210,7 @@ export class SyncServer {
       accepted.push(op)
       this.onOp?.(op)
       while (this.opLog.length > this.options.maxOps) {
-        this.opLog.shift()
+        this.forgetOperation(this.opLog.shift()!)
         this.baseCursor++
       }
     }
@@ -226,6 +226,11 @@ export class SyncServer {
       if (visible.length === 0) continue
       client.send({ type: 'delta', clientId: 'server', fromSeq: broadcastCursor, cursor: this.cursor, ops: visible, checksum: syncChecksum(visible), protocolVersion: this.options.protocolVersion })
     }
+  }
+
+  private forgetOperation(op: SyncOp): void {
+    this.seenOps.delete(`${op.clientId}:${op.seq}`)
+    if (op.operationId) this.seenOperationIds.delete(`${op.clientId}:${op.operationId}`)
   }
 
   /** Every operation the server has accepted, in order. */

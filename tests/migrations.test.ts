@@ -51,4 +51,24 @@ describe('application migrations', () => {
     expect(report.total).toBe(3)
     expect(graph.getEdges('a')[0].data).toMatchObject({ legacy: true, migrated: true })
   })
+
+  it('returns a resume cursor and skips completed records', async () => {
+    const graph = new PolyGraph(new MemoryAdapter())
+    graph.addNode({ id: 'a', type: 'record', data: { old: true }, insertedAt: 1, updatedAt: 1 })
+    graph.addNode({ id: 'b', type: 'record', data: { old: true }, insertedAt: 1, updatedAt: 1 })
+    await graph.flush()
+    graph.migrations.register({ from: 1, to: 2, migrateNode: node => ({ ...node, data: { migrated: true } }) })
+    const controller = new AbortController()
+    let cursor: { kind: 'node' | 'edge'; id: string } | undefined
+    await expect(graph.migrations.run(graph, 1, 2, {
+      batchSize: 1,
+      signal: controller.signal,
+      onProgress: progress => { cursor = progress.lastProcessed; controller.abort() },
+    })).rejects.toThrow(MigrationError)
+
+    expect(cursor).toEqual({ kind: 'node', id: 'a' })
+    const resumed = await graph.migrations.run(graph, 1, 2, { resumeAfter: { nodeId: cursor!.id } })
+    expect(resumed.processed).toBe(1)
+    expect((await graph.queryPersisted().toArray()).every(node => node.data.migrated === true)).toBe(true)
+  })
 })
