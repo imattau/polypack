@@ -1,11 +1,13 @@
 import type { SyncContext, SyncError, SyncMessage, SyncOp } from './types.js'
 import { SYNC_PROTOCOL_VERSION } from './types.js'
+import type { SyncOperationLog } from './log.js'
 
 export interface SyncServerOptions {
   protocolVersion?: number
   maxOps?: number
   authorize?: (operation: SyncOp, context: SyncContext) => Promise<boolean> | boolean
   clientMetadata?: (client: SyncServerClient) => Record<string, unknown> | undefined
+  operationLog?: SyncOperationLog
 }
 
 export type SyncServerClient = {
@@ -28,11 +30,26 @@ export class SyncServer {
   private clientFilters = new Map<SyncServerClient, SyncSubscriptionOptions['filter']>()
   private baseCursor = 0
   private readonly options: SyncServerOptions & { protocolVersion: number; maxOps: number }
+  private readyPromise: Promise<void> | null = null
   onOp?: (op: SyncOp) => void
 
   constructor(options: SyncServerOptions = {}) {
     this.options = { ...options, protocolVersion: options.protocolVersion ?? SYNC_PROTOCOL_VERSION, maxOps: options.maxOps ?? Number.POSITIVE_INFINITY }
     if ((this.options.maxOps !== Number.POSITIVE_INFINITY && !Number.isInteger(this.options.maxOps)) || this.options.maxOps < 1) throw new RangeError('maxOps must be a positive integer or Infinity')
+  }
+
+  /** Load durable server history before accepting requests. */
+  async ready(): Promise<void> {
+    if (!this.options.operationLog) return
+    if (!this.readyPromise) {
+      this.readyPromise = this.options.operationLog.load().then(state => {
+        this.baseCursor = state.baseCursor
+        this.opLog = state.ops.slice(-this.options.maxOps)
+        this.baseCursor += state.ops.length - this.opLog.length
+        this.seenOps = new Set(state.ops.map(op => `${op.clientId}:${op.seq}`))
+      })
+    }
+    await this.readyPromise
   }
 
   /** Register a client transport. Returns a function to handle incoming messages. */
@@ -57,17 +74,11 @@ export class SyncServer {
       return
     }
     if (msg.type === 'request-snapshot') {
-      const cursorIsValid = msg.fromSeq >= this.baseCursor && msg.fromSeq <= this.cursor
-      const requestedCursor = cursorIsValid ? msg.fromSeq : 0
-      const offset = requestedCursor === 0 ? 0 : requestedCursor - this.baseCursor
-      sender.send({
-        type: requestedCursor === 0 ? 'snapshot' : 'delta',
-        clientId: 'server',
-        fromSeq: requestedCursor,
-        ops: this.opLog.slice(offset),
-        protocolVersion: this.options.protocolVersion,
-        errors: cursorIsValid ? undefined : [{ code: 'cursor_expired', message: 'Requested cursor is no longer available' }],
-      })
+      if (this.options.operationLog) {
+        void this.ready().then(() => this.sendSnapshot(msg, sender))
+        return
+      }
+      this.sendSnapshot(msg, sender)
       return
     }
     if (msg.type === 'delta') {
@@ -77,6 +88,20 @@ export class SyncServer {
       }
       this.processDelta(msg, sender)
     }
+  }
+
+  private sendSnapshot(msg: SyncMessage, sender: SyncServerClient): void {
+    const cursorIsValid = msg.fromSeq >= this.baseCursor && msg.fromSeq <= this.cursor
+    const requestedCursor = cursorIsValid ? msg.fromSeq : 0
+    const offset = requestedCursor === 0 ? 0 : requestedCursor - this.baseCursor
+    sender.send({
+      type: requestedCursor === 0 ? 'snapshot' : 'delta',
+      clientId: 'server',
+      fromSeq: requestedCursor,
+      ops: this.opLog.slice(offset),
+      protocolVersion: this.options.protocolVersion,
+      errors: cursorIsValid ? undefined : [{ code: 'cursor_expired', message: 'Requested cursor is no longer available' }],
+    })
   }
 
   private async authorizeAndProcess(msg: SyncMessage, sender: SyncServerClient): Promise<void> {
@@ -91,6 +116,14 @@ export class SyncServer {
   }
 
   private processDelta(msg: SyncMessage, sender: SyncServerClient, errors: SyncError[] = []): void {
+    if (this.options.operationLog) {
+      void this.processDurableDelta(msg, sender, errors)
+      return
+    }
+    this.processInMemoryDelta(msg, sender, errors)
+  }
+
+  private processInMemoryDelta(msg: SyncMessage, sender: SyncServerClient, errors: SyncError[] = []): void {
       const broadcastCursor = this.cursor
       const accepted: SyncOp[] = []
       for (const op of msg.ops) {
@@ -129,6 +162,37 @@ export class SyncServer {
           protocolVersion: this.options.protocolVersion,
         })
       }
+  }
+
+  private async processDurableDelta(msg: SyncMessage, sender: SyncServerClient, errors: SyncError[] = []): Promise<void> {
+    await this.ready()
+    const broadcastCursor = this.cursor
+    const accepted: SyncOp[] = []
+    for (const op of msg.ops) {
+      const key = `${op.clientId}:${op.seq}`
+      if (this.seenOps.has(key)) continue
+      await this.options.operationLog!.append(op)
+      this.seenOps.add(key)
+      this.opLog.push(op)
+      accepted.push(op)
+      this.onOp?.(op)
+      while (this.opLog.length > this.options.maxOps) {
+        this.opLog.shift()
+        this.baseCursor++
+      }
+    }
+    const log = this.options.operationLog!
+    if (log.compact && this.baseCursor > 0) await log.compact(this.baseCursor)
+    const acknowledgedSeq = msg.ops.reduce((max, op) => Math.max(max, op.seq), msg.fromSeq)
+    sender.send({ type: 'ack', clientId: msg.clientId, fromSeq: acknowledgedSeq, ops: [], protocolVersion: this.options.protocolVersion, errors: errors.length ? errors : undefined })
+    for (const client of accepted.length === 0 ? [] : this.clients) {
+      if (client === sender) continue
+      const filter = this.clientFilters.get(client)
+      const context: SyncContext = { clientId: client.clientId ?? 'unknown', protocolVersion: this.options.protocolVersion }
+      const visible = filter ? accepted.filter(op => filter(op, context)) : accepted
+      if (visible.length === 0) continue
+      client.send({ type: 'delta', clientId: 'server', fromSeq: broadcastCursor, ops: visible, protocolVersion: this.options.protocolVersion })
+    }
   }
 
   /** Every operation the server has accepted, in order. */
