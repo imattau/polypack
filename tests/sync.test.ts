@@ -6,7 +6,7 @@ import { SyncAdapter } from '../src/sync/adapter'
 import { SyncServer } from '../src/sync/server'
 import { SyncClient } from '../src/sync/client'
 import { MemoryTransport } from '../src/sync/transport'
-import type { SyncMessage } from '../src/sync/types'
+import type { SyncMessage, SyncOp } from '../src/sync/types'
 import type { SyncTransport } from '../src/sync/transport'
 
 describe('OpLog', () => {
@@ -517,5 +517,38 @@ describe('SyncServer + SyncClient', () => {
 
     expect(received).toEqual(['addNode'])
     cleanup()
+  })
+
+  it('supports authorization hooks and reports rejected operations', async () => {
+    const responses: SyncMessage[] = []
+    const server = new SyncServer({ authorize: async op => op.payload.allowed === true })
+    const sender = { clientId: 'authorized-client', send: (message: SyncMessage) => responses.push(message) }
+    const receive = server.addClient(sender)
+    receive({
+      type: 'delta', clientId: 'authorized-client', fromSeq: 0, ops: [
+        { seq: 1, timestamp: 1, clientId: 'authorized-client', kind: 'addNode', payload: { id: 'denied' } },
+        { seq: 2, timestamp: 1, clientId: 'authorized-client', kind: 'addNode', payload: { id: 'accepted', allowed: true } },
+      ],
+    })
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(server.ops.map(op => op.payload.id)).toEqual(['accepted'])
+    expect(responses[0].errors?.[0].code).toBe('unauthorized')
+  })
+
+  it('filters subscriptions and expires cursors after bounded compaction', () => {
+    const server = new SyncServer({ maxOps: 1 })
+    const received: SyncMessage[] = []
+    const sender = { clientId: 'sender', send: () => undefined }
+    const receiver = { clientId: 'receiver', send: (message: SyncMessage) => received.push(message) }
+    const send = server.addClient(sender)
+    server.addClient(receiver, { filter: op => op.kind === 'addNode' })
+    const op = (seq: number, kind: SyncOp['kind']) => ({ seq, timestamp: 1, clientId: 'sender', kind, payload: { id: `${kind}-${seq}` } })
+    send({ type: 'delta', clientId: 'sender', fromSeq: 0, ops: [op(1, 'addNode'), op(2, 'removeNode')] })
+    expect(server.cursor).toBe(2)
+    expect(received[0].ops.map(item => item.kind)).toEqual(['addNode'])
+
+    const recovery: SyncMessage[] = []
+    server.addClient({ clientId: 'recovery', send: message => recovery.push(message) })({ type: 'request-snapshot', clientId: 'recovery', fromSeq: 0, ops: [] })
+    expect(recovery[0].errors?.[0].code).toBe('cursor_expired')
   })
 })

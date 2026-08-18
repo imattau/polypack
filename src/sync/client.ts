@@ -4,6 +4,7 @@ import type { GraphChangeEvent, NodeActivation } from '../types.js'
 import { mergeActivation } from '../activation.js'
 import type { SyncTransport } from './transport.js'
 import type { SyncMessage, SyncOp } from './types.js'
+import { SYNC_PROTOCOL_VERSION } from './types.js'
 import { edgeId } from '../utils.js'
 import { OpLog } from './oplog.js'
 
@@ -21,6 +22,7 @@ export interface SyncClientOptions {
    * transient noise never floods the op log. Default 0.05.
    */
   activationSyncThreshold?: number
+  protocolVersion?: number
 }
 
 const NODE_OPS: Record<string, SyncOp['kind']> = {
@@ -55,6 +57,7 @@ export class SyncClient {
   private retryTimer: ReturnType<typeof setTimeout> | null = null
   private serverCursor = 0
   private applyingRemote = false
+  private protocolVersion: number
 
   constructor(options: SyncClientOptions) {
     this.graph = options.graph
@@ -63,6 +66,7 @@ export class SyncClient {
     this.autoFlush = options.autoFlush ?? true
     this.retryMs = options.retryMs ?? 1000
     this.activationSyncThreshold = options.activationSyncThreshold ?? DEFAULT_ACTIVATION_SYNC_THRESHOLD
+    this.protocolVersion = options.protocolVersion ?? SYNC_PROTOCOL_VERSION
     this.bindTransport(options.transport)
 
     this.subscription = this.graph.changes.subscribe((event) => {
@@ -257,6 +261,7 @@ export class SyncClient {
       clientId: this.oplog.clientId,
       fromSeq: this.lastAckedSeq,
       ops,
+      protocolVersion: this.protocolVersion,
     })
     this.scheduleRetry()
   }
@@ -306,6 +311,7 @@ export class SyncClient {
       clientId: this.oplog.clientId,
       fromSeq: fromStart ? 0 : this.serverCursor,
       ops: [],
+      protocolVersion: this.protocolVersion,
     })
   }
 
