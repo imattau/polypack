@@ -1,13 +1,15 @@
-import type { SerializedNode, SerializedEdge } from '../types.js'
+import type { SerializedNode, SerializedEdge, AdapterCapabilities, IndexDefinition, MutationRecord } from '../types.js'
 import type { PersistenceAdapter, PersistenceChanges, PersistedNodeQuery } from './adapter.js'
 import { applyPersistedCountPagination, applyPersistedNodeQuery, matchesPersistedNode } from './query.js'
 import type { WalEntry } from './binary-format.js'
-import { encodeWalEntries, decodeWalEntries, encodeSnapshot, decodeSnapshot } from './binary-format.js'
+import { encodeWalEntries, decodeWalEntries, encodeSnapshot, decodeSnapshot, encodeMutationRecords, decodeMutationRecords } from './binary-format.js'
 import type { FileIO } from './file-io.js'
 import { createFileIO } from './file-io.js'
+import { mutationRecordFromChanges } from './mutation-log.js'
 
 const SNAPSHOT_FILE = 'snapshot.msgpack'
 const WAL_FILE = 'wal.msgpack'
+const MUTATION_LOG_FILE = 'mutations.msgpack'
 const DEFAULT_COMPACT_THRESHOLD = 10_000
 /** Compact once the WAL holds at least this share of the store's record count. */
 const COMPACT_RATIO = 4
@@ -45,9 +47,13 @@ interface ResolvedBinaryStoreConfig {
  * mid-append crash is also tolerated.
  */
 export class BinaryStoreAdapter implements PersistenceAdapter {
+  readonly capabilities: AdapterCapabilities
   private nodes = new Map<string, SerializedNode>()
   private edges = new Map<string, SerializedEdge>()
   private vectors = new Map<string, number[]>()
+  private indexDefinitions: IndexDefinition[] = []
+  private mutationRecords: MutationRecord[] = []
+  private nextMutationSequence = 1n
   private byType = new Map<string, Set<string>>()
   private edgesBySource = new Map<string, Set<string>>()
   private edgesByTarget = new Map<string, Set<string>>()
@@ -65,6 +71,16 @@ export class BinaryStoreAdapter implements PersistenceAdapter {
       compactThreshold: config.compactThreshold ?? DEFAULT_COMPACT_THRESHOLD,
       fileIO: config.fileIO,
       syncWrites: config.syncWrites ?? false,
+    }
+    this.capabilities = {
+      atomicBatches: true,
+      transactions: true,
+      fsync: this.config.syncWrites,
+      secondaryIndexes: true,
+      snapshots: true,
+      changeFeed: false,
+      concurrentWriters: false,
+      vectorSearch: 'exact',
     }
   }
 
@@ -173,10 +189,11 @@ export class BinaryStoreAdapter implements PersistenceAdapter {
     this.io = this.config.fileIO ?? (await createFileIO(this.config.storeDir, this.config.syncWrites))
     const snapshotData = await this.io.readFile(SNAPSHOT_FILE)
     if (snapshotData) {
-      const { nodes, edges, vectors } = decodeSnapshot(snapshotData)
+      const { nodes, edges, vectors, indexes } = decodeSnapshot(snapshotData)
       this.nodes = nodes
       this.edges = edges
       this.vectors = vectors
+      this.indexDefinitions = indexes
     }
     const walData = await this.io.readFile(WAL_FILE)
     if (walData && walData.length > 0) {
@@ -192,6 +209,13 @@ export class BinaryStoreAdapter implements PersistenceAdapter {
       this.walEntryCount = 0
     }
     this.rebuildIndexes()
+    const mutationData = await this.io.readFile(MUTATION_LOG_FILE)
+    if (mutationData && mutationData.length > 0) {
+      this.mutationRecords = [...decodeMutationRecords(mutationData)]
+      if (this.mutationRecords.length > 0) {
+        this.nextMutationSequence = this.mutationRecords[this.mutationRecords.length - 1].sequence + 1n
+      }
+    }
   }
 
   private replayEntry(entry: WalEntry): void {
@@ -219,11 +243,14 @@ export class BinaryStoreAdapter implements PersistenceAdapter {
         this.edges.clear()
         this.vectors.clear()
         break
+      case 'setIndexes':
+        this.indexDefinitions = entry.indexes.map(index => ({ ...index, fields: [...index.fields] }))
+        break
     }
   }
 
   private async writeSnapshot(): Promise<void> {
-    await this.io.writeFile(SNAPSHOT_FILE, encodeSnapshot(this.nodes, this.edges, this.vectors))
+    await this.io.writeFile(SNAPSHOT_FILE, encodeSnapshot(this.nodes, this.edges, this.vectors, this.indexDefinitions))
   }
 
   /**
@@ -262,7 +289,12 @@ export class BinaryStoreAdapter implements PersistenceAdapter {
     this.assertOpen()
     await this.enqueue(async () => {
       await this.ensureLoaded()
+      if (changes.operationId && this.mutationRecords.some(record => record.operationId === changes.operationId)) return
       const entries: WalEntry[] = []
+      if (changes.indexDefinitions) {
+        this.indexDefinitions = changes.indexDefinitions.map(index => ({ ...index, fields: [...index.fields] }))
+        entries.push({ kind: 'setIndexes', indexes: this.indexDefinitions })
+      }
       for (const id of changes.deleteNodeIds) {
         const node = this.nodes.get(id)
         this.unindexNode(id, node?.type)
@@ -295,12 +327,38 @@ export class BinaryStoreAdapter implements PersistenceAdapter {
       if (entries.length > 0) {
         const encoded = encodeWalEntries(entries)
         await this.io.appendFile(WAL_FILE, encoded)
+        const record = mutationRecordFromChanges(changes, this.nextMutationSequence)
+        if (record) {
+          await this.io.appendFile(MUTATION_LOG_FILE, encodeMutationRecords([record]))
+          this.mutationRecords.push(record)
+          this.nextMutationSequence++
+        }
         this.walEntryCount += entries.length
         if (this.walEntryCount >= this.effectiveCompactThreshold()) {
           this.scheduleCompact()
         }
       }
     })
+  }
+
+  async getIndexDefinitions(): Promise<IndexDefinition[]> {
+    this.assertOpen()
+    await this.enqueue(() => this.ensureLoaded())
+    return this.indexDefinitions.map(index => ({ ...index, fields: [...index.fields] }))
+  }
+
+  async getMutationsSince(sequence: bigint): Promise<MutationRecord[]> {
+    this.assertOpen()
+    await this.enqueue(() => this.ensureLoaded())
+    return this.mutationRecords
+      .filter(record => record.sequence > sequence)
+      .map(record => ({ ...record, operations: record.operations.map(operation => ({ ...operation, payload: structuredClone(operation.payload) })) }))
+  }
+
+  async latestMutationSequence(): Promise<bigint> {
+    this.assertOpen()
+    await this.enqueue(() => this.ensureLoaded())
+    return this.nextMutationSequence - 1n
   }
 
   async putNode(node: SerializedNode): Promise<void> {
@@ -494,7 +552,7 @@ export class BinaryStoreAdapter implements PersistenceAdapter {
       this.edgesBySource.clear()
       this.edgesByTarget.clear()
       this.walEntryCount = 0
-      await this.io.writeFile(SNAPSHOT_FILE, encodeSnapshot(this.nodes, this.edges, this.vectors))
+      await this.io.writeFile(SNAPSHOT_FILE, encodeSnapshot(this.nodes, this.edges, this.vectors, this.indexDefinitions))
       await this.io.writeFile(WAL_FILE, new Uint8Array(0))
     })
   }

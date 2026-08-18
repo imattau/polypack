@@ -4,6 +4,7 @@ import type { GraphChangeEvent, NodeActivation } from '../types.js'
 import { mergeActivation } from '../activation.js'
 import type { SyncTransport } from './transport.js'
 import type { SyncMessage, SyncOp } from './types.js'
+import { edgeId } from '../utils.js'
 import { OpLog } from './oplog.js'
 
 /** Configuration for a graph synchronization client. */
@@ -107,6 +108,7 @@ export class SyncClient {
           vector: node.vector ? [...node.vector] : null,
           insertedAt: node.insertedAt,
           updatedAt: node.updatedAt,
+          revision: node.revision,
           activation: node.activation ? { ...node.activation } : undefined,
         }
       } else {
@@ -120,13 +122,17 @@ export class SyncClient {
         const edge = edges.find(e => e.target === event.target && e.type === event.edgeType)
         payload = {
           source: event.source,
+          id: edge?.id,
           type: event.edgeType,
           target: event.target,
           data: edge?.data ?? null,
+          createdAt: edge?.createdAt ?? Date.now(),
+          revision: edge?.revision,
         }
       } else {
         payload = {
           source: event.source,
+          id: event.edgeId,
           type: event.edgeType,
           target: event.target,
         }
@@ -185,12 +191,15 @@ export class SyncClient {
         this.graph.removeNode(p.id as string)
         break
       case 'addEdge':
-        this.graph.addEdge(
-          p.source as string,
-          p.type as string,
-          p.target as string,
-          p.data as Record<string, unknown> | undefined,
-        )
+        this.graph.addEdge({
+          id: (p.id as string | undefined) ?? edgeId(p.source as string, p.type as string, p.target as string),
+          source: p.source as string,
+          type: p.type as string,
+          target: p.target as string,
+          data: p.data as Record<string, unknown> | undefined,
+          createdAt: (p.createdAt as number | undefined) ?? Date.now(),
+          revision: p.revision as number | undefined,
+        })
         break
       case 'removeEdges':
         this.graph.removeEdges(

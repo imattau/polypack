@@ -29,6 +29,8 @@ export interface PolyNode<TData extends Record<string, unknown> = Record<string,
   vector?: Float64Array
   insertedAt: number
   updatedAt: number
+  /** Monotonically increasing revision. Inputs may omit this and default to 0. */
+  revision?: number
   /** Durable, syncable activation. Optional — absent until the node is first reinforced. */
   activation?: NodeActivation
 }
@@ -44,6 +46,8 @@ export interface PolyEdge<TData extends Record<string, unknown> = Record<string,
   type: string
   data?: TData
   createdAt: number
+  /** Monotonically increasing revision. Inputs may omit this and default to 0. */
+  revision?: number
 }
 
 /** Mutation notification emitted through {@link PolyGraph.changes}. */
@@ -69,6 +73,7 @@ export interface SerializedNode {
   vector: number[] | null
   insertedAt: number
   updatedAt: number
+  revision?: number
   /** Durable activation state. Persisted through the existing snapshot/WAL and adapters. */
   activation?: NodeActivation
 }
@@ -81,6 +86,72 @@ export interface SerializedEdge {
   type: string
   data: Record<string, unknown> | null
   createdAt: number
+  revision?: number
+}
+
+export interface WriteOptions {
+  expectedRevision?: number
+}
+
+export interface NodePatch {
+  set?: Record<string, unknown>
+  unset?: string[]
+  increment?: Record<string, number>
+  compareAndSet?: Record<string, { expected: unknown; value: unknown }>
+}
+
+export interface AdapterCapabilities {
+  atomicBatches: boolean
+  transactions: boolean
+  fsync: boolean
+  secondaryIndexes: boolean
+  snapshots: boolean
+  changeFeed: boolean
+  concurrentWriters: boolean
+  vectorSearch: 'none' | 'exact' | 'ann'
+}
+
+export interface IndexDefinition {
+  name: string
+  nodeType?: string
+  fields: string[]
+  unique?: boolean
+  sparse?: boolean
+}
+
+export interface QueryExplain {
+  index?: string
+  stages: string[]
+  estimatedCost: number
+  loadedRecords: number
+}
+
+export type GraphOperation = {
+  type: 'putNode' | 'deleteNode' | 'putEdge' | 'deleteEdge' | 'putVector' | 'deleteVector' | 'setIndexes'
+  payload: Record<string, unknown>
+}
+
+export interface MutationRecord {
+  operationId: string
+  sequence: bigint
+  transactionId: string
+  actor?: string
+  timestamp: number
+  baseRevision?: number
+  operations: GraphOperation[]
+  metadata?: Record<string, unknown>
+}
+
+export interface GraphTransaction {
+  readonly id: string
+  addNode(node: PolyNode): void
+  addEdge(edge: PolyEdge): void
+  updateNode(id: string, data: Partial<Record<string, unknown>>, options?: WriteOptions): PolyNode | undefined
+  patchNode(id: string, patch: NodePatch, options?: WriteOptions): PolyNode | undefined
+  removeNode(id: string, options?: WriteOptions): void
+  removeEdge(id: string, options?: WriteOptions): boolean
+  getNode(id: string): PolyNode | undefined
+  query(): unknown
 }
 
 /** Parameters for a nearest-neighbour vector search. */

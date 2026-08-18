@@ -1,4 +1,6 @@
-export { PolyGraph } from './graph.js'
+export { PolyGraph, GraphSnapshot } from './graph.js'
+export { ConflictError } from './errors.js'
+export { UniqueConstraintError } from './index-errors.js'
 export { VectorIndex, cosineSimilarity, euclideanSimilarity } from './vector-index.js'
 export { HNSWIndex } from './hnsw-index.js'
 export type { HNSWConfig } from './hnsw-index.js'
@@ -23,6 +25,14 @@ export type {
   EdgeTypes,
   DataTransform,
   NodeActivation,
+  WriteOptions,
+  NodePatch,
+  AdapterCapabilities,
+  GraphTransaction,
+  IndexDefinition,
+  QueryExplain,
+  GraphOperation,
+  MutationRecord,
 } from './types.js'
 export { defineEdges } from './types.js'
 export { yieldToUI, edgeId } from './utils.js'

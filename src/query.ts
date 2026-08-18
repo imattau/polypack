@@ -1,6 +1,6 @@
-import type { PolyNode, DataTransform } from './types.js'
+import type { PolyNode, DataTransform, IndexDefinition, QueryExplain } from './types.js'
 import { cosineSimilarity } from './vector-index.js'
-import { activationScoreOf, assertFiniteVector, assertNonNegativeInteger, cloneData, clonePolyNode, edgeId } from './utils.js'
+import { activationScoreOf, assertFiniteVector, assertNonNegativeInteger, cloneData, clonePolyNode } from './utils.js'
 
 /**
  * Native query executor hook. Given a query-plan IR, serialized nodes, and
@@ -27,8 +27,9 @@ export function isNativeQueryExecutorActive(): boolean {
   return nativeQueryExecutor !== null
 }
 
-type EdgeEntry = { target: string; type: string; data?: Record<string, unknown> }
+type EdgeEntry = { id: string; target: string; type: string; data?: Record<string, unknown> }
 type EdgeIndex = Map<string, Map<string, EdgeEntry>>
+type CandidateResolver = (nodeTypes: string[] | undefined, attributes: Record<string, unknown> | undefined) => string[] | undefined
 
 interface TraversalStep {
   edgeType: string
@@ -73,6 +74,8 @@ export class GraphQuery {
   private nodeToEdgeMap: Map<string, Set<string>>
   private transform?: DataTransform
   private sidecarData: Map<string, unknown>
+  private indexes: IndexDefinition[]
+  private candidateResolver?: CandidateResolver
 
   constructor(
     nodes: Map<string, PolyNode>,
@@ -80,12 +83,16 @@ export class GraphQuery {
     nodeToEdgeMap: Map<string, Set<string>>,
     transform?: DataTransform,
     sidecarData?: Map<string, unknown>,
+    indexes: IndexDefinition[] = [],
+    candidateResolver?: CandidateResolver,
   ) {
     this.nodes = nodes
     this.edges = edges
     this.nodeToEdgeMap = nodeToEdgeMap
     this.transform = transform
     this.sidecarData = sidecarData ?? new Map()
+    this.indexes = indexes
+    this.candidateResolver = candidateResolver
   }
 
   private readNode(node: PolyNode): PolyNode {
@@ -267,6 +274,9 @@ export class GraphQuery {
       return [...ids].map(id => this.nodes.get(id)).filter((n): n is PolyNode => !!n)
     }
 
+    const indexedIds = this.candidateResolver?.(this.opts.nodeTypes, this.opts.attributes)
+    if (indexedIds) return indexedIds.map(id => this.nodes.get(id)).filter((n): n is PolyNode => !!n)
+
     const allNodes = [...this.nodes.values()]
     if (this.opts.nodeTypes) return allNodes.filter(n => this.opts.nodeTypes!.includes(n.type))
     if (this.opts.edgeType) return allNodes
@@ -398,7 +408,7 @@ export class GraphQuery {
     for (const [source, edgeMap] of this.edges) {
       for (const e of edgeMap.values()) {
         out.push({
-          id: edgeId(source, e.type, e.target),
+          id: e.id,
           source,
           target: e.target,
           type: e.type,
@@ -419,6 +429,30 @@ export class GraphQuery {
       return executor(plan, this.serializeNodes(), this.serializeEdges())
     } catch {
       return null
+    }
+  }
+
+  /** Explain the selected source index and the remaining query stages. */
+  explain(): QueryExplain {
+    const fields = new Set([
+      ...Object.keys(this.opts.attributes ?? {}),
+      ...Object.keys(this.opts.attributeRanges ?? {}),
+    ])
+    const nodeType = this.opts.nodeTypes?.length === 1 ? this.opts.nodeTypes[0] : undefined
+    const index = this.indexes.find(candidate =>
+      (!candidate.nodeType || candidate.nodeType === nodeType) &&
+      candidate.fields.every(field => fields.has(field) || fields.has(field.replace(/^data\./, ''))),
+    )
+    const stages = [index ? `property-index(${index.name})` : 'record-scan']
+    if (this.opts.nodeTypes?.length) stages.push(`type-filter(${this.opts.nodeTypes.join(',')})`)
+    if (this.opts.afterSteps?.length) stages.push(`traversal(depth=${Math.max(...this.opts.afterSteps.map(step => step.depth))})`)
+    if (this.opts.orderBy) stages.push(`order(${this.opts.orderBy.field},${this.opts.orderBy.direction})`)
+    if (this.opts.limit !== undefined) stages.push(`limit(${this.opts.limit})`)
+    return {
+      index: index?.name,
+      stages,
+      loadedRecords: this.nodes.size,
+      estimatedCost: Math.max(1, this.nodes.size * (index ? 0.25 : 1)),
     }
   }
 

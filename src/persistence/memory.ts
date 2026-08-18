@@ -1,9 +1,20 @@
-import type { SerializedNode, SerializedEdge } from '../types.js'
+import type { SerializedNode, SerializedEdge, IndexDefinition, MutationRecord } from '../types.js'
 import type { PersistenceAdapter, PersistenceChanges, PersistedNodeQuery } from './adapter.js'
 import { applyPersistedCountPagination, applyPersistedNodeQuery, matchesPersistedNode } from './query.js'
+import { mutationRecordFromChanges } from './mutation-log.js'
 
 /** Volatile persistence adapter for Node.js, tests, and temporary graphs. */
 export class MemoryAdapter implements PersistenceAdapter {
+  readonly capabilities = {
+    atomicBatches: true,
+    transactions: true,
+    fsync: false,
+    secondaryIndexes: true,
+    snapshots: true,
+    changeFeed: false,
+    concurrentWriters: false,
+    vectorSearch: 'exact' as const,
+  }
   private nodes = new Map<string, SerializedNode>()
   private edges = new Map<string, SerializedEdge>()
   private vectors = new Map<string, number[]>()
@@ -11,6 +22,9 @@ export class MemoryAdapter implements PersistenceAdapter {
   private edgesBySource = new Map<string, Set<string>>()
   private edgesByTarget = new Map<string, Set<string>>()
   private nodeOrder = new Map<string, true>()
+  private indexDefinitions: IndexDefinition[] = []
+  private mutations: MutationRecord[] = []
+  private nextMutation = 1n
   private readonly maxNodes: number | undefined
 
   /**
@@ -92,6 +106,8 @@ export class MemoryAdapter implements PersistenceAdapter {
   }
 
   async applyChanges(changes: PersistenceChanges): Promise<void> {
+    if (changes.operationId && this.mutations.some(record => record.operationId === changes.operationId)) return
+    if (changes.indexDefinitions) this.indexDefinitions = changes.indexDefinitions.map(index => ({ ...index, fields: [...index.fields] }))
     for (const id of changes.deleteNodeIds) { this.unindexNode(id); this.nodes.delete(id); this.nodeOrder.delete(id) }
     for (const id of changes.deleteEdgeIds) { this.unindexEdge(id); this.edges.delete(id) }
     for (const id of changes.deleteVectorIds) this.vectors.delete(id)
@@ -99,6 +115,20 @@ export class MemoryAdapter implements PersistenceAdapter {
     for (const edge of changes.putEdges) { this.edges.set(edge.id, edge); this.indexEdge(edge) }
     for (const entry of changes.putVectors) this.vectors.set(entry.id, entry.vector)
     this.evictIfOverCap()
+    const record = mutationRecordFromChanges(changes, this.nextMutation++)
+    if (record) this.mutations.push(record)
+  }
+
+  async getIndexDefinitions(): Promise<IndexDefinition[]> {
+    return this.indexDefinitions.map(index => ({ ...index, fields: [...index.fields] }))
+  }
+
+  async getMutationsSince(sequence: bigint): Promise<MutationRecord[]> {
+    return this.mutations.filter(record => record.sequence > sequence).map(record => ({ ...record, operations: record.operations.map(operation => ({ ...operation, payload: structuredClone(operation.payload) })) }))
+  }
+
+  async latestMutationSequence(): Promise<bigint> {
+    return this.nextMutation - 1n
   }
 
   async putNode(node: SerializedNode): Promise<void> {

@@ -1,6 +1,6 @@
 import type { PersistenceAdapter, PersistenceChanges, PersistedNodeQuery } from '../persistence/adapter.js'
 import { applyPersistedNodeQuery } from '../persistence/query.js'
-import type { SerializedNode, SerializedEdge } from '../types.js'
+import type { SerializedNode, SerializedEdge, MutationRecord } from '../types.js'
 import { edgeId } from '../utils.js'
 import { OpLog } from './oplog.js'
 
@@ -14,6 +14,10 @@ export class SyncAdapter implements PersistenceAdapter {
   readonly oplog: OpLog
   private inner: PersistenceAdapter
   onOp: OpCallback | null = null
+
+  get capabilities() {
+    return this.inner.capabilities
+  }
 
   constructor(inner: PersistenceAdapter, clientId: string) {
     this.inner = inner
@@ -31,8 +35,14 @@ export class SyncAdapter implements PersistenceAdapter {
     }
   }
 
+  private validateEdgeRecord(edge: SerializedEdge): void {
+    if (!edge.id || !edge.source || !edge.type || !edge.target) {
+      throw new TypeError('Edge id, source, type, and target must not be empty')
+    }
+  }
+
   async applyChanges(changes: PersistenceChanges): Promise<void> {
-    for (const edge of changes.putEdges) this.validateEdge(edge)
+    for (const edge of changes.putEdges) this.validateEdgeRecord(edge)
     if (this.inner.applyChanges) {
       await this.inner.applyChanges(changes)
     } else {
@@ -54,6 +64,18 @@ export class SyncAdapter implements PersistenceAdapter {
     for (const edge of changes.putEdges) {
       this.record('addEdge', edge as unknown as Record<string, unknown>)
     }
+  }
+
+  async getIndexDefinitions() {
+    return this.inner.getIndexDefinitions ? this.inner.getIndexDefinitions() : []
+  }
+
+  async getMutationsSince(sequence: bigint): Promise<MutationRecord[]> {
+    return this.inner.getMutationsSince ? this.inner.getMutationsSince(sequence) : []
+  }
+
+  async latestMutationSequence(): Promise<bigint> {
+    return this.inner.latestMutationSequence ? this.inner.latestMutationSequence() : 0n
   }
 
   async putNode(node: SerializedNode): Promise<void> {

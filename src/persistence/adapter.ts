@@ -1,4 +1,5 @@
-import type { SerializedNode, SerializedEdge } from '../types.js'
+import type { SerializedNode, SerializedEdge, IndexDefinition, MutationRecord } from '../types.js'
+import type { AdapterCapabilities } from '../types.js'
 
 /** Storage-level node predicates used by persisted queries. */
 export interface PersistedNodeQuery {
@@ -12,6 +13,9 @@ export interface PersistedNodeQuery {
 
 /** One logical graph persistence commit. Implement atomically when supported. */
 export interface PersistenceChanges {
+  transactionId?: string
+  operationId?: string
+  indexDefinitions?: IndexDefinition[]
   putNodes: SerializedNode[]
   deleteNodeIds: string[]
   putEdges: SerializedEdge[]
@@ -22,6 +26,11 @@ export interface PersistenceChanges {
 
 /** Storage contract used by {@link PolyGraph}. Implement all writes atomically where possible. */
 export interface PersistenceAdapter {
+  /** Guarantees offered by this adapter. */
+  readonly capabilities?: AdapterCapabilities
+  getIndexDefinitions?(): Promise<IndexDefinition[]>
+  getMutationsSince?(sequence: bigint): Promise<MutationRecord[]>
+  latestMutationSequence?(): Promise<bigint>
   /** Optional atomic commit hook used in preference to individual bulk methods. */
   applyChanges?(changes: PersistenceChanges): Promise<void>
   putNode(node: SerializedNode): Promise<void>

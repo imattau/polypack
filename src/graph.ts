@@ -1,5 +1,7 @@
 import { Subject } from 'rxjs'
-import type { PolyNode, EdgeOwnership, GraphChangeEvent, SerializedNode, SerializedEdge, DataTransform, NodeActivation } from './types.js'
+import type { PolyNode, PolyEdge, EdgeOwnership, GraphChangeEvent, SerializedNode, SerializedEdge, DataTransform, NodeActivation, WriteOptions, NodePatch, GraphTransaction, IndexDefinition } from './types.js'
+import { ConflictError } from './errors.js'
+import { UniqueConstraintError } from './index-errors.js'
 import { VectorIndex } from './vector-index.js'
 import type { VectorIndexLike } from './vector-index.js'
 import { GraphQuery } from './query.js'
@@ -20,7 +22,7 @@ import { MemoryAdapter } from './persistence/memory.js'
 import { createEmbedding, defaultEmbedding } from './embedding.js'
 import type { EmbeddingProvider } from './embedding.js'
 
-type EdgeEntry = { target: string; type: string; data?: Record<string, unknown> }
+type EdgeEntry = { id: string; target: string; type: string; data?: Record<string, unknown>; revision: number; createdAt: number }
 type EdgeIndex = Map<string, Map<string, EdgeEntry>>
 
 const DEFAULT_HOT_CACHE_MAX = 50000
@@ -29,6 +31,32 @@ const OWNERSHIP_KEY = '__ownership'
 
 function getOwnership(data?: Record<string, unknown>): EdgeOwnership {
   return (data?.[OWNERSHIP_KEY] as EdgeOwnership) ?? 'reference'
+}
+
+/** A stable, read-only view of graph state captured at one point in time. */
+export class GraphSnapshot {
+  constructor(
+    private readonly nodes: Map<string, PolyNode>,
+    private readonly edges: EdgeIndex,
+    private readonly nodeToEdgeMap: Map<string, Set<string>>,
+    private readonly transform?: DataTransform,
+    private readonly sidecarData: Map<string, unknown> = new Map(),
+    private readonly indexes: IndexDefinition[] = [],
+  ) {}
+
+  query(): GraphQuery {
+    return new GraphQuery(this.nodes, this.edges, this.nodeToEdgeMap, this.transform, this.sidecarData, this.indexes)
+  }
+
+  getNode(id: string): PolyNode | undefined {
+    const node = this.nodes.get(id)
+    if (!node) return undefined
+    const copy = clonePolyNode(node)
+    if (this.transform?.deserialize) {
+      copy.data = this.transform.deserialize(copy.data, this.sidecarData.get(id)) as Record<string, unknown>
+    }
+    return copy
+  }
 }
 
 /**
@@ -56,6 +84,9 @@ export class PolyGraph {
   protected sidecarData = new Map<string, unknown>()
   protected hotCacheOrder = new Map<string, true>()
   protected _byType = new Map<string, Set<string>>()
+  private secondaryIndexes = new Map<string, IndexDefinition>()
+  private secondaryIndexData = new Map<string, Map<string, Set<string>>>()
+  private indexDefinitionsDirty = false
   protected evictedDirtyNodes = new Map<string, SerializedNode>()
 
   protected dirtyNodes = new Set<string>()
@@ -68,9 +99,197 @@ export class PolyGraph {
   protected persistTimer: ReturnType<typeof setTimeout> | null = null
   protected flushInFlight: Promise<void> | null = null
   protected evictionSkipCounter = 0
+  private transactionTail: Promise<void> = Promise.resolve()
+  private transactionActive = false
+  private transactionMutationDepth = 0
+  private currentTransactionId: string | undefined
 
   protected batchDepth = 0
   protected pendingBatchEvents: GraphChangeEvent[] = []
+
+  /** Run a group of graph mutations as one isolated, atomic commit. */
+  async transaction<T>(callback: (tx: GraphTransaction) => Promise<T> | T): Promise<T> {
+    if (this.transactionActive) throw new Error('Nested transactions are not supported')
+    if (this.persistence.capabilities && !this.persistence.capabilities.atomicBatches) {
+      throw new Error('The persistence adapter does not support atomic transactions')
+    }
+    let release!: () => void
+    const wait = this.transactionTail
+    this.transactionTail = new Promise<void>(resolve => { release = resolve })
+    await wait
+    this.transactionActive = true
+    const snapshot = this.captureTransactionState()
+    this.startBatch()
+    try {
+      const id = `tx-${Date.now()}-${Math.random().toString(36).slice(2)}`
+      this.currentTransactionId = id
+      const inTransaction = <R>(fn: () => R): R => {
+        this.transactionMutationDepth++
+        try { return fn() } finally { this.transactionMutationDepth-- }
+      }
+      const tx: GraphTransaction = {
+        id,
+        addNode: node => inTransaction(() => this.addNode(node)),
+        addEdge: edge => inTransaction(() => this.addEdge(edge)),
+        updateNode: (nodeId, data, options) => inTransaction(() => this.updateNode(nodeId, data, undefined, undefined, options)),
+        patchNode: (nodeId, patch, options) => inTransaction(() => this.patchNode(nodeId, patch, options)),
+        removeNode: (nodeId, options) => inTransaction(() => this.removeNode(nodeId, options)),
+        removeEdge: (edgeId, options) => inTransaction(() => this.removeEdge(edgeId, options)),
+        getNode: id => this.getNode(id),
+        query: () => this.query(),
+      }
+      const result = await callback(tx)
+      if (this.persistTimer) { clearTimeout(this.persistTimer); this.persistTimer = null }
+      await this.flush()
+      this.endBatch()
+      return result
+    } catch (error) {
+      this.restoreTransactionState(snapshot)
+      this.pendingBatchEvents = []
+      this.batchDepth = 0
+      throw error
+    } finally {
+      this.transactionActive = false
+      this.currentTransactionId = undefined
+      release()
+    }
+  }
+
+  private assertMutationAllowed(): void {
+    if (this.transactionActive && this.transactionMutationDepth === 0) {
+      throw new Error('A transaction is active; mutate through its transaction context')
+    }
+  }
+
+  /** Define or replace a node-data index and validate all currently loaded records. */
+  defineIndex(definition: IndexDefinition): void {
+    if (!definition.name || !definition.fields.length) throw new TypeError('Index name and fields must not be empty')
+    if (new Set(definition.fields).size !== definition.fields.length) throw new TypeError('Index fields must be unique')
+    const normalized = { ...definition, fields: [...definition.fields] }
+    const previous = this.secondaryIndexes.get(definition.name)
+    this.secondaryIndexes.set(definition.name, normalized)
+    this.secondaryIndexData.set(definition.name, new Map())
+    try {
+      for (const node of this.nodes.values()) this.indexSecondaryNode(node)
+    } catch (error) {
+      if (previous) {
+        this.secondaryIndexes.set(definition.name, previous)
+        this.secondaryIndexData.set(definition.name, new Map())
+        for (const node of this.nodes.values()) this.indexSecondaryNode(node)
+      } else {
+        this.secondaryIndexes.delete(definition.name)
+        this.secondaryIndexData.delete(definition.name)
+      }
+      throw error
+    }
+    this.indexDefinitionsDirty = true
+    this.schedulePersist()
+  }
+
+  /** Remove a configured secondary index. */
+  dropIndex(name: string): boolean {
+    const removed = this.secondaryIndexes.delete(name)
+    this.secondaryIndexData.delete(name)
+    if (removed) { this.indexDefinitionsDirty = true; this.schedulePersist() }
+    return removed
+  }
+
+  get indexes(): IndexDefinition[] {
+    return [...this.secondaryIndexes.values()].map(index => ({ ...index, fields: [...index.fields] }))
+  }
+
+  private indexValue(node: PolyNode, field: string): unknown {
+    if (field === 'type') return node.type
+    const path = field.startsWith('data.') ? field.split('.').slice(1) : [field]
+    let value: any = node.data
+    for (const part of path) value = value?.[part]
+    return value
+  }
+
+  private secondaryKey(node: PolyNode, index: IndexDefinition): string | undefined {
+    if (index.nodeType && index.nodeType !== node.type) return undefined
+    const values = index.fields.map(field => this.indexValue(node, field))
+    if (index.sparse && values.some(value => value === undefined || value === null)) return undefined
+    return JSON.stringify(values)
+  }
+
+  private indexSecondaryNode(node: PolyNode): void {
+    for (const index of this.secondaryIndexes.values()) {
+      const key = this.secondaryKey(node, index)
+      if (key === undefined) continue
+      const buckets = this.secondaryIndexData.get(index.name)!
+      const ids = buckets.get(key) ?? new Set<string>()
+      if (index.unique && ids.size > 0 && !ids.has(node.id)) {
+        throw new UniqueConstraintError(index.name, key, [...ids][0])
+      }
+      ids.add(node.id)
+      buckets.set(key, ids)
+    }
+  }
+
+  private validateSecondaryNode(node: PolyNode, replacingId?: string): void {
+    for (const index of this.secondaryIndexes.values()) {
+      const key = this.secondaryKey(node, index)
+      if (key === undefined || !index.unique) continue
+      const ids = this.secondaryIndexData.get(index.name)?.get(key)
+      if (ids && [...ids].some(id => id !== (replacingId ?? node.id))) {
+        throw new UniqueConstraintError(index.name, key, [...ids][0])
+      }
+    }
+  }
+
+  private unindexSecondaryNode(node: PolyNode): void {
+    for (const index of this.secondaryIndexes.values()) {
+      const key = this.secondaryKey(node, index)
+      if (key === undefined) continue
+      const buckets = this.secondaryIndexData.get(index.name)
+      const ids = buckets?.get(key)
+      if (!ids) continue
+      ids.delete(node.id)
+      if (ids.size === 0) buckets!.delete(key)
+    }
+  }
+
+  private indexCandidates(nodeTypes: string[] | undefined, attributes: Record<string, unknown> | undefined): string[] | undefined {
+    if (!attributes) return undefined
+    const type = nodeTypes?.length === 1 ? nodeTypes[0] : undefined
+    for (const index of this.secondaryIndexes.values()) {
+      if (index.nodeType && index.nodeType !== type) continue
+      if (!index.fields.every(field => Object.prototype.hasOwnProperty.call(attributes, field) ||
+        Object.prototype.hasOwnProperty.call(attributes, field.replace(/^data\./, '')))) continue
+      const values = index.fields.map(field => Object.prototype.hasOwnProperty.call(attributes, field)
+        ? attributes[field]
+        : attributes[field.replace(/^data\./, '')])
+      const ids = this.secondaryIndexData.get(index.name)?.get(JSON.stringify(values))
+      return ids ? [...ids] : []
+    }
+    return undefined
+  }
+
+  private captureTransactionState(): any {
+    return {
+      nodes: new Map([...this.nodes].map(([id, node]) => [id, clonePolyNode(node)])),
+      edges: new Map([...this.edges].map(([source, entries]) => [source, new Map([...entries].map(([key, edge]) => [key, { ...edge, data: edge.data ? cloneData(edge.data) : undefined }]))])),
+      nodeToEdgeMap: new Map([...this.nodeToEdgeMap].map(([id, sources]) => [id, new Set(sources)])),
+      dirtyNodes: new Set(this.dirtyNodes), dirtyEdges: new Set(this.dirtyEdges), dirtyVectors: new Set(this.dirtyVectors),
+      removedNodeIds: new Set(this.removedNodeIds), removedEdgeIds: new Set(this.removedEdgeIds), removedVectorIds: new Set(this.removedVectorIds),
+      hotCacheOrder: new Map(this.hotCacheOrder), evictedDirtyNodes: new Map(this.evictedDirtyNodes), sidecarData: new Map(this.sidecarData),
+      vectors: [...this.vectors.entries()].map(([id, vector]) => [id, [...vector]] as const),
+    }
+  }
+
+  private restoreTransactionState(snapshot: any): void {
+    this.nodes = snapshot.nodes; this.edges = snapshot.edges; this.nodeToEdgeMap = snapshot.nodeToEdgeMap
+    this.dirtyNodes = snapshot.dirtyNodes; this.dirtyEdges = snapshot.dirtyEdges; this.dirtyVectors = snapshot.dirtyVectors
+    this.removedNodeIds = snapshot.removedNodeIds; this.removedEdgeIds = snapshot.removedEdgeIds; this.removedVectorIds = snapshot.removedVectorIds
+    this.hotCacheOrder = snapshot.hotCacheOrder; this.evictedDirtyNodes = snapshot.evictedDirtyNodes; this.sidecarData = snapshot.sidecarData
+    this.vectors.clear()
+    for (const [id, vector] of snapshot.vectors) this.vectors.hydrate(id, vector)
+    this._byType.clear()
+    for (const node of this.nodes.values()) this.indexNode(node)
+    for (const buckets of this.secondaryIndexData.values()) buckets.clear()
+    for (const node of this.nodes.values()) this.indexSecondaryNode(node)
+  }
 
   /** Queue change-event notifications until the matching {@link endBatch}. Nestable. */
   startBatch(): void {
@@ -162,7 +381,7 @@ export class PolyGraph {
   protected hasPendingPersistence(): boolean {
     return this.dirtyNodes.size > 0 || this.dirtyEdges.size > 0 ||
       this.dirtyVectors.size > 0 || this.removedNodeIds.size > 0 ||
-      this.removedEdgeIds.size > 0 || this.removedVectorIds.size > 0
+      this.removedEdgeIds.size > 0 || this.removedVectorIds.size > 0 || this.indexDefinitionsDirty
   }
 
   private async flushPending(): Promise<void> {
@@ -172,6 +391,7 @@ export class PolyGraph {
     const removedNodeIds = [...this.removedNodeIds]
     const removedEdgeIds = [...this.removedEdgeIds]
     const removedVectorIds = [...this.removedVectorIds]
+    const indexDefinitionsDirty = this.indexDefinitionsDirty
     const evictedSnapshots = new Map<string, SerializedNode>()
     for (const id of dirtyNodeIds) this.dirtyNodes.delete(id)
     for (const id of dirtyEdgeIds) this.dirtyEdges.delete(id)
@@ -179,6 +399,7 @@ export class PolyGraph {
     for (const id of removedNodeIds) this.removedNodeIds.delete(id)
     for (const id of removedEdgeIds) this.removedEdgeIds.delete(id)
     for (const id of removedVectorIds) this.removedVectorIds.delete(id)
+    this.indexDefinitionsDirty = false
 
     const nodesToSave: SerializedNode[] = []
     for (const id of dirtyNodeIds) {
@@ -191,6 +412,7 @@ export class PolyGraph {
           vector: node.vector ? [...node.vector] : null,
           insertedAt: node.insertedAt,
           updatedAt: node.updatedAt,
+          revision: node.revision ?? 0,
           activation: node.activation ? { ...node.activation } : undefined,
         })
       } else {
@@ -206,19 +428,27 @@ export class PolyGraph {
     const dirtyEdgeList: SerializedEdge[] = []
     for (const edgeIdStr of dirtyEdgeIds) {
       const parts = edgeIdStr.split('::')
-      if (parts.length < 3) continue
-      const source = parts[0]
+      let source = parts[0]
       const innerKey = parts.slice(1).join('::')
-      const sourceEdges = this.edges.get(source)
-      const edge = sourceEdges?.get(innerKey)
+      let sourceEdges = this.edges.get(source)
+      let edge = parts.length >= 3
+        ? sourceEdges?.get(innerKey) ?? [...(sourceEdges?.values() ?? [])].find(candidate => candidate.id === edgeIdStr)
+        : undefined
+      if (!edge) {
+        for (const [candidateSource, entries] of this.edges) {
+          const candidate = [...entries.values()].find(value => value.id === edgeIdStr)
+          if (candidate) { source = candidateSource; sourceEdges = entries; edge = candidate; break }
+        }
+      }
       if (edge) {
         dirtyEdgeList.push({
-          id: edgeIdStr,
+          id: edge.id,
           source,
           target: edge.target,
           type: edge.type,
           data: edge.data ? cloneData(edge.data) : null,
-          createdAt: Date.now(),
+          createdAt: edge.createdAt,
+          revision: edge.revision,
         })
       }
     }
@@ -229,6 +459,9 @@ export class PolyGraph {
     }
     try {
       const changes: PersistenceChanges = {
+        transactionId: this.currentTransactionId,
+        operationId: this.currentTransactionId,
+        indexDefinitions: indexDefinitionsDirty ? this.indexes : undefined,
         putNodes: nodesToSave,
         deleteNodeIds: removedNodeIds,
         putEdges: dirtyEdgeList,
@@ -239,6 +472,7 @@ export class PolyGraph {
       if (this.persistence.applyChanges) {
         await this.persistence.applyChanges(changes)
       } else {
+        if (indexDefinitionsDirty) throw new Error('Persistence adapter cannot persist index definitions')
         if (removedNodeIds.length > 0) {
           await this.persistence.bulkDeleteNodes(removedNodeIds)
           await Promise.all(removedNodeIds.map(id => this.persistence.deleteVector(id)))
@@ -257,6 +491,7 @@ export class PolyGraph {
       for (const id of removedEdgeIds) this.removedEdgeIds.add(id)
       for (const id of removedVectorIds) if (!this.vectors.has(id)) this.removedVectorIds.add(id)
       for (const [id, snapshot] of evictedSnapshots) this.evictedDirtyNodes.set(id, snapshot)
+      if (indexDefinitionsDirty) this.indexDefinitionsDirty = true
       throw error
     }
   }
@@ -265,6 +500,7 @@ export class PolyGraph {
 
   /** Insert or replace a node. Replacement updates type/vector indexes; data and vector are structured-cloned on entry. */
   addNode(node: PolyNode): void {
+    this.assertMutationAllowed()
     const stored = this.prepareNode(node)
     this.insertNode(stored)
     this.schedulePersist()
@@ -277,6 +513,7 @@ export class PolyGraph {
    * whole batch. Prefer this over a loop of `addNode` for large inserts.
    */
   addNodes(nodes: PolyNode[]): void {
+    this.assertMutationAllowed()
     if (nodes.length === 0) return
     const prepared = new Array<PolyNode>(nodes.length)
     for (let i = 0; i < nodes.length; i++) prepared[i] = this.prepareNode(nodes[i])
@@ -299,13 +536,18 @@ export class PolyGraph {
     if (node.vector) assertFiniteVector(node.vector)
     if (node.activation) this.assertActivation(node.activation)
     const serializedData = this.applySerialize(node.id, node.data as Record<string, unknown>)
-    return clonePolyNode({ ...node, data: serializedData })
+    if (node.revision !== undefined && (!Number.isInteger(node.revision) || node.revision < 0)) {
+      throw new RangeError('Node revision must be a non-negative integer')
+    }
+    return clonePolyNode({ ...node, data: serializedData, revision: node.revision ?? 0 })
   }
 
   protected insertNode(stored: PolyNode): void {
     const previous = this.nodes.get(stored.id)
+    this.validateSecondaryNode(stored, previous?.id)
     if (previous) {
       this.unindexNode(stored.id)
+      this.unindexSecondaryNode(previous)
     }
     if (!stored.vector) {
       this.vectors.remove(stored.id)
@@ -313,10 +555,12 @@ export class PolyGraph {
       this.removedVectorIds.add(stored.id)
     }
     this.removedNodeIds.delete(stored.id)
+    if (previous) stored.revision = (previous.revision ?? 0) + 1
     this.nodes.set(stored.id, stored)
     this.touchHotCache(stored.id)
     this.dirtyNodes.add(stored.id)
     this.indexNode(stored)
+    this.indexSecondaryNode(stored)
     if (stored.vector) {
       this.removedVectorIds.delete(stored.id)
       this.vectors.add(stored.id, stored.vector)
@@ -401,6 +645,7 @@ export class PolyGraph {
       vector: serialized.vector ? new Float64Array(serialized.vector) : undefined,
       insertedAt: serialized.insertedAt,
       updatedAt: serialized.updatedAt,
+      revision: serialized.revision ?? 0,
       activation: serialized.activation ? { ...serialized.activation } : undefined,
     }
     this.nodes.set(id, restored)
@@ -417,15 +662,24 @@ export class PolyGraph {
   updateNode(
     id: string,
     data: Partial<Record<string, unknown>>,
-    vector?: Float64Array,
+    vector?: Float64Array | WriteOptions,
     activation?: NodeActivation,
+    options?: WriteOptions,
   ): PolyNode | undefined {
+    this.assertMutationAllowed()
     const node = this.nodes.get(id)
     if (!node) return undefined
-    const serialized = this.applySerialize(id, data as Record<string, unknown>)
-    Object.assign(node.data, cloneData(serialized))
-    if (vector !== undefined) {
+    const writeOptions = (vector && !(vector instanceof Float64Array) ? vector : options)
+    if (writeOptions?.expectedRevision !== undefined && (node.revision ?? 0) !== writeOptions.expectedRevision) {
+      throw new ConflictError(id, writeOptions.expectedRevision, node.revision ?? 0)
+    }
+    if (vector && vector instanceof Float64Array) {
       assertFiniteVector(vector)
+    }
+    const serialized = this.applySerialize(id, data as Record<string, unknown>)
+    const previous = clonePolyNode(node)
+    Object.assign(node.data, cloneData(serialized))
+    if (vector instanceof Float64Array) {
       node.vector = new Float64Array(vector)
       this.removedVectorIds.delete(id)
       this.vectors.add(id, [...vector])
@@ -436,10 +690,57 @@ export class PolyGraph {
       node.activation = { ...activation }
     }
     node.updatedAt = Date.now()
+    node.revision = (node.revision ?? 0) + 1
+    this.unindexSecondaryNode(previous)
+    try {
+      this.validateSecondaryNode(node, id)
+      this.indexSecondaryNode(node)
+    } catch (error) {
+      this.unindexSecondaryNode(node)
+      Object.assign(node, previous)
+      this.indexSecondaryNode(previous)
+      throw error
+    }
     this.touchHotCache(id)
     this.markDirty(id)
     this.emitChange({ type: 'node_updated', nodeId: id, nodeType: node.type })
     return this.applyDeserialize(clonePolyNode(node))
+  }
+
+  /** Apply a small, deterministic partial-update language to a node. */
+  patchNode(id: string, patch: NodePatch, options?: WriteOptions): PolyNode | undefined {
+    this.assertMutationAllowed()
+    const node = this.nodes.get(id)
+    if (!node) return undefined
+    if (options?.expectedRevision !== undefined && (node.revision ?? 0) !== options.expectedRevision) {
+      throw new ConflictError(id, options.expectedRevision, node.revision ?? 0)
+    }
+    const data = cloneData(node.data)
+    const get = (path: string): unknown => path === 'data' ? data : path.split('.').slice(1).reduce((v: any, key) => v?.[key], data)
+    const set = (path: string, value: unknown): void => {
+      if (path === 'updatedAt') { if (typeof value !== 'number' || !Number.isFinite(value)) throw new RangeError('updatedAt must be finite'); node.updatedAt = value; return }
+      if (!path.startsWith('data.')) throw new TypeError(`Unsupported patch path: ${path}`)
+      const parts = path.split('.').slice(1); let target: any = data
+      for (const part of parts.slice(0, -1)) { if (!target[part] || typeof target[part] !== 'object') target[part] = {}; target = target[part] }
+      target[parts[parts.length - 1]] = cloneData(value)
+    }
+    for (const [path, value] of Object.entries(patch.compareAndSet ?? {})) {
+      if (JSON.stringify(get(path)) !== JSON.stringify(value.expected)) throw new ConflictError(id, options?.expectedRevision ?? (node.revision ?? 0), node.revision ?? 0)
+      set(path, value.value)
+    }
+    for (const [path, value] of Object.entries(patch.set ?? {})) set(path, value)
+    for (const path of patch.unset ?? []) {
+      if (!path.startsWith('data.')) throw new TypeError(`Unsupported patch path: ${path}`)
+      const parts = path.split('.').slice(1); let target: any = data
+      for (const part of parts.slice(0, -1)) target = target?.[part]
+      if (target && typeof target === 'object') delete target[parts[parts.length - 1]]
+    }
+    for (const [path, amount] of Object.entries(patch.increment ?? {})) {
+      if (!Number.isFinite(amount)) throw new RangeError(`Increment for ${path} must be finite`)
+      const current = get(path); if (current !== undefined && typeof current !== 'number') throw new TypeError(`Increment target ${path} is not numeric`)
+      set(path, (current as number | undefined ?? 0) + amount)
+    }
+    return this.updateNode(id, data, undefined, undefined, { expectedRevision: node.revision ?? 0 })
   }
 
   /** Embed `text` and update a loaded node's data and vector together. */
@@ -535,13 +836,18 @@ export class PolyGraph {
    * become disconnected. Cyclic owned edges (A → B → A) are detected and
    * each node is only removed once.
    */
-  removeNode(id: string, cascadeVisited?: Set<string>): void {
-    const visited = cascadeVisited ?? new Set<string>()
+  removeNode(id: string, cascadeVisitedOrOptions?: Set<string> | WriteOptions): void {
+    this.assertMutationAllowed()
+    const options = cascadeVisitedOrOptions instanceof Set ? undefined : cascadeVisitedOrOptions
+    const visited = cascadeVisitedOrOptions instanceof Set ? cascadeVisitedOrOptions : new Set<string>()
     if (visited.has(id)) return
     visited.add(id)
 
     const node = this.nodes.get(id)
     if (!node) return
+    if (options?.expectedRevision !== undefined && (node.revision ?? 0) !== options.expectedRevision) {
+      throw new ConflictError(id, options.expectedRevision, node.revision ?? 0)
+    }
 
     // Process outgoing edges before cleanup — a snapshot avoids concurrent
     // modification issues when cascading recursively mutates this.edges.
@@ -557,6 +863,7 @@ export class PolyGraph {
 
     this.cleanupNodeEdges(id)
     this.unindexNode(id)
+    this.unindexSecondaryNode(node)
     this.nodes.delete(id)
     this.vectors.remove(id)
     this.dirtyVectors.delete(id)
@@ -629,33 +936,62 @@ export class PolyGraph {
   }
 
   private recordRemovedEdge(source: string, edge: EdgeEntry): void {
-    const id = edgeId(source, edge.type, edge.target)
+    const id = edge.id
     this.dirtyEdges.delete(id)
     this.removedEdgeIds.add(id)
-    this.emitChange({ type: 'edge_removed', edgeType: edge.type, source, target: edge.target })
+    this.emitChange({ type: 'edge_removed', edgeId: edge.id, edgeType: edge.type, source, target: edge.target })
   }
 
   // ── Edge CRUD ──
 
   /** Add one directed edge. A no-op if an edge with the same source/type/target already exists (edges are unique per triple). */
-  addEdge(source: string, type: string, target: string, data?: Record<string, unknown>, ownership?: EdgeOwnership): void {
-    if (!source || !type || !target) throw new TypeError('Edge source, type, and target must not be empty')
-    const id = edgeId(source, type, target)
+  addEdge(edge: PolyEdge): void
+  addEdge(source: string, type: string, target: string, data?: Record<string, unknown>, ownership?: EdgeOwnership): void
+  addEdge(sourceOrEdge: string | PolyEdge, type?: string, target?: string, data?: Record<string, unknown>, ownership?: EdgeOwnership): void {
+    this.assertMutationAllowed()
+    const objectInput = typeof sourceOrEdge !== 'string'
+    const source = objectInput ? sourceOrEdge.source : sourceOrEdge
+    const edgeType = objectInput ? sourceOrEdge.type : type!
+    const edgeTarget = objectInput ? sourceOrEdge.target : target!
+    const edgeData = objectInput ? sourceOrEdge.data : data
+    const edgeRevision = objectInput ? sourceOrEdge.revision ?? 0 : 0
+    if (!Number.isInteger(edgeRevision) || edgeRevision < 0) throw new RangeError('Edge revision must be a non-negative integer')
+    if (!source || !edgeType || !edgeTarget) throw new TypeError('Edge source, type, and target must not be empty')
+    const id = objectInput ? sourceOrEdge.id : edgeId(source, edgeType, edgeTarget)
+    if (!id) throw new TypeError('Edge id must not be empty')
     this.removedEdgeIds.delete(id)
-    const inner = id.slice(source.length + 2)
     if (!this.edges.has(source)) this.edges.set(source, new Map())
     const sourceEdges = this.edges.get(source)!
-    if (sourceEdges.has(inner)) return
+    if (sourceEdges.has(id)) return
 
-    const inputData = data === undefined ? undefined : cloneData(data)
+    const inputData = edgeData === undefined ? undefined : cloneData(edgeData)
     const fullData = ownership !== undefined ? { ...inputData, [OWNERSHIP_KEY]: ownership } : inputData
 
-    sourceEdges.set(inner, { target, type, data: fullData })
-    if (!this.nodeToEdgeMap.has(target)) this.nodeToEdgeMap.set(target, new Set())
-    this.nodeToEdgeMap.get(target)!.add(source)
+    sourceEdges.set(id, { id, target: edgeTarget, type: edgeType, data: fullData, revision: edgeRevision, createdAt: objectInput ? sourceOrEdge.createdAt : Date.now() })
+    if (!this.nodeToEdgeMap.has(edgeTarget)) this.nodeToEdgeMap.set(edgeTarget, new Set())
+    this.nodeToEdgeMap.get(edgeTarget)!.add(source)
     this.dirtyEdges.add(id)
     this.schedulePersist()
-    this.emitChange({ type: 'edge_added', edgeId: id, edgeType: type, source, target })
+    this.emitChange({ type: 'edge_added', edgeId: id, edgeType, source, target: edgeTarget })
+  }
+
+  /** Remove one edge by its canonical ID, optionally checking its revision. */
+  removeEdge(id: string, options?: WriteOptions): boolean {
+    this.assertMutationAllowed()
+    let source = id.split('::')[0]
+    let edge = [...(this.edges.get(source)?.values() ?? [])].find(candidate => candidate.id === id)
+    if (!edge) {
+      for (const [candidateSource, entries] of this.edges) {
+        const candidate = [...entries.values()].find(value => value.id === id)
+        if (candidate) { source = candidateSource; edge = candidate; break }
+      }
+    }
+    if (!edge) return false
+    if (options?.expectedRevision !== undefined && edge.revision !== options.expectedRevision) {
+      throw new ConflictError(id, options.expectedRevision, edge.revision)
+    }
+    this.removeEdges(source, edge.type, edge.target)
+    return true
   }
 
   /**
@@ -704,6 +1040,7 @@ export class PolyGraph {
    * the target becomes disconnected (no incoming edges remain).
    */
   removeEdges(source: string, type?: string, target?: string): void {
+    this.assertMutationAllowed()
     const edges = this.edges.get(source)
     if (!edges) return
     const removed: EdgeEntry[] = []
@@ -723,12 +1060,12 @@ export class PolyGraph {
 
     const removeAll = !type && !target
     for (const edge of removed) {
-      if (!removeAll) edges.delete(`${edge.type}::${edge.target}`)
+      if (!removeAll) edges.delete(edge.id)
       this.nodeToEdgeMap.get(edge.target)?.delete(source)
-      const id = edgeId(source, edge.type, edge.target)
+      const id = edge.id
       this.dirtyEdges.delete(id)
       this.removedEdgeIds.add(id)
-      this.emitChange({ type: 'edge_removed', edgeType: edge.type, source, target: edge.target })
+      this.emitChange({ type: 'edge_removed', edgeId: edge.id, edgeType: edge.type, source, target: edge.target })
 
       if (getOwnership(edge.data) === 'shared') {
         const stillConnected = this.hasOtherIncoming(edge.target, source)
@@ -747,7 +1084,19 @@ export class PolyGraph {
 
   /** Create a mutable {@link GraphQuery} over the currently loaded (hot) nodes. */
   query(): GraphQuery {
-    return new GraphQuery(this.nodes, this.edges, this.nodeToEdgeMap, this.transform, this.sidecarData)
+    return new GraphQuery(this.nodes, this.edges, this.nodeToEdgeMap, this.transform, this.sidecarData, this.indexes, this.indexCandidates.bind(this))
+  }
+
+  /** Capture a detached, queryable view of the currently warmed graph state. */
+  async snapshot(): Promise<GraphSnapshot> {
+    await this.warm()
+    const nodes = new Map([...this.nodes].map(([id, node]) => [id, clonePolyNode(node)] as const))
+    const edges = new Map([...this.edges].map(([source, entries]) => [source, new Map([...entries].map(([id, edge]) => [id, {
+      ...edge,
+      data: edge.data ? cloneData(edge.data) : undefined,
+    }]))] as const))
+    const nodeToEdgeMap = new Map([...this.nodeToEdgeMap].map(([id, sources]) => [id, new Set(sources)] as const))
+    return new GraphSnapshot(nodes, edges, nodeToEdgeMap, this.transform, new Map(this.sidecarData), this.indexes)
   }
 
   /** Generate a detached embedding using the graph's configured provider. */
@@ -793,6 +1142,7 @@ export class PolyGraph {
           vector: node.vector ? [...node.vector] : null,
           insertedAt: node.insertedAt,
           updatedAt: node.updatedAt,
+          revision: node.revision ?? 0,
           activation: node.activation ? { ...node.activation } : undefined,
         })
       }
@@ -819,6 +1169,7 @@ export class PolyGraph {
         vector: node.vector ? [...node.vector] : null,
         insertedAt: node.insertedAt,
         updatedAt: node.updatedAt,
+        revision: node.revision ?? 0,
         activation: node.activation ? { ...node.activation } : undefined,
       })
     }
@@ -826,12 +1177,13 @@ export class PolyGraph {
     for (const [source, edgeList] of this.edges) {
       for (const e of edgeList.values()) {
         edges.push({
-          id: edgeId(source, e.type, e.target),
+          id: e.id,
           source,
           target: e.target,
           type: e.type,
           data: e.data ? cloneData(e.data) : null,
-          createdAt: Date.now(),
+          createdAt: e.createdAt,
+          revision: e.revision,
         })
       }
     }
@@ -857,15 +1209,15 @@ export class PolyGraph {
     this.nodeToEdgeMap.clear()
     const allEdges = await this.persistence.getAllEdges()
     for (const e of allEdges) {
-      if (e.id !== edgeId(e.source, e.type, e.target)) {
-        throw new Error(`Invalid persisted edge ID: ${e.id}`)
-      }
-      const inner = e.id.slice(e.source.length + 2)
+      if (!e.id) throw new Error('Invalid persisted edge ID: empty')
       if (!this.edges.has(e.source)) this.edges.set(e.source, new Map())
-      this.edges.get(e.source)!.set(inner, {
+      this.edges.get(e.source)!.set(e.id, {
+        id: e.id,
         target: e.target,
         type: e.type,
         data: e.data ? cloneData(e.data) : undefined,
+        revision: e.revision ?? 0,
+        createdAt: e.createdAt,
       })
       if (!this.nodeToEdgeMap.has(e.target)) this.nodeToEdgeMap.set(e.target, new Set())
       this.nodeToEdgeMap.get(e.target)!.add(e.source)
@@ -876,6 +1228,11 @@ export class PolyGraph {
   async warm(): Promise<void> {
     if (this._warmed) return
     this._warmed = true
+    if (this.persistence.getIndexDefinitions) {
+      const persistedIndexes = await this.persistence.getIndexDefinitions()
+      for (const index of persistedIndexes) this.defineIndex(index)
+      this.indexDefinitionsDirty = false
+    }
     const allNodeIds = await this.persistence.allNodeIds()
     if (allNodeIds.length === 0) return
 
@@ -894,6 +1251,7 @@ export class PolyGraph {
           activation: sn.activation ? { ...sn.activation } : undefined,
         })
         this.indexNode(this.nodes.get(sn.id)!)
+        this.indexSecondaryNode(this.nodes.get(sn.id)!)
         this.hotCacheOrder.delete(sn.id)
         this.hotCacheOrder.set(sn.id, true)
       }
@@ -952,6 +1310,7 @@ export class PolyGraph {
     this.hotCacheOrder.clear()
     this.nodeToEdgeMap.clear()
     this._byType.clear()
+    for (const buckets of this.secondaryIndexData.values()) buckets.clear()
     this.evictedDirtyNodes.clear()
     this.dirtyEdges.clear()
     this.dirtyVectors.clear()
