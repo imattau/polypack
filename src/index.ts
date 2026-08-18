@@ -4,6 +4,8 @@ export { UniqueConstraintError } from './index-errors.js'
 export { SchemaValidationError } from './schema-errors.js'
 export { MigrationError, MigrationRegistry } from './migrations.js'
 export { ReadOnlyStoreError, StoreLockError } from './persistence/lock-errors.js'
+export { ResourceLimitError } from './resource-errors.js'
+export { AdapterCapabilityError } from './capability-errors.js'
 export { QueryLimitError, QueryAbortedError } from './query-errors.js'
 export { VectorIndex, cosineSimilarity, euclideanSimilarity } from './vector-index.js'
 export { HNSWIndex } from './hnsw-index.js'
@@ -41,6 +43,7 @@ export type {
   GraphStats,
   QueryResourceLimits,
   QueryMetrics,
+  GraphResourceLimits,
   EdgeCardinality,
   NodeTypeDefinition,
   EdgeTypeDefinition,

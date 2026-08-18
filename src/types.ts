@@ -195,6 +195,12 @@ export interface QueryResourceLimits {
   maxResults?: number
 }
 
+export interface GraphResourceLimits {
+  maxVectorDimensions?: number
+  maxNodePayloadBytes?: number
+  maxBatchSize?: number
+}
+
 export interface GraphTransaction {
   readonly id: string
   addNode(node: PolyNode): void

@@ -1,8 +1,10 @@
 import { Subject } from 'rxjs'
-import type { PolyNode, PolyEdge, EdgeOwnership, GraphChangeEvent, SerializedNode, SerializedEdge, DataTransform, NodeActivation, WriteOptions, NodePatch, GraphTransaction, IndexDefinition, GraphStats, QueryResourceLimits, NodeTypeDefinition, EdgeTypeDefinition, EdgeCardinality, QueryMetrics } from './types.js'
+import type { PolyNode, PolyEdge, EdgeOwnership, GraphChangeEvent, SerializedNode, SerializedEdge, DataTransform, NodeActivation, WriteOptions, NodePatch, GraphTransaction, IndexDefinition, GraphStats, QueryResourceLimits, NodeTypeDefinition, EdgeTypeDefinition, EdgeCardinality, QueryMetrics, GraphResourceLimits } from './types.js'
 import { ConflictError } from './errors.js'
 import { UniqueConstraintError } from './index-errors.js'
 import { SchemaValidationError } from './schema-errors.js'
+import { ResourceLimitError } from './resource-errors.js'
+import { AdapterCapabilityError } from './capability-errors.js'
 import { VectorIndex } from './vector-index.js'
 import type { VectorIndexLike } from './vector-index.js'
 import { GraphQuery } from './query.js'
@@ -82,6 +84,7 @@ export class PolyGraph {
   readonly hotCacheMax: number
   readonly embedding: EmbeddingProvider
   readonly transform?: DataTransform
+  private resourceLimits: GraphResourceLimits = {}
   readonly migrations = new MigrationRegistry()
 
   protected sidecarData = new Map<string, unknown>()
@@ -119,8 +122,8 @@ export class PolyGraph {
   /** Run a group of graph mutations as one isolated, atomic commit. */
   async transaction<T>(callback: (tx: GraphTransaction) => Promise<T> | T): Promise<T> {
     if (this.transactionActive) throw new Error('Nested transactions are not supported')
-    if (this.persistence.capabilities && !this.persistence.capabilities.atomicBatches) {
-      throw new Error('The persistence adapter does not support atomic transactions')
+    if (this.persistence.capabilities && (!this.persistence.capabilities.atomicBatches || !this.persistence.capabilities.transactions)) {
+      throw new AdapterCapabilityError(!this.persistence.capabilities.atomicBatches ? 'atomicBatches' : 'transactions')
     }
     let release!: () => void
     const wait = this.transactionTail
@@ -167,6 +170,45 @@ export class PolyGraph {
   private assertMutationAllowed(): void {
     if (this.transactionActive && this.transactionMutationDepth === 0) {
       throw new Error('A transaction is active; mutate through its transaction context')
+    }
+  }
+
+  /** Return the persistence guarantees declared by the active adapter. */
+  get adapterCapabilities() {
+    return this.persistence.capabilities ? { ...this.persistence.capabilities } : undefined
+  }
+
+  /** Reject a configuration unless the active adapter declares each capability. */
+  requireAdapterCapabilities(required: Partial<import('./types.js').AdapterCapabilities>): void {
+    const capabilities = this.persistence.capabilities
+    if (!capabilities) throw new AdapterCapabilityError('declared capabilities')
+    for (const [name, expected] of Object.entries(required)) {
+      if (capabilities[name as keyof typeof capabilities] !== expected) throw new AdapterCapabilityError(name)
+    }
+  }
+
+  /** Configure write-side resource limits. Omitted values remain unlimited. */
+  setResourceLimits(limits: GraphResourceLimits): void {
+    for (const [name, value] of Object.entries(limits)) {
+      if (value !== undefined && (!Number.isInteger(value) || value < 1)) throw new RangeError(`${name} must be a positive integer`)
+    }
+    this.resourceLimits = { ...limits }
+  }
+
+  get resourceLimitConfig(): GraphResourceLimits {
+    return { ...this.resourceLimits }
+  }
+
+  private checkNodeResources(node: PolyNode, data: Record<string, unknown>): void {
+    const maxDimensions = this.resourceLimits.maxVectorDimensions
+    if (maxDimensions !== undefined && node.vector && node.vector.length > maxDimensions) {
+      throw new ResourceLimitError('maxVectorDimensions', maxDimensions)
+    }
+    const maxPayload = this.resourceLimits.maxNodePayloadBytes
+    if (maxPayload !== undefined) {
+      let bytes = 0
+      try { bytes = new TextEncoder().encode(JSON.stringify(data)).length } catch { bytes = maxPayload + 1 }
+      if (bytes > maxPayload) throw new ResourceLimitError('maxNodePayloadBytes', maxPayload)
     }
   }
 
@@ -639,6 +681,9 @@ export class PolyGraph {
   addNodes(nodes: PolyNode[]): void {
     this.assertMutationAllowed()
     if (nodes.length === 0) return
+    if (this.resourceLimits.maxBatchSize !== undefined && nodes.length > this.resourceLimits.maxBatchSize) {
+      throw new ResourceLimitError('maxBatchSize', this.resourceLimits.maxBatchSize)
+    }
     const prepared = new Array<PolyNode>(nodes.length)
     for (let i = 0; i < nodes.length; i++) prepared[i] = this.prepareNode(nodes[i])
     this.startBatch()
@@ -664,6 +709,7 @@ export class PolyGraph {
       throw new RangeError('Node revision must be a non-negative integer')
     }
     const prepared = clonePolyNode({ ...node, data: serializedData, revision: node.revision ?? 0 })
+    this.checkNodeResources(prepared, serializedData)
     this.validateNodeSchema(prepared)
     return prepared
   }
@@ -812,6 +858,7 @@ export class PolyGraph {
       updatedAt: Date.now(),
       revision: (node.revision ?? 0) + 1,
     }
+    this.checkNodeResources(candidate, candidate.data)
     this.validateNodeSchema(candidate)
     Object.assign(node.data, cloneData(serialized))
     if (vector instanceof Float64Array) {

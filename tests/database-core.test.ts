@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { ConflictError, MemoryAdapter, PolyGraph } from '../src/index'
+import { AdapterCapabilityError, ConflictError, MemoryAdapter, PolyGraph } from '../src/index'
 import { BinaryStoreAdapter } from '../src/persistence/binary-store'
 import { MemoryFileIO } from '../src/persistence/file-io'
 
@@ -197,5 +197,14 @@ describe('database-core mutation API', () => {
     expect(observed.queryCount).toBe(1)
     expect(observed.queryScannedRecords).toBeGreaterThan(0)
     expect(observed.queryIndexUsage).toEqual({ value: 1 })
+  })
+
+  it('reports and enforces adapter capability declarations', async () => {
+    const graph = new PolyGraph(new MemoryAdapter())
+    expect(graph.adapterCapabilities?.atomicBatches).toBe(true)
+    expect(() => graph.requireAdapterCapabilities({ transactions: true })).not.toThrow()
+    const unsafe = new MemoryAdapter()
+    Object.defineProperty(unsafe, 'capabilities', { value: { ...unsafe.capabilities, transactions: false } })
+    await expect(new PolyGraph(unsafe).transaction(() => undefined)).rejects.toBeInstanceOf(AdapterCapabilityError)
   })
 })
