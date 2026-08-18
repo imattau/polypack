@@ -1,6 +1,7 @@
 export { PolyGraph, GraphSnapshot } from './graph.js'
 export { ConflictError } from './errors.js'
 export { UniqueConstraintError } from './index-errors.js'
+export { QueryLimitError, QueryAbortedError } from './query-errors.js'
 export { VectorIndex, cosineSimilarity, euclideanSimilarity } from './vector-index.js'
 export { HNSWIndex } from './hnsw-index.js'
 export type { HNSWConfig } from './hnsw-index.js'
@@ -35,6 +36,7 @@ export type {
   MutationRecord,
   VerificationReport,
   GraphStats,
+  QueryResourceLimits,
 } from './types.js'
 export { defineEdges } from './types.js'
 export { yieldToUI, edgeId } from './utils.js'

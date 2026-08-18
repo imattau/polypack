@@ -1,8 +1,9 @@
-import type { PolyNode, SerializedEdge, SerializedNode, DataTransform } from './types.js'
+import type { PolyNode, SerializedEdge, SerializedNode, DataTransform, QueryResourceLimits } from './types.js'
 import type { PersistenceAdapter, PersistedNodeQuery } from './persistence/adapter.js'
 import { applyPersistedNodeQuery } from './persistence/query.js'
 import { cosineSimilarity } from './vector-index.js'
 import { activationScoreOf, assertFiniteVector, assertNonNegativeInteger, cloneData } from './utils.js'
+import { QueryAbortedError, QueryLimitError } from './query-errors.js'
 
 function readNode(node: PolyNode, transform?: DataTransform, sidecarData?: Map<string, unknown>): PolyNode {
   if (!transform?.deserialize) return node
@@ -46,11 +47,19 @@ export class PersistedGraphQuery {
     depth: number
     direction: 'out' | 'in'
   }> = []
+  private readonly limits: QueryResourceLimits
 
-  constructor(adapter: PersistenceAdapter, transform?: DataTransform, sidecarData?: Map<string, unknown>) {
+  constructor(adapter: PersistenceAdapter, transform?: DataTransform, sidecarData?: Map<string, unknown>, limits: QueryResourceLimits = {}) {
     this.adapter = adapter
     this.transform = transform
     this.sidecarData = sidecarData ?? new Map()
+    this.limits = limits
+  }
+
+  private checkLimits(visited = 0, results = 0): void {
+    if (this.limits.signal?.aborted) throw new QueryAbortedError()
+    if (this.limits.maxNodesVisited !== undefined && visited > this.limits.maxNodesVisited) throw new QueryLimitError('maxNodesVisited', this.limits.maxNodesVisited)
+    if (this.limits.maxResults !== undefined && results > this.limits.maxResults) throw new QueryLimitError('maxResults', this.limits.maxResults)
   }
 
   where(field: string, value: unknown): this {
@@ -143,18 +152,27 @@ export class PersistedGraphQuery {
   }
 
   private async serialized(includeOrder = true, includePagination = false): Promise<SerializedNode[]> {
+    this.checkLimits()
     const query: PersistedNodeQuery = {
       ...this.query,
       orderBy: includeOrder ? this.query.orderBy : undefined,
       offset: includePagination ? this.resultOffset : undefined,
       limit: includePagination ? this.resultLimit : undefined,
     }
-    if (this.adapter.queryNodes) return this.adapter.queryNodes(query)
+    if (this.adapter.queryNodes) {
+      const nodes = await this.adapter.queryNodes(query)
+      this.checkLimits(nodes.length, nodes.length)
+      return nodes
+    }
     const ids = await this.adapter.allNodeIds()
-    return applyPersistedNodeQuery(await this.adapter.getNodes(ids), query)
+    this.checkLimits(ids.length)
+    const nodes = applyPersistedNodeQuery(await this.adapter.getNodes(ids), query)
+    this.checkLimits(nodes.length, nodes.length)
+    return nodes
   }
 
   private async edgesBySources(sources: string[], type?: string): Promise<SerializedEdge[]> {
+    this.checkLimits(sources.length)
     if (this.adapter.getEdgesBySources) return this.adapter.getEdgesBySources(sources, type)
     const sourceSet = new Set(sources)
     return (await this.adapter.getAllEdges()).filter(edge =>
@@ -163,6 +181,7 @@ export class PersistedGraphQuery {
   }
 
   private async edgesByTargets(targets: string[], type?: string): Promise<SerializedEdge[]> {
+    this.checkLimits(targets.length)
     if (this.adapter.getEdgesByTargets) return this.adapter.getEdgesByTargets(targets, type)
     const targetSet = new Set(targets)
     return (await this.adapter.getAllEdges()).filter(edge =>
@@ -171,6 +190,7 @@ export class PersistedGraphQuery {
   }
 
   private async applyEdgeFilters(nodes: SerializedNode[]): Promise<SerializedNode[]> {
+    this.checkLimits(nodes.length, nodes.length)
     let results = nodes
     if (this.edgeType) {
       const edges = await this.edgesBySources(results.map(node => node.id), this.edgeType)
@@ -184,10 +204,12 @@ export class PersistedGraphQuery {
       const targets = new Set(edges.map(edge => edge.target))
       results = results.filter(node => targets.has(node.id))
     }
+    this.checkLimits(results.length, results.length)
     return results
   }
 
   private async applyJoins(nodes: SerializedNode[]): Promise<SerializedNode[]> {
+    this.checkLimits(nodes.length, nodes.length)
     let results = nodes
     for (const join of this.joins) {
       const ids = results.map(node => node.id)
@@ -210,16 +232,23 @@ export class PersistedGraphQuery {
         }
       }
       results = results.filter(node => matched.has(node.id))
+      this.checkLimits(results.length, results.length)
     }
     return results
   }
 
   private async applyTraversals(nodes: SerializedNode[]): Promise<SerializedNode[]> {
     let currentIds = nodes.map(node => node.id)
+    this.checkLimits(currentIds.length, currentIds.length)
     for (const traversal of this.traversals) {
+      if (this.limits.maxTraversalDepth !== undefined && traversal.depth > this.limits.maxTraversalDepth) {
+        throw new QueryLimitError('maxTraversalDepth', this.limits.maxTraversalDepth)
+      }
       const visited = new Set(currentIds)
+      this.checkLimits(visited.size, visited.size)
       let frontier = [...currentIds]
       for (let depth = 0; depth < traversal.depth && frontier.length > 0; depth++) {
+        this.checkLimits(visited.size, visited.size)
         const edges = traversal.direction === 'out'
           ? await this.edgesBySources(frontier, traversal.edgeType)
           : await this.edgesByTargets(frontier, traversal.edgeType)
@@ -232,13 +261,18 @@ export class PersistedGraphQuery {
           }
         }
         frontier = next
+        this.checkLimits(visited.size, visited.size)
       }
       currentIds = [...visited]
+      this.checkLimits(currentIds.length, currentIds.length)
     }
-    return this.adapter.getNodes(currentIds)
+    const resultNodes = await this.adapter.getNodes(currentIds)
+    this.checkLimits(currentIds.length, resultNodes.length)
+    return resultNodes
   }
 
   async toArray(): Promise<PolyNode[]> {
+    this.checkLimits()
     const hasTraversal = this.traversals.length > 0
     const adapterCanPaginate = !this.similarVector && !this.edgeType && !this.edgeSource &&
       this.joins.length === 0 && !hasTraversal &&
@@ -286,6 +320,7 @@ export class PersistedGraphQuery {
       if (this.resultOffset !== undefined) results = results.slice(this.resultOffset)
       if (this.resultLimit !== undefined) results = results.slice(0, this.resultLimit)
     }
+    this.checkLimits(results.length, results.length)
     return results
   }
 
@@ -298,13 +333,20 @@ export class PersistedGraphQuery {
   }
 
   async count(): Promise<number> {
+    this.checkLimits()
     if (this.similarVector || this.resultOffset !== undefined || this.resultLimit !== undefined ||
         this.edgeType || this.edgeSource || this.joins.length > 0 || this.traversals.length > 0 ||
         this.activationAbove !== undefined || this.activationOrder !== undefined) {
       return (await this.toArray()).length
     }
-    if (this.adapter.countNodes) return this.adapter.countNodes(this.query)
-    return (await this.serialized()).length
+    if (this.adapter.countNodes) {
+      const count = await this.adapter.countNodes(this.query)
+      this.checkLimits(0, count)
+      return count
+    }
+    const count = (await this.serialized()).length
+    this.checkLimits(0, count)
+    return count
   }
 
   async collect(
@@ -318,8 +360,11 @@ export class PersistedGraphQuery {
       ? await this.edgesBySources(seedIds, edgeType)
       : await this.edgesByTargets(seedIds, edgeType)
     const connectedIds = [...new Set(edges.map(edge => direction === 'out' ? edge.target : edge.source))]
-    return (await this.adapter.getNodes(connectedIds))
+    this.checkLimits(connectedIds.length, connectedIds.length)
+    const results = (await this.adapter.getNodes(connectedIds))
       .map(n => restoreNode(n, this.transform, this.sidecarData))
       .filter(node => !predicate || predicate(node))
+    this.checkLimits(results.length, results.length)
+    return results
   }
 }

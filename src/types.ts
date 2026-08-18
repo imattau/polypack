@@ -164,6 +164,13 @@ export interface GraphStats {
   memoryEstimateBytes?: number
 }
 
+export interface QueryResourceLimits {
+  signal?: AbortSignal
+  maxTraversalDepth?: number
+  maxNodesVisited?: number
+  maxResults?: number
+}
+
 export interface GraphTransaction {
   readonly id: string
   addNode(node: PolyNode): void

@@ -1,5 +1,5 @@
 import { Subject } from 'rxjs'
-import type { PolyNode, PolyEdge, EdgeOwnership, GraphChangeEvent, SerializedNode, SerializedEdge, DataTransform, NodeActivation, WriteOptions, NodePatch, GraphTransaction, IndexDefinition, GraphStats } from './types.js'
+import type { PolyNode, PolyEdge, EdgeOwnership, GraphChangeEvent, SerializedNode, SerializedEdge, DataTransform, NodeActivation, WriteOptions, NodePatch, GraphTransaction, IndexDefinition, GraphStats, QueryResourceLimits } from './types.js'
 import { ConflictError } from './errors.js'
 import { UniqueConstraintError } from './index-errors.js'
 import { VectorIndex } from './vector-index.js'
@@ -1136,8 +1136,8 @@ export class PolyGraph {
   }
 
   /** Query all persisted nodes without loading them into the hot working set. */
-  queryPersisted(): PersistedGraphQuery {
-    return new PersistedGraphQuery(this.persistence, this.transform, this.sidecarData)
+  queryPersisted(limits?: QueryResourceLimits): PersistedGraphQuery {
+    return new PersistedGraphQuery(this.persistence, this.transform, this.sidecarData, limits)
   }
 
   // ── Hot Cache ──
