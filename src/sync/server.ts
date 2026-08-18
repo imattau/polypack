@@ -1,4 +1,4 @@
-import type { SyncContext, SyncError, SyncMessage, SyncOp } from './types.js'
+import type { SyncConflictResult, SyncContext, SyncError, SyncMessage, SyncOp } from './types.js'
 import { SYNC_PROTOCOL_VERSION } from './types.js'
 import type { SyncOperationLog } from './log.js'
 
@@ -6,6 +6,7 @@ export interface SyncServerOptions {
   protocolVersion?: number
   maxOps?: number
   authorize?: (operation: SyncOp, context: SyncContext) => Promise<boolean> | boolean
+  conflict?: (operation: SyncOp, context: SyncContext) => Promise<SyncConflictResult> | SyncConflictResult
   clientMetadata?: (client: SyncServerClient) => Record<string, unknown> | undefined
   operationLog?: SyncOperationLog
 }
@@ -82,7 +83,7 @@ export class SyncServer {
       return
     }
     if (msg.type === 'delta') {
-      if (this.options.authorize) {
+      if (this.options.authorize || this.options.conflict) {
         void this.authorizeAndProcess(msg, sender)
         return
       }
@@ -109,8 +110,20 @@ export class SyncServer {
     const errors: SyncError[] = []
     const context: SyncContext = { clientId: msg.clientId, protocolVersion: msg.protocolVersion ?? this.options.protocolVersion, metadata: this.options.clientMetadata?.(sender) }
     for (const op of msg.ops) {
-      if (await this.options.authorize!(op, context)) accepted.push(op)
-      else errors.push({ code: 'unauthorized', message: `Operation ${op.operationId ?? `${op.clientId}:${op.seq}`} was not authorized`, operationId: op.operationId })
+      if (this.options.authorize && !(await this.options.authorize(op, context))) {
+        errors.push({ code: 'unauthorized', message: `Operation ${op.operationId ?? `${op.clientId}:${op.seq}`} was not authorized`, operationId: op.operationId })
+        continue
+      }
+      if (this.options.conflict) {
+        const result = await this.options.conflict(op, context)
+        const rejected = result === false || (typeof result === 'object' && !result.ok)
+        if (rejected) {
+          const message = typeof result === 'object' && result.message ? result.message : `Operation ${op.operationId ?? `${op.clientId}:${op.seq}`} conflicts with current state`
+          errors.push({ code: 'conflict', message, operationId: op.operationId })
+          continue
+        }
+      }
+      accepted.push(op)
     }
     this.processDelta({ ...msg, ops: accepted }, sender, errors)
   }

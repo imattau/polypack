@@ -535,6 +535,32 @@ describe('SyncServer + SyncClient', () => {
     expect(responses[0].errors?.[0].code).toBe('unauthorized')
   })
 
+  it('reports base-revision conflicts through the server hook', async () => {
+    const responses: SyncMessage[] = []
+    const errors: string[] = []
+    const server = new SyncServer({
+      conflict: op => op.baseRevision === 2 ? { ok: true } : { ok: false, message: 'stale revision' },
+    })
+    const client = new SyncClient({
+      graph: new PolyGraph(),
+      transport: { send: () => undefined, close: () => undefined, onMessage: null },
+      clientId: 'conflict-client',
+      onError: error => errors.push(error.code),
+    })
+    const sender = { clientId: 'conflict-client', send: (message: SyncMessage) => { responses.push(message); client.handleMessage(message) } }
+    const receive = server.addClient(sender)
+    receive({
+      type: 'delta', clientId: 'conflict-client', fromSeq: 0, ops: [
+        { seq: 1, timestamp: 1, clientId: 'conflict-client', kind: 'updateNode', baseRevision: 1, payload: { id: 'n' } },
+      ],
+    })
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(server.ops).toHaveLength(0)
+    expect(responses[0].errors).toMatchObject([{ code: 'conflict', message: 'stale revision' }])
+    expect(errors).toEqual(['conflict'])
+    client.disconnect()
+  })
+
   it('filters subscriptions and expires cursors after bounded compaction', () => {
     const server = new SyncServer({ maxOps: 1 })
     const received: SyncMessage[] = []

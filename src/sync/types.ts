@@ -12,6 +12,8 @@ export interface SyncError {
   operationId?: string
 }
 
+export type SyncConflictResult = boolean | { ok: boolean; message?: string }
+
 /** Ordered graph mutation exchanged by sync clients. */
 export interface SyncOp {
   seq: number

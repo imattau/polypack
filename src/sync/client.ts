@@ -3,7 +3,7 @@ import type { PolyGraph } from '../graph.js'
 import type { GraphChangeEvent, NodeActivation } from '../types.js'
 import { mergeActivation } from '../activation.js'
 import type { SyncTransport } from './transport.js'
-import type { SyncMessage, SyncOp } from './types.js'
+import type { SyncError, SyncMessage, SyncOp } from './types.js'
 import { SYNC_PROTOCOL_VERSION } from './types.js'
 import { edgeId } from '../utils.js'
 import { OpLog } from './oplog.js'
@@ -23,6 +23,7 @@ export interface SyncClientOptions {
    */
   activationSyncThreshold?: number
   protocolVersion?: number
+  onError?: (error: SyncError) => void
 }
 
 const NODE_OPS: Record<string, SyncOp['kind']> = {
@@ -58,6 +59,7 @@ export class SyncClient {
   private serverCursor = 0
   private applyingRemote = false
   private protocolVersion: number
+  private onError?: (error: SyncError) => void
 
   constructor(options: SyncClientOptions) {
     this.graph = options.graph
@@ -67,6 +69,7 @@ export class SyncClient {
     this.retryMs = options.retryMs ?? 1000
     this.activationSyncThreshold = options.activationSyncThreshold ?? DEFAULT_ACTIVATION_SYNC_THRESHOLD
     this.protocolVersion = options.protocolVersion ?? SYNC_PROTOCOL_VERSION
+    this.onError = options.onError
     this.bindTransport(options.transport)
 
     this.subscription = this.graph.changes.subscribe((event) => {
@@ -279,6 +282,7 @@ export class SyncClient {
   /** Handle an incoming message from the transport. */
   handleMessage(msg: SyncMessage): void {
     if (msg.type === 'ack' && msg.clientId === this.oplog.clientId) {
+      for (const error of msg.errors ?? []) this.onError?.(error)
       this.lastAckedSeq = Math.max(this.lastAckedSeq, Math.min(msg.fromSeq, this.oplog.latestSeq))
       this.scheduleRetry()
       return
