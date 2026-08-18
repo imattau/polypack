@@ -1,4 +1,4 @@
-import type { PolyNode, DataTransform, IndexDefinition, QueryExplain } from './types.js'
+import type { PolyNode, DataTransform, IndexDefinition, QueryExplain, QueryMetrics } from './types.js'
 import { cosineSimilarity } from './vector-index.js'
 import { activationScoreOf, assertFiniteVector, assertNonNegativeInteger, cloneData, clonePolyNode } from './utils.js'
 
@@ -29,7 +29,11 @@ export function isNativeQueryExecutorActive(): boolean {
 
 type EdgeEntry = { id: string; target: string; type: string; data?: Record<string, unknown> }
 type EdgeIndex = Map<string, Map<string, EdgeEntry>>
-type CandidateResolver = (nodeTypes: string[] | undefined, attributes: Record<string, unknown> | undefined) => string[] | undefined
+type CandidateResolver = (
+  nodeTypes: string[] | undefined,
+  attributes: Record<string, unknown> | undefined,
+  ranges?: Record<string, { above?: number; below?: number }>,
+) => string[] | undefined
 
 interface TraversalStep {
   edgeType: string
@@ -76,6 +80,7 @@ export class GraphQuery {
   private sidecarData: Map<string, unknown>
   private indexes: IndexDefinition[]
   private candidateResolver?: CandidateResolver
+  private onMetrics?: (metrics: QueryMetrics) => void
 
   constructor(
     nodes: Map<string, PolyNode>,
@@ -85,6 +90,7 @@ export class GraphQuery {
     sidecarData?: Map<string, unknown>,
     indexes: IndexDefinition[] = [],
     candidateResolver?: CandidateResolver,
+    onMetrics?: (metrics: QueryMetrics) => void,
   ) {
     this.nodes = nodes
     this.edges = edges
@@ -93,6 +99,7 @@ export class GraphQuery {
     this.sidecarData = sidecarData ?? new Map()
     this.indexes = indexes
     this.candidateResolver = candidateResolver
+    this.onMetrics = onMetrics
   }
 
   private readNode(node: PolyNode): PolyNode {
@@ -274,7 +281,7 @@ export class GraphQuery {
       return [...ids].map(id => this.nodes.get(id)).filter((n): n is PolyNode => !!n)
     }
 
-    const indexedIds = this.candidateResolver?.(this.opts.nodeTypes, this.opts.attributes)
+    const indexedIds = this.candidateResolver?.(this.opts.nodeTypes, this.opts.attributes, this.opts.attributeRanges)
     if (indexedIds) return indexedIds.map(id => this.nodes.get(id)).filter((n): n is PolyNode => !!n)
 
     const allNodes = [...this.nodes.values()]
@@ -457,16 +464,22 @@ export class GraphQuery {
   }
 
   toArray(): PolyNode[] {
+    const started = Date.now()
+    const finish = (results: PolyNode[]): PolyNode[] => {
+      const index = this.explain().index
+      this.onMetrics?.({ durationMs: Date.now() - started, scannedRecords: this.nodes.size, index })
+      return results
+    }
     const nativeIds = this.runNative()
     if (nativeIds !== null) {
-      return nativeIds
+      return finish(nativeIds
         .map(id => this.nodes.get(id))
         .filter((n): n is PolyNode => !!n)
-        .map(node => this.readNode(node))
+        .map(node => this.readNode(node)))
     }
 
     let results = this.getSourceNodes().filter(n => this.match(n))
-    if (results.length === 0) return []
+    if (results.length === 0) return finish([])
 
     if (this.opts.afterSteps && this.opts.afterSteps.length > 0) {
       const ids = results.map(n => n.id)
@@ -508,7 +521,7 @@ export class GraphQuery {
     if (this.opts.offset !== undefined) results = results.slice(this.opts.offset)
     if (this.opts.limit !== undefined) results = results.slice(0, this.opts.limit)
 
-    return results.map(node => this.readNode(node))
+    return finish(results.map(node => this.readNode(node)))
   }
 
   first(): PolyNode | null {

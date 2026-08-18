@@ -1,10 +1,11 @@
-import type { PolyNode } from './types.js'
+import type { PolyNode, PolyEdge } from './types.js'
 import type { PolyGraph } from './graph.js'
 
 export interface MigrationDefinition {
   from: number
   to: number
   migrateNode(node: PolyNode): PolyNode | void
+  migrateEdge?: (edge: PolyEdge) => PolyEdge | void
 }
 
 export interface MigrationProgress {
@@ -73,11 +74,21 @@ export class MigrationRegistry {
 
     await graph.flush()
     const nodes = await graph.queryPersisted().toArray()
-    const report: MigrationReport = { from, to, processed: 0, total: nodes.length, migrated: 0, dryRun: options.dryRun === true }
+    const edges = await graph.persistence.getAllEdges()
+    const report: MigrationReport = { from, to, processed: 0, total: nodes.length + edges.length, migrated: 0, dryRun: options.dryRun === true }
     const migrate = (node: PolyNode): PolyNode => {
       let current = node
       for (const definition of path) {
         const result = definition.migrateNode(current)
+        if (result !== undefined) current = result
+      }
+      return current
+    }
+    const migrateEdge = (edge: PolyEdge): PolyEdge => {
+      let current = edge
+      for (const definition of path) {
+        if (!definition.migrateEdge) continue
+        const result = definition.migrateEdge(current)
         if (result !== undefined) current = result
       }
       return current
@@ -93,6 +104,23 @@ export class MigrationRegistry {
       }
       report.processed += batch.length
       report.migrated += path.length > 0 ? batch.length : 0
+      await options.onProgress?.({ ...report })
+    }
+    for (let offset = 0; offset < edges.length; offset += batchSize) {
+      checkAborted()
+      const batch = edges.slice(offset, offset + batchSize).map(edge => migrateEdge({
+        ...edge,
+        data: edge.data ? structuredClone(edge.data) : undefined,
+      }))
+      const edgeMigrations = path.some(definition => definition.migrateEdge)
+      const changed = batch.filter((edge, index) => JSON.stringify(edge.data) !== JSON.stringify(edges[offset + index].data))
+      if (!options.dryRun && edgeMigrations && changed.length > 0) {
+        await graph.transaction(tx => {
+          for (const edge of changed) tx.updateEdge(edge.id, edge.data ?? {})
+        })
+      }
+      report.processed += batch.length
+      report.migrated += edgeMigrations ? batch.length : 0
       await options.onProgress?.({ ...report })
     }
     return report

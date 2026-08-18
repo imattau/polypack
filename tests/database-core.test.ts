@@ -218,11 +218,31 @@ describe('database-core mutation API', () => {
     const backupIo = new MemoryFileIO()
     await source.backup(backupIo)
     const restoreIo = new MemoryFileIO()
-    await BinaryStoreAdapter.restore(backupIo, restoreIo)
+    await PolyGraph.restore(backupIo, restoreIo)
     const restored = new BinaryStoreAdapter({ storeDir: 'admin-restored', fileIO: restoreIo })
     await restored.getNode('a')
     expect((await restored.verify()).edgeCount).toBe(1)
     expect((await restored.getMutationsSince!(0n)).length).toBeGreaterThan(0)
+  })
+
+  it('exposes checkpoint and verification through the graph API', async () => {
+    const graph = new PolyGraph(new BinaryStoreAdapter({ storeDir: 'graph-admin', fileIO: new MemoryFileIO() }))
+    graph.addNode(node('admin', { ok: true }))
+    await graph.checkpoint()
+    expect((await graph.verify()).ok).toBe(true)
+    await graph.dispose()
+  })
+
+  it('exposes consistent backups through the graph API', async () => {
+    const io = new MemoryFileIO()
+    const graph = new PolyGraph(new BinaryStoreAdapter({ storeDir: 'graph-backup', fileIO: io }))
+    graph.addNode(node('backup', { ok: true }))
+    const destination = new MemoryFileIO()
+    await graph.backup(destination)
+    const restored = new BinaryStoreAdapter({ storeDir: 'graph-backup-copy', fileIO: destination })
+    expect((await restored.getNode('backup'))?.id).toBe('backup')
+    await graph.dispose()
+    await restored.close()
   })
 
   it('reports persisted vector dimensionality corruption during verification', async () => {

@@ -22,6 +22,7 @@ import {
   yieldToUI,
 } from './utils.js'
 import type { PersistenceAdapter, PersistenceChanges } from './persistence/adapter.js'
+import type { FileIO } from './persistence/file-io.js'
 import { MemoryAdapter } from './persistence/memory.js'
 import { createEmbedding, defaultEmbedding } from './embedding.js'
 import type { EmbeddingProvider } from './embedding.js'
@@ -114,10 +115,17 @@ export class PolyGraph {
   private transactionTail: Promise<void> = Promise.resolve()
   private transactionActive = false
   private transactionMutationDepth = 0
+  private transactionMutationCount = 0
   private currentTransactionId: string | undefined
 
   protected batchDepth = 0
   protected pendingBatchEvents: GraphChangeEvent[] = []
+
+  /** Restore a binary backup into a destination FileIO before opening a graph. */
+  static async restore(source: FileIO, destination: FileIO): Promise<void> {
+    const { BinaryStoreAdapter } = await import('./persistence/binary-store.js')
+    await BinaryStoreAdapter.restore(source, destination)
+  }
 
   /** Run a group of graph mutations as one isolated, atomic commit. */
   async transaction<T>(callback: (tx: GraphTransaction) => Promise<T> | T): Promise<T> {
@@ -130,12 +138,17 @@ export class PolyGraph {
     this.transactionTail = new Promise<void>(resolve => { release = resolve })
     await wait
     this.transactionActive = true
+    this.transactionMutationCount = 0
     const snapshot = this.captureTransactionState()
     this.startBatch()
     try {
       const id = `tx-${Date.now()}-${Math.random().toString(36).slice(2)}`
       this.currentTransactionId = id
       const inTransaction = <R>(fn: () => R): R => {
+        if (this.resourceLimits.maxBatchSize !== undefined && this.transactionMutationCount >= this.resourceLimits.maxBatchSize) {
+          throw new ResourceLimitError('maxBatchSize', this.resourceLimits.maxBatchSize)
+        }
+        this.transactionMutationCount++
         this.transactionMutationDepth++
         try { return fn() } finally { this.transactionMutationDepth-- }
       }
@@ -163,6 +176,7 @@ export class PolyGraph {
       throw error
     } finally {
       this.transactionActive = false
+      this.transactionMutationCount = 0
       this.currentTransactionId = undefined
       release()
     }
@@ -361,6 +375,46 @@ export class PolyGraph {
     return removed
   }
 
+  /** Rebuild all in-memory secondary-index buckets from the current node state. */
+  rebuildIndexes(): void {
+    const previous = this.captureSecondaryIndexes()
+    try {
+      for (const buckets of this.secondaryIndexData.values()) buckets.clear()
+      for (const node of this.nodes.values()) this.indexSecondaryNode(node)
+    } catch (error) {
+      this.restoreSecondaryIndexes(previous)
+      throw error
+    }
+  }
+
+  /** Rebuild secondary-index buckets from all persisted records, including evicted nodes. */
+  async rebuildIndexesFromPersistence(): Promise<void> {
+    const ids = await this.persistence.allNodeIds()
+    const nodes = await this.persistence.getNodes(ids)
+    const previous = this.captureSecondaryIndexes()
+    try {
+      for (const buckets of this.secondaryIndexData.values()) buckets.clear()
+      for (const node of nodes) this.indexSecondaryNode(node as unknown as PolyNode)
+    } catch (error) {
+      this.restoreSecondaryIndexes(previous)
+      throw error
+    }
+  }
+
+  private captureSecondaryIndexes(): Map<string, Map<string, Set<string>>> {
+    return new Map([...this.secondaryIndexData].map(([name, buckets]) => [
+      name,
+      new Map([...buckets].map(([key, ids]) => [key, new Set(ids)])),
+    ]))
+  }
+
+  private restoreSecondaryIndexes(snapshot: Map<string, Map<string, Set<string>>>): void {
+    for (const [name, buckets] of this.secondaryIndexData) {
+      buckets.clear()
+      for (const [key, ids] of snapshot.get(name) ?? []) buckets.set(key, new Set(ids))
+    }
+  }
+
   get indexes(): IndexDefinition[] {
     return [...this.secondaryIndexes.values()].map(index => ({ ...index, fields: [...index.fields] }))
   }
@@ -417,18 +471,36 @@ export class PolyGraph {
     }
   }
 
-  private indexCandidates(nodeTypes: string[] | undefined, attributes: Record<string, unknown> | undefined): string[] | undefined {
-    if (!attributes) return undefined
+  private indexCandidates(
+    nodeTypes: string[] | undefined,
+    attributes: Record<string, unknown> | undefined,
+    ranges?: Record<string, { above?: number; below?: number }>,
+  ): string[] | undefined {
+    if (!attributes && !ranges) return undefined
     const type = nodeTypes?.length === 1 ? nodeTypes[0] : undefined
     for (const index of this.secondaryIndexes.values()) {
       if (index.nodeType && index.nodeType !== type) continue
-      if (!index.fields.every(field => Object.prototype.hasOwnProperty.call(attributes, field) ||
-        Object.prototype.hasOwnProperty.call(attributes, field.replace(/^data\./, '')))) continue
-      const values = index.fields.map(field => Object.prototype.hasOwnProperty.call(attributes, field)
-        ? attributes[field]
-        : attributes[field.replace(/^data\./, '')])
-      const ids = this.secondaryIndexData.get(index.name)?.get(JSON.stringify(values))
-      return ids ? [...ids] : []
+      if (attributes && index.fields.every(field => Object.prototype.hasOwnProperty.call(attributes, field) ||
+        Object.prototype.hasOwnProperty.call(attributes, field.replace(/^data\./, '')))) {
+        const values = index.fields.map(field => Object.prototype.hasOwnProperty.call(attributes, field)
+          ? attributes[field]
+          : attributes[field.replace(/^data\./, '')])
+        const ids = this.secondaryIndexData.get(index.name)?.get(JSON.stringify(values))
+        return ids ? [...ids] : []
+      }
+      if (index.fields.length !== 1 || !ranges) continue
+      const field = index.fields[0]
+      const range = ranges[field] ?? ranges[field.replace(/^data\./, '')]
+      if (!range) continue
+      const ids: string[] = []
+      for (const [encoded, bucket] of this.secondaryIndexData.get(index.name) ?? []) {
+        const value = JSON.parse(encoded)[0]
+        if (typeof value !== 'number' || !Number.isFinite(value)) continue
+        if (range.above !== undefined && value <= range.above) continue
+        if (range.below !== undefined && value >= range.below) continue
+        ids.push(...bucket)
+      }
+      return ids
     }
     return undefined
   }
@@ -1325,7 +1397,7 @@ export class PolyGraph {
 
   /** Create a mutable {@link GraphQuery} over the currently loaded (hot) nodes. */
   query(): GraphQuery {
-    return new GraphQuery(this.nodes, this.edges, this.nodeToEdgeMap, this.transform, this.sidecarData, this.indexes, this.indexCandidates.bind(this))
+    return new GraphQuery(this.nodes, this.edges, this.nodeToEdgeMap, this.transform, this.sidecarData, this.indexes, this.indexCandidates.bind(this), metrics => this.recordQueryMetrics(metrics))
   }
 
   /** Return operational counters without binding the graph to a metrics package. */
@@ -1351,6 +1423,27 @@ export class PolyGraph {
       queryIndexUsage: Object.fromEntries(this.queryIndexUsage),
       ...adapterStats,
     }
+  }
+
+  /** Force a durable checkpoint when the active adapter supports snapshots. */
+  async checkpoint(): Promise<void> {
+    if (!this.persistence.checkpoint) throw new AdapterCapabilityError('snapshots')
+    await this.flush()
+    await this.persistence.checkpoint()
+  }
+
+  /** Copy a consistent store backup when the active adapter supports it. */
+  async backup(destination: FileIO): Promise<void> {
+    if (!this.persistence.backup) throw new AdapterCapabilityError('snapshots')
+    await this.flush()
+    await this.persistence.backup(destination)
+  }
+
+  /** Verify durable storage and logical graph invariants when supported. */
+  async verify() {
+    if (!this.persistence.verify) throw new AdapterCapabilityError('snapshots')
+    await this.flush()
+    return this.persistence.verify()
   }
 
   /** Capture a detached, queryable view of the currently warmed graph state. */

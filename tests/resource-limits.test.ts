@@ -28,6 +28,16 @@ describe('graph write resource limits', () => {
     expect(graph.getNode('a')).toBeDefined()
   })
 
+  it('limits transaction mutations before exceeding the batch bound', async () => {
+    const graph = new PolyGraph()
+    graph.setResourceLimits({ maxBatchSize: 1 })
+    await expect(graph.transaction(tx => {
+      tx.addNode(node('a'))
+      tx.addNode(node('b'))
+    })).rejects.toMatchObject({ limitName: 'maxBatchSize' })
+    expect(graph.getNode('a')).toBeUndefined()
+  })
+
   it('applies limits to updates before changing the existing node', () => {
     const graph = new PolyGraph()
     graph.addNode(node('a', { value: 'ok' }))

@@ -33,4 +33,22 @@ describe('application migrations', () => {
     expect((await graph.queryPersisted().first())?.data).toEqual({ old: true })
     await expect(graph.migrations.run(graph, 2, 4)).rejects.toThrow(MigrationError)
   })
+
+  it('migrates edge metadata in the same migration batches', async () => {
+    const graph = new PolyGraph(new MemoryAdapter())
+    graph.addNode({ id: 'a', type: 'record', data: {}, insertedAt: 1, updatedAt: 1 })
+    graph.addNode({ id: 'b', type: 'record', data: {}, insertedAt: 1, updatedAt: 1 })
+    graph.addEdge({ id: 'claim', source: 'a', target: 'b', type: 'RELATED', data: { legacy: true }, createdAt: 1 })
+    await graph.flush()
+    graph.migrations.register({
+      from: 1,
+      to: 2,
+      migrateNode: node => node,
+      migrateEdge: edge => ({ ...edge, data: { ...edge.data, migrated: true } }),
+    })
+
+    const report = await graph.migrations.run(graph, 1, 2)
+    expect(report.total).toBe(3)
+    expect(graph.getEdges('a')[0].data).toMatchObject({ legacy: true, migrated: true })
+  })
 })
