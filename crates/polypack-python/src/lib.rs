@@ -586,7 +586,38 @@ impl NativeStore {
         Ok(out.unbind())
     }
 
-    #[pyo3(signature = (put_nodes=vec![], delete_node_ids=vec![], put_edges=vec![], delete_edge_ids=vec![], put_vectors=vec![], delete_vector_ids=vec![]))]
+    fn mutation_log(&self, py: Python<'_>) -> PyResult<Py<PyList>> {
+        let records = self.inner.lock().unwrap().mutation_log().map_err(to_pyerr)?;
+        let list = PyList::empty(py);
+        for record in records {
+            let json = serde_json::to_value(record).map_err(|e| PolypackStorageError::new_err(e.to_string()))?;
+            list.append(json_to_py(py, &json)?)?;
+        }
+        Ok(list.unbind())
+    }
+
+    #[pyo3(signature = (sequence=0))]
+    fn mutation_log_since(&self, py: Python<'_>, sequence: u64) -> PyResult<Py<PyList>> {
+        let records = self.inner.lock().unwrap().mutation_log_since(sequence).map_err(to_pyerr)?;
+        let list = PyList::empty(py);
+        for record in records {
+            let json = serde_json::to_value(record).map_err(|e| PolypackStorageError::new_err(e.to_string()))?;
+            list.append(json_to_py(py, &json)?)?;
+        }
+        Ok(list.unbind())
+    }
+
+    fn mutation_log_page(&self, py: Python<'_>, sequence: u64, limit: usize) -> PyResult<Py<PyList>> {
+        let records = self.inner.lock().unwrap().mutation_log_page(sequence, limit).map_err(to_pyerr)?;
+        let list = PyList::empty(py);
+        for record in records {
+            let json = serde_json::to_value(record).map_err(|e| PolypackStorageError::new_err(e.to_string()))?;
+            list.append(json_to_py(py, &json)?)?;
+        }
+        Ok(list.unbind())
+    }
+
+    #[pyo3(signature = (put_nodes=vec![], delete_node_ids=vec![], put_edges=vec![], delete_edge_ids=vec![], put_vectors=vec![], delete_vector_ids=vec![], operation_id=None, transaction_id=None, actor=None, base_revision=None, metadata=None))]
     fn apply(
         &self,
         put_nodes: Vec<Bound<'_, PyAny>>,
@@ -595,6 +626,11 @@ impl NativeStore {
         delete_edge_ids: Vec<String>,
         put_vectors: Vec<Bound<'_, PyAny>>,
         delete_vector_ids: Vec<String>,
+        operation_id: Option<String>,
+        transaction_id: Option<String>,
+        actor: Option<String>,
+        base_revision: Option<u64>,
+        metadata: Option<Bound<'_, PyAny>>,
     ) -> PyResult<()> {
         let mut batch = polypack_core::model::ChangeBatch {
             delete_node_ids,
@@ -612,7 +648,15 @@ impl NativeStore {
             let entry: polypack_core::model::VectorEntry = py_to_polypack(&v)?;
             batch.put_vectors.push(entry);
         }
-        self.inner.lock().unwrap().apply(&batch).map_err(to_pyerr)
+        let metadata = metadata.map(|value| py_to_json(&value)).transpose()?;
+        self.inner.lock().unwrap().apply_with_identity(
+            &batch,
+            operation_id.as_deref(),
+            transaction_id.as_deref(),
+            actor.as_deref(),
+            base_revision,
+            metadata,
+        ).map_err(to_pyerr)
     }
 
     fn all_node_ids(&self) -> PyResult<Vec<String>> {

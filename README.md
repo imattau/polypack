@@ -57,6 +57,10 @@ migration notes.
 - **Edge ownership** — `owned` (cascade delete), `shared` (orphan detection), `reference` (no-op)
 - **Reactive** — RxJS change events, batching, React hooks
 - **Pluggable persistence** — MemoryAdapter, BinaryStoreAdapter (MessagePack + WAL), build your own
+- **Database core** — atomic transactions, revisions, conditional writes, patches, schema hooks, and resource limits
+- **Operational durability** — checkpoint/backup/verification APIs, durable logical mutation logs, cursors, and idempotent operation IDs
+- **Explainable queries** — persisted and hot-query plans with index selection, estimated cost, and operational metrics
+- **Configurable indexes** — compound and unique node-data indexes with persisted Python index metadata
 - **Persisted queries** — asynchronous filtering and similarity across the full backing store
 - **Adaptive memory** — activation model: durable, decayed relevance (`score`/`importance`) per node, spreading activation over edges, semantic pulses, and a live working-memory set — synced additively
 - **Real-time sync** — acknowledgements, retry, deduplication, reconnect recovery, and echo suppression

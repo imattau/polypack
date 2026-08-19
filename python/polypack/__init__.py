@@ -650,11 +650,17 @@ class GraphTransaction:
     not concurrently mutate the same graph from another thread.
     """
 
-    def __init__(self, graph: "PolyGraph") -> None:
+    def __init__(self, graph: "PolyGraph", actor: Optional[str] = None, base_revision: Optional[int] = None, metadata: Optional[dict] = None, operation_id: Optional[str] = None) -> None:
         if graph._active_transaction is not None:
             raise PolypackValueError("nested transactions are not supported")
         self.graph = graph
         self.id = f"tx-{uuid.uuid4().hex}"
+        if operation_id is not None and not operation_id:
+            raise PolypackValueError("operation_id must not be empty")
+        self.operation_id = operation_id or f"op-{uuid.uuid4().hex}"
+        self.actor = actor
+        self.base_revision = base_revision
+        self.metadata = copy.deepcopy(metadata) if metadata is not None else None
         self._snapshot = {
             "nodes": copy.deepcopy(graph._nodes),
             "edges": copy.deepcopy(graph._edges),
@@ -1070,9 +1076,16 @@ class PolyGraph:
 
     # ── context manager ──
 
-    def transaction(self, callback: Optional[Callable[["GraphTransaction"], Any]] = None) -> "GraphTransaction":
+    def transaction(
+        self,
+        callback: Optional[Callable[["GraphTransaction"], Any]] = None,
+        actor: Optional[str] = None,
+        base_revision: Optional[int] = None,
+        metadata: Optional[dict] = None,
+        operation_id: Optional[str] = None,
+    ) -> "GraphTransaction":
         """Create a checkpointed transaction, or execute a callback in one."""
-        tx = GraphTransaction(self)
+        tx = GraphTransaction(self, actor=actor, base_revision=base_revision, metadata=metadata, operation_id=operation_id)
         if callback is not None:
             with tx:
                 return callback(tx)
@@ -1227,6 +1240,26 @@ class PolyGraph:
             "vectorCount": self.vectors.size,
             "mutationCount": 0,
         }
+
+    def mutation_log(self) -> list[dict]:
+        """Return durable logical mutations from the attached store."""
+        if self._store is None:
+            return []
+        return list(self._store.mutation_log())
+
+    def mutation_log_since(self, sequence: int = 0) -> list[dict]:
+        """Return durable logical mutations after a sequence cursor."""
+        if self._store is None:
+            return []
+        return list(self._store.mutation_log_since(sequence))
+
+    def mutation_log_page(self, sequence: int = 0, limit: int = 1000) -> list[dict]:
+        """Return a bounded mutation-log page after a sequence cursor."""
+        if self._store is None:
+            return []
+        if not isinstance(limit, int) or limit < 0:
+            raise PolypackValueError("mutation log limit must be a non-negative integer")
+        return list(self._store.mutation_log_page(sequence, limit))
 
     def patch_node(
         self,
@@ -1466,7 +1499,7 @@ class PolyGraph:
         if not source_path.is_dir():
             raise PolypackStorageError(f"backup source does not exist: {source}")
         destination_path.mkdir(parents=True, exist_ok=True)
-        for name in ("snapshot.msgpack", "wal.msgpack", "indexes.json"):
+        for name in ("snapshot.msgpack", "wal.msgpack", "mutations.jsonl", "indexes.json"):
             source_file = source_path / name
             if source_file.exists():
                 shutil.copy2(source_file, destination_path / name)
@@ -1506,7 +1539,7 @@ class PolyGraph:
         self.checkpoint()
         destination_path = Path(destination)
         destination_path.mkdir(parents=True, exist_ok=True)
-        for name in ("snapshot.msgpack", "wal.msgpack", "indexes.json"):
+        for name in ("snapshot.msgpack", "wal.msgpack", "mutations.jsonl", "indexes.json"):
             source_file = self._store_directory / name
             if source_file.exists():
                 shutil.copy2(source_file, destination_path / name)
@@ -1559,6 +1592,11 @@ class PolyGraph:
             delete_edge_ids=list(self._removed_edge_ids),
             put_vectors=vectors,
             delete_vector_ids=list(self._removed_vector_ids),
+            transaction_id=self._active_transaction.id if self._active_transaction is not None else None,
+            operation_id=self._active_transaction.operation_id if self._active_transaction is not None else None,
+            actor=self._active_transaction.actor if self._active_transaction is not None else None,
+            base_revision=self._active_transaction.base_revision if self._active_transaction is not None else None,
+            metadata=self._active_transaction.metadata if self._active_transaction is not None else None,
         )
         self._removed_node_ids.clear()
         self._removed_edge_ids.clear()

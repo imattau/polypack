@@ -20,6 +20,7 @@ condition.
 | `corrupt_data`      | `Error`          | Snapshot or WAL bytes fail to decode structurally.                   |
 | `storage`           | `Error`          | Host storage I/O failure (disk, OPFS, IndexedDB, etc.).              |
 | `not_implemented`   | `Error`          | Required optional hook absent and no fallback path exists.           |
+| `resource_limit`    | `ResourceLimitError` | Configured traversal, result, batch, payload, or vector limit exceeded. |
 
 ## Mapping rules
 
@@ -44,3 +45,4 @@ condition.
 | `corrupt_data`      | `PolypackCorruptDataError`  | `PolypackError::CorruptData` |
 | `storage`           | `PolypackStorageError`      | `PolypackError::Storage`   |
 | `not_implemented`   | `NotImplementedError`       | `PolypackError::NotImplemented` |
+| `resource_limit`    | `ResourceLimitError`        | `PolypackError::ResourceLimit`  |

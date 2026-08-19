@@ -12,9 +12,63 @@ use std::collections::{HashMap, HashSet};
 
 pub const SNAPSHOT_FILE: &str = "snapshot.msgpack";
 pub const WAL_FILE: &str = "wal.msgpack";
+pub const MUTATION_LOG_FILE: &str = "mutations.jsonl";
 pub const DEFAULT_COMPACT_THRESHOLD: usize = 10_000;
 /// Compact once the WAL holds at least this share of the store's record count.
 const COMPACT_RATIO: usize = 4;
+
+fn now_millis() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct MutationOperation {
+    pub operation_type: String,
+    pub payload: serde_json::Value,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct MutationRecord {
+    pub operation_id: String,
+    pub sequence: u64,
+    pub transaction_id: String,
+    pub timestamp: i64,
+    pub operations: Vec<MutationOperation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_revision: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<serde_json::Value>,
+}
+
+fn mutation_operations(changes: &ChangeBatch) -> Vec<MutationOperation> {
+    let mut operations = Vec::new();
+    for node in &changes.put_nodes {
+        operations.push(MutationOperation { operation_type: "putNode".into(), payload: serde_json::to_value(node).unwrap_or(serde_json::Value::Null) });
+    }
+    for id in &changes.delete_node_ids {
+        operations.push(MutationOperation { operation_type: "deleteNode".into(), payload: serde_json::json!({ "id": id }) });
+    }
+    for edge in &changes.put_edges {
+        operations.push(MutationOperation { operation_type: "putEdge".into(), payload: serde_json::to_value(edge).unwrap_or(serde_json::Value::Null) });
+    }
+    for id in &changes.delete_edge_ids {
+        operations.push(MutationOperation { operation_type: "deleteEdge".into(), payload: serde_json::json!({ "id": id }) });
+    }
+    for vector in &changes.put_vectors {
+        operations.push(MutationOperation { operation_type: "putVector".into(), payload: serde_json::to_value(vector).unwrap_or(serde_json::Value::Null) });
+    }
+    for id in &changes.delete_vector_ids {
+        operations.push(MutationOperation { operation_type: "deleteVector".into(), payload: serde_json::json!({ "id": id }) });
+    }
+    operations
+}
 
 /// Numeric-range predicate used by [`NodeQuery`], matching the TypeScript
 /// `PersistedNodeQuery.attributeRanges` semantics (exclusive bounds).
@@ -314,6 +368,7 @@ pub struct Store {
     storage: Box<dyn Storage>,
     closed: bool,
     loaded: bool,
+    mutation_sequence: u64,
 }
 
 impl Store {
@@ -330,11 +385,32 @@ impl Store {
             storage,
             closed: false,
             loaded: false,
+            mutation_sequence: 0,
         }
     }
 
     pub fn capabilities(&self) -> AdapterCapabilities {
         self.storage.capabilities()
+    }
+
+    pub fn mutation_log(&mut self) -> Result<Vec<MutationRecord>> {
+        self.assert_open()?;
+        let Some(data) = self.storage.read(MUTATION_LOG_FILE)? else { return Ok(Vec::new()) };
+        data.split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+            .map(|line| serde_json::from_slice(line).map_err(|error| PolypackError::CorruptData(format!("mutation log: {error}"))))
+            .collect()
+    }
+
+    pub fn mutation_log_since(&mut self, sequence: u64) -> Result<Vec<MutationRecord>> {
+        Ok(self.mutation_log()?.into_iter().filter(|record| record.sequence > sequence).collect())
+    }
+
+    pub fn mutation_log_page(&mut self, sequence: u64, limit: usize) -> Result<Vec<MutationRecord>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        Ok(self.mutation_log()?.into_iter().filter(|record| record.sequence > sequence).take(limit).collect())
     }
 
     pub fn verify(&mut self) -> Result<VerificationReport> {
@@ -375,11 +451,7 @@ impl Store {
                 Err(error) => errors.push(format!("snapshot: {error}")),
             }
         }
-        let mutation_count = self
-            .storage
-            .read(WAL_FILE)?
-            .map(|data| decode_wal(&data).len())
-            .unwrap_or(0);
+        let mutation_count = self.mutation_log()?.len();
         Ok(VerificationReport {
             ok: errors.is_empty(),
             errors,
@@ -514,6 +586,7 @@ impl Store {
         self.assert_open()?;
         if !self.loaded {
             self.do_load()?;
+            self.mutation_sequence = self.mutation_log()?.last().map(|record| record.sequence).unwrap_or(0);
             self.loaded = true;
         }
         Ok(())
@@ -600,7 +673,42 @@ impl Store {
     /// would leave memory ahead of disk: the caller sees success reflected
     /// nowhere on disk, and a crash right after would silently lose it.
     pub fn apply(&mut self, changes: &ChangeBatch) -> Result<()> {
+        self.apply_with_transaction(changes, None)
+    }
+
+    pub fn apply_with_transaction(&mut self, changes: &ChangeBatch, transaction_id: Option<&str>) -> Result<()> {
+        self.apply_with_metadata(changes, transaction_id, None, None, None)
+    }
+
+    pub fn apply_with_metadata(
+        &mut self,
+        changes: &ChangeBatch,
+        transaction_id: Option<&str>,
+        actor: Option<&str>,
+        base_revision: Option<u64>,
+        metadata: Option<serde_json::Value>,
+    ) -> Result<()> {
+        self.apply_with_identity(changes, None, transaction_id, actor, base_revision, metadata)
+    }
+
+    pub fn apply_with_identity(
+        &mut self,
+        changes: &ChangeBatch,
+        operation_id: Option<&str>,
+        transaction_id: Option<&str>,
+        actor: Option<&str>,
+        base_revision: Option<u64>,
+        metadata: Option<serde_json::Value>,
+    ) -> Result<()> {
         self.ensure_loaded()?;
+        if operation_id.is_some() || transaction_id.is_some() {
+            if self.mutation_log()?.iter().any(|record|
+                operation_id.is_some_and(|id| record.operation_id == id)
+                    || transaction_id.is_some_and(|id| record.transaction_id == id)
+            ) {
+                return Ok(());
+            }
+        }
         let mut entries: Vec<WalEntry> = Vec::new();
         for id in &changes.delete_node_ids {
             entries.push(WalEntry::DeleteNode(id.clone()));
@@ -628,6 +736,25 @@ impl Store {
         if self.config.durability == Durability::Fsync {
             self.storage.sync(WAL_FILE)?;
         }
+        let sequence = self.mutation_sequence.saturating_add(1);
+        let generated_operation_id = format!("mutation-{sequence}");
+        let record = MutationRecord {
+            operation_id: operation_id.unwrap_or(&generated_operation_id).to_string(),
+            sequence,
+            transaction_id: transaction_id.unwrap_or(&generated_operation_id).to_string(),
+            timestamp: now_millis(),
+            operations: mutation_operations(changes),
+            actor: actor.map(str::to_string),
+            base_revision,
+            metadata,
+        };
+        let mut encoded_record = serde_json::to_vec(&record).map_err(|error| PolypackError::CorruptData(error.to_string()))?;
+        encoded_record.push(b'\n');
+        self.storage.append(MUTATION_LOG_FILE, &encoded_record)?;
+        if self.config.durability == Durability::Fsync {
+            self.storage.sync(MUTATION_LOG_FILE)?;
+        }
+        self.mutation_sequence = sequence;
         // WAL entries are durable (or at least accepted by the host); it is
         // now safe to mutate in-memory state to match.
         for id in &changes.delete_node_ids {
@@ -1111,6 +1238,10 @@ mod tests {
         let before_compaction = store.verify().unwrap();
         assert!(before_compaction.ok);
         assert_eq!(before_compaction.mutation_count, 1);
+        let page = store.mutation_log_page(0, 1).unwrap();
+        assert_eq!(page.len(), 1);
+        assert_eq!(page[0].operations[0].operation_type, "putNode");
+        assert!(store.mutation_log_since(page[0].sequence).unwrap().is_empty());
 
         store.compact().unwrap();
         let after_compaction = store.verify().unwrap();
@@ -1118,6 +1249,39 @@ mod tests {
         assert_eq!(after_compaction.node_count, 1);
         assert_eq!(after_compaction.edge_count, 0);
         assert_eq!(after_compaction.vector_count, 0);
+    }
+
+    #[test]
+    fn mutation_log_preserves_commit_metadata() {
+        let storage = shared();
+        let mut store = Store::new(Box::new(storage), StoreConfig::default());
+        store
+            .apply_with_metadata(
+                &batch(&[node("metadata")]),
+                Some("tx-import"),
+                Some("actor-1"),
+                Some(12),
+                Some(serde_json::json!({"source": "test"})),
+            )
+            .unwrap();
+        let record = store.mutation_log().unwrap().pop().unwrap();
+        assert_eq!(record.transaction_id, "tx-import");
+        assert_eq!(record.actor.as_deref(), Some("actor-1"));
+        assert_eq!(record.base_revision, Some(12));
+        assert_eq!(record.metadata, Some(serde_json::json!({"source": "test"})));
+    }
+
+    #[test]
+    fn repeated_transaction_id_is_idempotent() {
+        let storage = shared();
+        let mut store = Store::new(Box::new(storage), StoreConfig::default());
+        let changes = batch(&[node("once")]);
+        store.apply_with_transaction(&changes, Some("tx-retry")).unwrap();
+        store.apply_with_transaction(&batch(&[node("different")]), Some("tx-retry")).unwrap();
+        assert_eq!(store.node_count().unwrap(), 1);
+        assert!(store.get_node("once").unwrap().is_some());
+        assert!(store.get_node("different").unwrap().is_none());
+        assert_eq!(store.mutation_log().unwrap().len(), 1);
     }
 
     #[test]

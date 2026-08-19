@@ -18,7 +18,7 @@ A store directory contains two files:
 
 - `snapshot.msgpack` — MessagePack snapshot.
 - `wal.msgpack` — framed WAL entries.
-- `mutations.msgpack` — optional durable logical mutation records for audit,
+- `mutations.jsonl` — optional durable logical mutation records for audit,
   replication, feeds, and incremental recovery.
 
 Files are treated as opaque byte streams; the storage adapter (filesystem,
@@ -148,6 +148,15 @@ persist acknowledged logical mutations with this shape:
 Logical records are ordered by strictly increasing sequence and are appended
 only after the corresponding atomic graph commit succeeds. Reapplying the
 same operation ID is idempotent.
+
+The current Rust and Python directory implementations encode one JSON object
+per newline in `mutations.jsonl`. Each operation is represented as
+`{ "operationType": string, "payload": object }`. The recovery WAL remains
+MessagePack-framed and is not interchangeable with this logical log.
+
+Implementations expose cursor reads over records whose sequence is greater than
+the supplied cursor. Bounded page reads are recommended for replication and
+change-feed consumers so pending queues remain bounded.
 
 ## 12. Conformance
 

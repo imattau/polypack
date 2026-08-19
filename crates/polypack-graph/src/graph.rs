@@ -12,7 +12,7 @@ use polypack_core::{
     aggregate as core_aggregate, execute as core_execute, ChangeBatch, Edge, GraphSnapshot, HnswConfig,
     HnswIndex, Node, PolypackError, QueryPlan, Result, Storage, Store, StoreConfig,
 };
-use polypack_core::storage::{AdapterCapabilities, VerificationReport};
+use polypack_core::storage::{AdapterCapabilities, MutationRecord, VerificationReport};
 
 use crate::edge::{decode_ownership, encode_ownership, EdgeEntry, EdgeOwnership};
 use crate::embedding::{create_embedding, EmbeddingProvider, FeatureHashEmbedding};
@@ -159,6 +159,7 @@ pub struct Graph {
     transaction_active: bool,
     transaction_sequence: u64,
     current_transaction_id: Option<String>,
+    current_operation_id: Option<String>,
     node_type_definitions: HashMap<String, NodeTypeDefinition>,
     edge_type_definitions: HashMap<String, EdgeTypeDefinition>,
 }
@@ -254,6 +255,7 @@ impl Graph {
             transaction_active: false,
             transaction_sequence: 0,
             current_transaction_id: None,
+            current_operation_id: None,
             node_type_definitions: HashMap::new(),
             edge_type_definitions: HashMap::new(),
         })
@@ -269,9 +271,29 @@ impl Graph {
         self.current_transaction_id.as_deref()
     }
 
+    /// Return the active logical operation identifier while in a transaction.
+    pub fn operation_id(&self) -> Option<&str> {
+        self.current_operation_id.as_deref()
+    }
+
     /// Verify the persisted snapshot, WAL, records, endpoints, and vectors.
     pub fn verify(&mut self) -> Result<VerificationReport> {
         self.store.verify()
+    }
+
+    /// Return the durable logical mutation history for replication and audit.
+    pub fn mutation_log(&mut self) -> Result<Vec<MutationRecord>> {
+        self.store.mutation_log()
+    }
+
+    /// Return durable mutations after a global sequence cursor.
+    pub fn mutation_log_since(&mut self, sequence: u64) -> Result<Vec<MutationRecord>> {
+        self.store.mutation_log_since(sequence)
+    }
+
+    /// Return at most `limit` durable mutations after a sequence cursor.
+    pub fn mutation_log_page(&mut self, sequence: u64, limit: usize) -> Result<Vec<MutationRecord>> {
+        self.store.mutation_log_page(sequence, limit)
     }
 
     pub fn register_node_type(&mut self, node_type: impl Into<String>, definition: NodeTypeDefinition) -> Result<()> {
@@ -454,12 +476,21 @@ impl Graph {
     where
         F: FnOnce(&mut Graph) -> Result<T>,
     {
+        self.transaction_with_identity(None, callback)
+    }
+
+    /// Execute a transaction with a caller-supplied operation identifier.
+    pub fn transaction_with_identity<F, T>(&mut self, operation_id: Option<String>, callback: F) -> Result<T>
+    where
+        F: FnOnce(&mut Graph) -> Result<T>,
+    {
         if self.transaction_active {
             return Err(PolypackError::InvalidArgument("nested transactions are not supported".into()));
         }
         let checkpoint = GraphCheckpoint::capture(self);
         self.transaction_sequence = self.transaction_sequence.saturating_add(1);
         self.current_transaction_id = Some(format!("tx-{}-{}", now_millis(), self.transaction_sequence));
+        self.current_operation_id = Some(operation_id.unwrap_or_else(|| format!("op-{}-{}", now_millis(), self.transaction_sequence)));
         self.transaction_active = true;
         self.start_batch();
         let result = callback(self);
@@ -468,16 +499,19 @@ impl Graph {
                 if let Err(error) = self.flush().and_then(|_| self.end_batch()) {
                     self.transaction_active = false;
                     self.current_transaction_id = None;
+                    self.current_operation_id = None;
                     checkpoint.restore(self);
                     return Err(error);
                 }
                 self.transaction_active = false;
                 self.current_transaction_id = None;
+                self.current_operation_id = None;
                 Ok(value)
             }
             Err(error) => {
                 self.transaction_active = false;
                 self.current_transaction_id = None;
+                self.current_operation_id = None;
                 checkpoint.restore(self);
                 Err(error)
             }
@@ -641,7 +675,14 @@ impl Graph {
             delete_vector_ids,
         };
 
-        if let Err(err) = self.store.apply(&changes) {
+        if let Err(err) = self.store.apply_with_identity(
+            &changes,
+            self.current_operation_id.as_deref(),
+            self.current_transaction_id.as_deref(),
+            None,
+            None,
+            None,
+        ) {
             for id in dirty_node_ids {
                 if !removed_node_ids.contains(&id) {
                     self.dirty_nodes.insert(id);
@@ -2649,8 +2690,13 @@ mod tests {
         assert!(error.is_err());
         assert!(g.get_node("rolled-back").is_none());
 
+        let mut committed_transaction_id = None;
+        let mut committed_operation_id = None;
         g.transaction(|tx| {
-            assert!(tx.transaction_id().is_some());
+            committed_transaction_id = tx.transaction_id().map(str::to_string);
+            committed_operation_id = tx.operation_id().map(str::to_string);
+            assert!(committed_transaction_id.is_some());
+            assert!(committed_operation_id.is_some());
             tx.add_node(node("committed"))?;
             assert!(tx.get_node("committed").is_some());
             Ok(())
@@ -2658,6 +2704,10 @@ mod tests {
         .unwrap();
         assert!(g.get_node("committed").is_some());
         assert!(g.transaction_id().is_none());
+        assert!(g.operation_id().is_none());
+        let log = g.mutation_log().unwrap();
+        assert_eq!(log.last().map(|record| record.transaction_id.as_str()), committed_transaction_id.as_deref());
+        assert_eq!(log.last().map(|record| record.operation_id.as_str()), committed_operation_id.as_deref());
     }
 
     #[test]
@@ -2665,6 +2715,18 @@ mod tests {
         let mut g = test_graph();
         let result = g.transaction(|tx| tx.transaction(|_| Ok(())));
         assert!(matches!(result, Err(PolypackError::InvalidArgument(_))));
+    }
+
+    #[test]
+    fn transaction_accepts_caller_operation_identity() {
+        let mut g = test_graph();
+        g.transaction_with_identity(Some("import-1".into()), |tx| {
+            tx.add_node(node("imported"))?;
+            assert_eq!(tx.operation_id(), Some("import-1"));
+            Ok(())
+        }).unwrap();
+        let record = g.mutation_log().unwrap().pop().unwrap();
+        assert_eq!(record.operation_id, "import-1");
     }
 
     #[test]
