@@ -7,6 +7,7 @@ Semantics mirror `specification/data-model.md` and the TypeScript reference.
 from __future__ import annotations
 
 import copy
+import ast
 import fcntl
 import json
 import math
@@ -690,6 +691,7 @@ class GraphTransaction:
         self.graph._removed_vector_ids = self._snapshot["removed_vectors"]
         self.graph.vectors.clear()
         self.graph.vectors.add_many(self._snapshot["vectors"])
+        self.graph._rebuild_secondary_indexes()
 
     def commit(self) -> None:
         if self._closed:
@@ -781,6 +783,7 @@ class PolyGraph:
         self._resource_limits: dict[str, int] = {}
         self.migrations = MigrationRegistry()
         self._indexes: dict[str, dict] = {}
+        self._secondary_index_data: dict[str, dict[str, set[str]]] = {}
         self._query_count = 0
         self._query_duration_ms = 0.0
         self._query_scanned_records = 0
@@ -862,9 +865,8 @@ class PolyGraph:
     ) -> None:
         """Define a single or compound node-data index.
 
-        The Python engine keeps the metadata and enforces uniqueness eagerly;
-        query execution retains a scan fallback until a native index planner is
-        available for the active adapter.
+        The Python engine keeps metadata and maintained candidate buckets,
+        while every indexed result still passes the complete query predicate.
         """
         if isinstance(name, dict):
             definition = name
@@ -876,21 +878,37 @@ class PolyGraph:
         if self._store_read_only:
             raise PolypackStorageError("store was opened read-only")
         field_list = list(fields or ())
-        if not name or not field_list or len(set(field_list)) != len(field_list):
+        if not isinstance(name, str) or not name or not field_list or any(not isinstance(field, str) or not field for field in field_list) or len(set(field_list)) != len(field_list):
             raise PolypackValueError("index name and unique fields must not be empty")
+        previous = self._indexes.get(name)
         self._indexes[name] = {"name": name, "fields": field_list, "nodeType": node_type, "unique": unique, "sparse": sparse}
+        self._secondary_index_data[name] = {}
         try:
             self._validate_all_indexes()
+            self._rebuild_secondary_indexes()
+            self._persist_index_metadata()
         except Exception:
-            self._indexes.pop(name, None)
+            if previous is None:
+                self._indexes.pop(name, None)
+            else:
+                self._indexes[name] = previous
+            self._rebuild_secondary_indexes()
             raise
-        self._persist_index_metadata()
 
     def drop_index(self, name: str) -> bool:
-        removed = self._indexes.pop(name, None) is not None
-        if removed:
+        if self._store_read_only:
+            raise PolypackStorageError("store was opened read-only")
+        previous = self._indexes.pop(name, None)
+        if previous is None:
+            return False
+        self._secondary_index_data.pop(name, None)
+        try:
             self._persist_index_metadata()
-        return removed
+        except Exception:
+            self._indexes[name] = previous
+            self._rebuild_secondary_indexes()
+            raise
+        return True
 
     @property
     def indexes(self) -> list[dict]:
@@ -903,6 +921,28 @@ class PolyGraph:
         if definition["sparse"] and any(value is None for value in values):
             return None
         return repr(values)
+
+    def _add_secondary_index_entry(self, node: Node) -> None:
+        for name, definition in self._indexes.items():
+            key = self._index_key(node, definition)
+            if key is not None:
+                self._secondary_index_data.setdefault(name, {}).setdefault(key, set()).add(node["id"])
+
+    def _remove_secondary_index_entry(self, node: Node) -> None:
+        for name, definition in self._indexes.items():
+            key = self._index_key(node, definition)
+            if key is None:
+                continue
+            bucket = self._secondary_index_data.get(name, {}).get(key)
+            if bucket is not None:
+                bucket.discard(node["id"])
+                if not bucket:
+                    self._secondary_index_data[name].pop(key, None)
+
+    def _rebuild_secondary_indexes(self) -> None:
+        self._secondary_index_data = {name: {} for name in self._indexes}
+        for node in self._nodes.values():
+            self._add_secondary_index_entry(node)
 
     def _validate_all_indexes(self) -> None:
         for definition in self._indexes.values():
@@ -932,6 +972,9 @@ class PolyGraph:
             key = self._index_key(candidate, definition)
             if key is None:
                 continue
+            for existing_id in self._secondary_index_data.get(definition["name"], {}).get(key, set()):
+                if existing_id != candidate["id"]:
+                    raise UniqueConstraintError(f"unique index {definition['name']} conflicts with node {existing_id}")
             for node in self._nodes.values():
                 if node["id"] == candidate["id"]:
                     continue
@@ -957,11 +1000,19 @@ class PolyGraph:
         try:
             definitions = json.loads(source.read_text(encoding="utf-8"))
             self._indexes = {}
+            if not isinstance(definitions, list):
+                raise ValueError("index metadata must be an array")
+            seen_names: set[str] = set()
             for definition in definitions:
+                if not isinstance(definition, dict):
+                    raise ValueError("index definition must be an object")
                 name = definition.get("name")
                 fields = definition.get("fields")
-                if not isinstance(name, str) or not isinstance(fields, list) or not fields:
+                if not isinstance(name, str) or not name or name in seen_names:
+                    raise ValueError("index names must be unique and non-empty")
+                if not isinstance(fields, list) or not fields or any(not isinstance(field, str) or not field for field in fields) or len(set(fields)) != len(fields):
                     raise ValueError("invalid index definition")
+                seen_names.add(name)
                 self._indexes[name] = {
                     "name": name,
                     "fields": fields,
@@ -970,6 +1021,7 @@ class PolyGraph:
                     "sparse": bool(definition.get("sparse", False)),
                 }
             self._validate_all_indexes()
+            self._rebuild_secondary_indexes()
         except (OSError, ValueError, TypeError, PolypackError) as exc:
             raise PolypackStorageError(f"invalid index metadata: {exc}") from exc
 
@@ -1137,6 +1189,8 @@ class PolyGraph:
             stored["vector"] = None
         self._validate_node_schema(stored)
         self._validate_index_candidate(stored)
+        if previous is not None:
+            self._remove_secondary_index_entry(previous)
         if stored["vector"] is None:
             self.vectors.remove(stored["id"])
         self._nodes[stored["id"]] = stored
@@ -1146,6 +1200,7 @@ class PolyGraph:
             self._removed_vector_ids.discard(stored["id"])
         else:
             self._removed_vector_ids.add(stored["id"])
+        self._add_secondary_index_entry(stored)
 
     def update_node(
         self,
@@ -1173,8 +1228,10 @@ class PolyGraph:
         candidate["revision"] = int(node.get("revision", 0)) + 1
         self._validate_node_schema(candidate)
         self._validate_index_candidate(candidate)
+        self._remove_secondary_index_entry(node)
         node.clear()
         node.update(candidate)
+        self._add_secondary_index_entry(node)
         if vector is not None:
             self.vectors.add(id_, node["vector"])
             self._removed_vector_ids.discard(id_)
@@ -1202,7 +1259,7 @@ class PolyGraph:
             "vectorCount": vector_count,
             "dirtyRecordCount": len(self._removed_node_ids) + len(self._removed_edge_ids) + len(self._removed_vector_ids),
             "pendingPersistence": bool(self._removed_node_ids or self._removed_edge_ids or self._removed_vector_ids),
-            "indexCount": 1 + len(self._indexes),
+            "indexCount": len(self._indexes),
             "memoryEstimateBytes": memory_estimate,
             "queryCount": self._query_count,
             "queryDurationMs": self._query_duration_ms,
@@ -1338,6 +1395,7 @@ class PolyGraph:
             if self._ownership(edge) == "owned" and not self._has_other_owned_source(edge["target"], id_):
                 self.remove_node(edge["target"], visited)
         self._cleanup_edges(id_)
+        self._remove_secondary_index_entry(node)
         del self._nodes[id_]
         self.vectors.remove(id_)
         self._removed_node_ids.add(id_)
@@ -1491,6 +1549,8 @@ class PolyGraph:
         self._removed_node_ids.clear()
         self._removed_edge_ids.clear()
         self._removed_vector_ids.clear()
+        if self._store is None:
+            self._secondary_index_data = {name: {} for name in self._indexes}
 
     # ── persistence (Rust storage state machine) ──
 
@@ -1983,7 +2043,8 @@ class GraphQuery:
             # the pure-Python pipeline so results can't silently diverge.
             return None
         try:
-            nodes = [dict(n) for n in self._graph._nodes.values()]
+            nodes_source = self._indexed_candidates() if not self._joins and not self._traversal else self._graph._nodes.values()
+            nodes = [dict(n) for n in nodes_source]
             edges = []
             for edge_map in self._graph._edges.values():
                 for e in edge_map.values():
@@ -2007,6 +2068,7 @@ class GraphQuery:
     def _collect(self) -> list:
         started = time.perf_counter()
         plan = self._to_plan()
+        scanned_records = len(self._graph._nodes) if self._joins or self._traversal else len(self._indexed_candidates())
         native_ids = self._native_ids(plan)
         if native_ids is not None:
             maximum = self._limits.get("maxNodesVisited")
@@ -2017,27 +2079,16 @@ class GraphQuery:
             maximum = self._limits.get("maxResults")
             if maximum is not None and len(results) > maximum:
                 raise ResourceLimitError("maxResults", maximum)
-            self._graph._record_query((time.perf_counter() - started) * 1000, len(self._graph._nodes), self.explain()["index"])
+            self._graph._record_query((time.perf_counter() - started) * 1000, scanned_records, self.explain()["index"])
             return results
         # Fallback: pure-Python pipeline (only reached if the native path
         # failed, e.g. a non-JSON-serialisable filter value).
         results = self._collect_python(plan)
-        self._graph._record_query((time.perf_counter() - started) * 1000, len(self._graph._nodes), self.explain()["index"])
+        self._graph._record_query((time.perf_counter() - started) * 1000, scanned_records, self.explain()["index"])
         return results
 
     def _collect_python(self, plan: dict) -> list:
-        explanation = self.explain()
-        selected = explanation["index"]
-        candidates = self._graph._nodes.values()
-        if selected is not None:
-            definition = self._graph._indexes[selected]
-            equalities = {field: value for op, field, value in self._attributes if op == "eq"}
-            if all(field in equalities for field in definition["fields"]):
-                expected = repr([equalities[field] for field in definition["fields"]])
-                candidates = [
-                    node for node in candidates
-                    if self._graph._index_key(node, definition) == expected
-                ]
+        candidates = self._indexed_candidates()
         results = [n for n in candidates if self._match(n)]
         if self._joins:
             results = [n for n in results if all(self._connected(n, et, d) for et, d in self._joins)]
@@ -2080,6 +2131,37 @@ class GraphQuery:
         if maximum is not None and len(results) > maximum:
             raise ResourceLimitError("maxResults", maximum)
         return results
+
+    def _indexed_candidates(self) -> list:
+        explanation = self.explain()
+        selected = explanation["index"]
+        if selected is None or selected == "type-index":
+            return list(self._graph._nodes.values())
+        definition = self._graph._indexes[selected]
+        equalities = {field: value for op, field, value in self._attributes if op == "eq"}
+        buckets = self._graph._secondary_index_data.get(selected, {})
+        if all(field in equalities for field in definition["fields"]):
+            expected = repr([equalities[field] for field in definition["fields"]])
+            ids = buckets.get(expected, set())
+            return [self._graph._nodes[id_] for id_ in ids if id_ in self._graph._nodes]
+        if len(definition["fields"]) == 1:
+            field = definition["fields"][0]
+            ranges = [(above, below) for op, name, (above, below) in self._attributes if op == "range" and name == field]
+            if ranges:
+                above, below = ranges[-1]
+                ids: set[str] = set()
+                for encoded, bucket in buckets.items():
+                    try:
+                        value = ast.literal_eval(encoded)[0]
+                    except (ValueError, SyntaxError, IndexError, TypeError):
+                        continue
+                    if not isinstance(value, (int, float)) or isinstance(value, bool):
+                        continue
+                    if (above is not None and value <= above) or (below is not None and value >= below):
+                        continue
+                    ids.update(bucket)
+                return [self._graph._nodes[id_] for id_ in ids if id_ in self._graph._nodes]
+        return list(self._graph._nodes.values())
 
     def to_list(self) -> list:
         return [_copy_node(n) for n in self._collect()]

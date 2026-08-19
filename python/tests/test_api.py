@@ -11,6 +11,7 @@ from polypack import (
     PolyGraph,
     PolypackDimensionError,
     PolypackError,
+    PolypackStorageError,
     PolypackValueError,
     engine_info,
 )
@@ -77,6 +78,57 @@ def test_graph_query_and_vectors():
     assert [r[0] for r in graph.vectors.query([1, 0, 0], 2)] == ["n0", "n1"]
 
 
+def test_secondary_indexes_filter_equality_and_numeric_ranges():
+    graph = PolyGraph()
+    graph.define_index("email", ["email"], unique=True)
+    graph.define_index("birth-year", ["birthYear"], sparse=True)
+    graph.add_node({"id": "a", "type": "person", "data": {"email": "a@test", "birthYear": 1980}, "insertedAt": 1, "updatedAt": 1})
+    graph.add_node({"id": "b", "type": "person", "data": {"email": "b@test", "birthYear": 2020}, "insertedAt": 1, "updatedAt": 1})
+    graph.add_node({"id": "c", "type": "person", "data": {"email": "c@test", "birthYear": 2050}, "insertedAt": 1, "updatedAt": 1})
+    assert graph.query().where("email", "b@test").ids() == ["b"]
+    assert sorted(graph.query().where_range("birthYear", above=2000).ids()) == ["b", "c"]
+    graph.update_node("b", {"email": "updated@test"})
+    assert graph.query().where("email", "b@test").ids() == []
+    assert graph.query().where("email", "updated@test").ids() == ["b"]
+
+
+def test_indexed_query_metrics_report_candidate_scan_count():
+    graph = PolyGraph()
+    graph.define_index("email", ["email"])
+    for id_, email in [("a", "a@test"), ("b", "b@test")]:
+        graph.add_node({"id": id_, "type": "person", "data": {"email": email}, "insertedAt": 1, "updatedAt": 1})
+    assert graph.query().where("email", "a@test").ids() == ["a"]
+    stats = graph.stats()
+    assert stats["queryIndexUsage"]["email"] == 1
+    assert stats["queryScannedRecords"] == 1
+
+
+def test_index_catalog_rolls_back_when_metadata_write_fails(tmp_path, monkeypatch):
+    graph = PolyGraph.open(str(tmp_path))
+    graph.define_index("email", ["email"])
+
+    def fail_persist():
+        raise PolypackStorageError("metadata write failed")
+
+    monkeypatch.setattr(graph, "_persist_index_metadata", fail_persist)
+    with pytest.raises(PolypackStorageError):
+        graph.define_index("birth-year", ["birthYear"])
+    assert [index["name"] for index in graph.indexes] == ["email"]
+    with pytest.raises(PolypackStorageError):
+        graph.drop_index("email")
+    assert [index["name"] for index in graph.indexes] == ["email"]
+
+
+def test_clear_preserves_attached_store_index_constraints(tmp_path):
+    graph = PolyGraph.open(str(tmp_path))
+    graph.define_index("email", ["email"], unique=True)
+    graph.add_node({"id": "a", "type": "person", "data": {"email": "a@test"}, "insertedAt": 1, "updatedAt": 1})
+    graph.save()
+    graph.clear()
+    with pytest.raises(polypack.UniqueConstraintError):
+        graph.add_node({"id": "b", "type": "person", "data": {"email": "a@test"}, "insertedAt": 1, "updatedAt": 1})
+
+
 def test_validation_errors():
     graph = PolyGraph()
     with pytest.raises(PolypackValueError):
@@ -90,6 +142,15 @@ def test_adapter_capability_requirements():
     graph.require_adapter_capabilities({"transactions": True, "vectorSearch": "exact"})
     with pytest.raises(PolypackValueError, match="fsync"):
         graph.require_adapter_capabilities(fsync=True)
+
+
+def test_index_metadata_rejects_duplicate_or_empty_definitions(tmp_path):
+    (tmp_path / "indexes.json").write_text(
+        '[{"name":"dup","fields":["email"]},{"name":"dup","fields":[]}]',
+        encoding="utf-8",
+    )
+    with pytest.raises(PolypackStorageError, match="invalid index metadata"):
+        PolyGraph.open(str(tmp_path))
 
 
 def test_context_manager_and_change_batch():

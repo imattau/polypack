@@ -489,7 +489,9 @@ impl Store {
                         if name.is_empty() || !names.insert(name.to_string()) {
                             errors.push(format!("index metadata: index {name}: duplicate or empty name"));
                         }
-                        if definition.get("fields").and_then(|value| value.as_array()).is_none_or(|fields| fields.is_empty()) {
+                        if definition.get("fields").and_then(|value| value.as_array()).is_none_or(|fields| {
+                            fields.is_empty() || fields.iter().filter_map(|field| field.as_str()).collect::<HashSet<_>>().len() != fields.len()
+                        }) {
                             errors.push(format!("index metadata: index {name}: fields must not be empty"));
                         }
                     }

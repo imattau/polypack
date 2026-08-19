@@ -331,11 +331,10 @@ impl Graph {
     }
 
     /// Define a node-data index. Unique indexes are enforced before every
-    /// mutation; the first implementation keeps the index metadata in the
-    /// graph and uses a validation scan, leaving planner acceleration to a
-    /// storage-specific implementation.
+    /// mutation; equality and single-field numeric range queries use the
+    /// maintained candidate buckets with full predicate validation retained.
     pub fn define_index(&mut self, definition: IndexDefinition) -> Result<()> {
-        if definition.name.is_empty() || definition.fields.is_empty() || definition.fields.iter().any(|field| field.is_empty()) {
+        if definition.name.is_empty() || definition.fields.is_empty() || definition.fields.iter().any(|field| field.is_empty()) || definition.fields.iter().collect::<HashSet<_>>().len() != definition.fields.len() {
             return Err(PolypackError::InvalidArgument("index name and fields must not be empty".into()));
         }
         if self.indexes.contains_key(&definition.name) {
@@ -367,7 +366,9 @@ impl Graph {
         if let Err(error) = self.persist_index_metadata() {
             self.secondary_indexes.insert(name.to_string(), HashMap::new());
             self.indexes.insert(name.to_string(), definition);
-            let nodes: Vec<Node> = self.nodes.values().cloned().collect();
+            let mut indexed_nodes: HashMap<String, Node> = self.store.query_nodes(&NodeQuery::default())?.into_iter().map(|node| (node.id.clone(), node)).collect();
+            indexed_nodes.extend(self.nodes.iter().map(|(id, node)| (id.clone(), node.clone())));
+            let nodes: Vec<Node> = indexed_nodes.into_values().collect();
             for node in &nodes { self.add_secondary_index_entry(node); }
             return Err(error);
         }
@@ -390,7 +391,7 @@ impl Graph {
         let definitions: Vec<IndexDefinition> = serde_json::from_slice(&data)
             .map_err(|error| PolypackError::CorruptData(format!("index metadata: {error}")))?;
         for definition in definitions {
-            if definition.name.is_empty() || definition.fields.is_empty() || definition.fields.iter().any(|field| field.is_empty()) || self.indexes.contains_key(&definition.name) {
+            if definition.name.is_empty() || definition.fields.is_empty() || definition.fields.iter().any(|field| field.is_empty()) || definition.fields.iter().collect::<HashSet<_>>().len() != definition.fields.len() || self.indexes.contains_key(&definition.name) {
                 return Err(PolypackError::CorruptData("invalid index metadata".into()));
             }
             self.secondary_indexes.insert(definition.name.clone(), HashMap::new());
@@ -663,7 +664,7 @@ impl Graph {
                 + self.removed_edge_ids.len()
                 + self.removed_vector_ids.len(),
             pending_persistence: self.has_pending_persistence(),
-            index_count: self.by_type.len(),
+            index_count: self.indexes.len(),
         })
     }
 
@@ -3107,6 +3108,13 @@ mod tests {
         let mut persisted_ids = graph.query_persisted().where_attribute_range("birthYear", Some(2000.0), None).ids().unwrap();
         persisted_ids.sort();
         assert_eq!(persisted_ids, vec!["middle", "old"]);
+    }
+
+    #[test]
+    fn indexes_reject_duplicate_compound_fields() {
+        let mut graph = test_graph();
+        let error = graph.define_index(IndexDefinition { name: "invalid".into(), fields: vec!["email".into(), "email".into()], ..Default::default() }).unwrap_err();
+        assert!(error.to_string().contains("fields"));
     }
 
     #[test]
