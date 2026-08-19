@@ -12,7 +12,7 @@ use polypack_core::{
     aggregate as core_aggregate, execute as core_execute, ChangeBatch, Edge, GraphSnapshot, HnswConfig,
     HnswIndex, Node, PolypackError, QueryPlan, Result, Storage, Store, StoreConfig,
 };
-use polypack_core::storage::AdapterCapabilities;
+use polypack_core::storage::{AdapterCapabilities, VerificationReport};
 
 use crate::edge::{decode_ownership, encode_ownership, EdgeEntry, EdgeOwnership};
 use crate::embedding::{create_embedding, EmbeddingProvider, FeatureHashEmbedding};
@@ -90,6 +90,7 @@ pub struct NodeTypeDefinition {
 pub struct EdgeTypeDefinition {
     pub source_types: Vec<String>,
     pub target_types: Vec<String>,
+    pub cardinality: Option<String>,
 }
 
 impl Default for GraphConfig {
@@ -244,6 +245,11 @@ impl Graph {
         self.store.capabilities()
     }
 
+    /// Verify the persisted snapshot, WAL, records, endpoints, and vectors.
+    pub fn verify(&mut self) -> Result<VerificationReport> {
+        self.store.verify()
+    }
+
     pub fn register_node_type(&mut self, node_type: impl Into<String>, definition: NodeTypeDefinition) {
         self.node_type_definitions.insert(node_type.into(), definition);
     }
@@ -264,8 +270,11 @@ impl Graph {
         Ok(())
     }
 
-    fn validate_edge_schema(&self, source: &str, edge_type: &str, target: &str) -> Result<()> {
+    fn validate_edge_schema(&self, source: &str, edge_type: &str, target: &str, exclude_id: Option<&str>) -> Result<()> {
         let Some(definition) = self.edge_type_definitions.get(edge_type) else { return Ok(()) };
+        if !self.nodes.contains_key(source) || !self.nodes.contains_key(target) {
+            return Err(PolypackError::InvalidArgument(format!("edge {edge_type} references a missing endpoint")));
+        }
         if !definition.source_types.is_empty() {
             let source_type = self.nodes.get(source).map(|node| node.node_type.as_str());
             if source_type.is_none() || !definition.source_types.iter().any(|allowed| Some(allowed.as_str()) == source_type) {
@@ -276,6 +285,27 @@ impl Graph {
             let target_type = self.nodes.get(target).map(|node| node.node_type.as_str());
             if target_type.is_none() || !definition.target_types.iter().any(|allowed| Some(allowed.as_str()) == target_type) {
                 return Err(PolypackError::InvalidArgument(format!("edge target type is not permitted for {edge_type}")));
+            }
+        }
+        if let Some(cardinality) = &definition.cardinality {
+            if cardinality != "many-to-many" {
+                let mut outgoing = 0;
+                let mut incoming = 0;
+                for (candidate_source, edges) in &self.edges {
+                    for candidate in edges.values() {
+                        if exclude_id == Some(candidate.id.as_str()) || candidate.edge_type != *edge_type {
+                            continue;
+                        }
+                        outgoing += usize::from(candidate_source == source);
+                        incoming += usize::from(candidate.target == target);
+                    }
+                }
+                let violates = (cardinality == "one-to-one" && (outgoing > 0 || incoming > 0))
+                    || (cardinality == "one-to-many" && incoming > 0)
+                    || (cardinality == "many-to-one" && outgoing > 0);
+                if violates {
+                    return Err(PolypackError::InvalidArgument(format!("edge cardinality {cardinality} would be exceeded")));
+                }
             }
         }
         Ok(())
@@ -575,6 +605,12 @@ impl Graph {
             || !self.removed_node_ids.is_empty()
             || !self.removed_edge_ids.is_empty()
             || !self.removed_vector_ids.is_empty()
+    }
+
+    /// Flush pending mutations and force a WAL-to-snapshot checkpoint.
+    pub fn checkpoint(&mut self) -> Result<()> {
+        self.flush()?;
+        self.store.compact()
     }
 
     /// Flush pending mutations and close the underlying `Store`.
@@ -1168,7 +1204,7 @@ impl Graph {
                 "edge source, type, and target must not be empty".into(),
             ));
         }
-        self.validate_edge_schema(source, edge_type, target)?;
+        self.validate_edge_schema(source, edge_type, target, None)?;
         let id = edge_id(source, edge_type, target);
         self.removed_edge_ids.remove(&id);
         let inner = format!("{edge_type}::{target}");
@@ -1206,7 +1242,7 @@ impl Graph {
         if id.is_empty() || source.is_empty() || edge_type.is_empty() || target.is_empty() {
             return Err(PolypackError::InvalidArgument("edge id, source, type, and target must not be empty".into()));
         }
-        self.validate_edge_schema(source, edge_type, target)?;
+        self.validate_edge_schema(source, edge_type, target, None)?;
         if self.edges.values().any(|edges| edges.values().any(|edge| edge.id == id)) {
             return Ok(());
         }
@@ -2300,6 +2336,16 @@ mod tests {
     }
 
     #[test]
+    fn checkpoint_flushes_pending_mutations_and_clears_dirty_state() {
+        let mut g = test_graph();
+        g.add_node(node("checkpointed")).unwrap();
+        assert!(g.has_pending_persistence());
+        g.checkpoint().unwrap();
+        assert!(!g.has_pending_persistence());
+        assert_eq!(g.persisted_size().unwrap(), 1);
+    }
+
+    #[test]
     fn remove_node_does_not_cascade_when_another_owned_source_remains() {
         let mut g = test_graph();
         g.add_node(node("a")).unwrap();
@@ -2563,7 +2609,7 @@ mod tests {
         g.register_node_type("person", NodeTypeDefinition { required_fields: vec!["name".into()] });
         g.register_edge_type(
             "KNOWS",
-            EdgeTypeDefinition { source_types: vec!["person".into()], target_types: vec!["person".into()] },
+            EdgeTypeDefinition { source_types: vec!["person".into()], target_types: vec!["person".into()], cardinality: None },
         );
         let mut invalid = node_of_type("a", "person");
         assert!(g.add_node(invalid.clone()).is_err());
@@ -2571,6 +2617,21 @@ mod tests {
         g.add_node(invalid).unwrap();
         g.add_node(node_of_type("b", "doc")).unwrap();
         assert!(g.add_edge("a", "KNOWS", "b", None, EdgeOwnership::Reference).is_err());
+    }
+
+    #[test]
+    fn schema_hooks_enforce_edge_cardinality_and_referential_integrity() {
+        let mut g = test_graph();
+        g.add_node(node_of_type("a", "person")).unwrap();
+        g.add_node(node_of_type("b", "person")).unwrap();
+        g.add_node(node_of_type("c", "person")).unwrap();
+        g.register_edge_type(
+            "PARENT",
+            EdgeTypeDefinition { source_types: vec![], target_types: vec![], cardinality: Some("one-to-many".into()) },
+        );
+        g.add_edge("a", "PARENT", "b", None, EdgeOwnership::Reference).unwrap();
+        assert!(g.add_edge("c", "PARENT", "b", None, EdgeOwnership::Reference).is_err());
+        assert!(g.add_edge("a", "PARENT", "missing", None, EdgeOwnership::Reference).is_err());
     }
 
     #[test]

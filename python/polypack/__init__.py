@@ -150,6 +150,10 @@ class MigrationRegistry:
                     edge = result
         return edge
 
+
+class UniqueConstraintError(PolypackError):
+    """Raised when a unique secondary index would contain duplicate data."""
+
 __all__ = [
     "PolyGraph",
     "GraphTransaction",
@@ -173,6 +177,7 @@ __all__ = [
     "ResourceLimitError",
     "MigrationError",
     "MigrationRegistry",
+    "UniqueConstraintError",
 ]
 
 Node = dict
@@ -570,6 +575,10 @@ class DirectoryStorage:
             "vectorSearch": "exact",
         }
 
+    @property
+    def read_only(self) -> bool:
+        return self._read_only
+
     def _path(self, name: str) -> Path:
         return self._dir / name
 
@@ -738,6 +747,7 @@ class PolyGraph:
         self._on_orphan = on_orphan
         self._store: Optional[_NativeStore] = None
         self._store_directory: Optional[Path] = None
+        self._store_read_only = False
         self._removed_node_ids: set = set()
         self._removed_edge_ids: set = set()
         self._removed_vector_ids: set = set()
@@ -746,6 +756,7 @@ class PolyGraph:
         self._edge_type_definitions: dict[str, dict] = {}
         self._resource_limits: dict[str, int] = {}
         self.migrations = MigrationRegistry()
+        self._indexes: dict[str, dict] = {}
 
     @property
     def capabilities(self) -> dict:
@@ -791,18 +802,95 @@ class PolyGraph:
             "requiredFields": tuple(required_fields or ()),
         }
 
+    def define_index(
+        self,
+        name: str,
+        fields: Optional[Iterable[str]] = None,
+        node_type: Optional[str] = None,
+        unique: bool = False,
+        sparse: bool = False,
+    ) -> None:
+        """Define a single or compound node-data index.
+
+        The Python engine keeps the metadata and enforces uniqueness eagerly;
+        query execution retains a scan fallback until a native index planner is
+        available for the active adapter.
+        """
+        if isinstance(name, dict):
+            definition = name
+            name = definition.get("name", "")
+            fields = definition.get("fields")
+            node_type = definition.get("nodeType")
+            unique = bool(definition.get("unique", False))
+            sparse = bool(definition.get("sparse", False))
+        field_list = list(fields or ())
+        if not name or not field_list or len(set(field_list)) != len(field_list):
+            raise PolypackValueError("index name and unique fields must not be empty")
+        self._indexes[name] = {"name": name, "fields": field_list, "nodeType": node_type, "unique": unique, "sparse": sparse}
+        try:
+            self._validate_all_indexes()
+        except Exception:
+            self._indexes.pop(name, None)
+            raise
+
+    def drop_index(self, name: str) -> bool:
+        return self._indexes.pop(name, None) is not None
+
+    @property
+    def indexes(self) -> list[dict]:
+        return [dict(definition, fields=list(definition["fields"])) for definition in self._indexes.values()]
+
+    def _index_key(self, node: Node, definition: dict) -> Optional[str]:
+        if definition["nodeType"] and node["type"] != definition["nodeType"]:
+            return None
+        values = [_patch_get(node.get("data") or {}, field) for field in definition["fields"]]
+        if definition["sparse"] and any(value is None for value in values):
+            return None
+        return repr(values)
+
+    def _validate_all_indexes(self) -> None:
+        for definition in self._indexes.values():
+            if not definition["unique"]:
+                continue
+            seen: dict[str, str] = {}
+            for node in self._nodes.values():
+                key = self._index_key(node, definition)
+                if key is None:
+                    continue
+                previous = seen.get(key)
+                if previous is not None and previous != node["id"]:
+                    raise UniqueConstraintError(f"unique index {definition['name']} conflicts with node {previous}")
+                seen[key] = node["id"]
+
+    def _validate_index_candidate(self, candidate: Node) -> None:
+        for definition in self._indexes.values():
+            if not definition["unique"]:
+                continue
+            key = self._index_key(candidate, definition)
+            if key is None:
+                continue
+            for node in self._nodes.values():
+                if node["id"] == candidate["id"]:
+                    continue
+                if self._index_key(node, definition) == key:
+                    raise UniqueConstraintError(f"unique index {definition['name']} conflicts with node {node['id']}")
+
     def register_edge_type(
         self,
         edge_type: str,
         source_types: Optional[Iterable[str]] = None,
         target_types: Optional[Iterable[str]] = None,
         validate: Optional[Callable[[dict], Any]] = None,
+        cardinality: Optional[str] = None,
     ) -> None:
         _validate_id(edge_type, "edge type")
+        if cardinality not in (None, "one-to-one", "one-to-many", "many-to-one", "many-to-many"):
+            raise PolypackValueError("invalid edge cardinality")
         self._edge_type_definitions[edge_type] = {
             "sourceTypes": frozenset(source_types or ()),
             "targetTypes": frozenset(target_types or ()),
             "validate": validate,
+            "cardinality": cardinality,
         }
 
     def _validate_node_schema(self, node: Node) -> None:
@@ -822,10 +910,31 @@ class PolyGraph:
             return
         source = self._nodes.get(edge["source"])
         target = self._nodes.get(edge["target"])
+        if source is None or target is None:
+            raise PolypackValueError(f"edge {edge['id']} references a missing endpoint")
         if definition["sourceTypes"] and (source is None or source["type"] not in definition["sourceTypes"]):
             raise PolypackValueError(f"edge source type is not permitted for {edge['type']}")
         if definition["targetTypes"] and (target is None or target["type"] not in definition["targetTypes"]):
             raise PolypackValueError(f"edge target type is not permitted for {edge['type']}")
+        cardinality = definition["cardinality"]
+        if cardinality and cardinality != "many-to-many":
+            outgoing = 0
+            incoming = 0
+            for edges in self._edges.values():
+                for candidate in edges.values():
+                    if candidate["id"] == edge["id"] or candidate["type"] != edge["type"]:
+                        continue
+                    outgoing += candidate["source"] == edge["source"]
+                    incoming += candidate["target"] == edge["target"]
+            violates = (
+                cardinality == "one-to-one" and (outgoing > 0 or incoming > 0)
+            ) or (
+                cardinality == "one-to-many" and incoming > 0
+            ) or (
+                cardinality == "many-to-one" and outgoing > 0
+            )
+            if violates:
+                raise PolypackValueError(f"edge cardinality {cardinality} would be exceeded")
         validator = definition["validate"]
         if validator is not None and validator(dict(edge, data=dict(edge.get("data") or {}))) is False:
             raise PolypackValueError(f"edge validator rejected {edge['id']}")
@@ -875,6 +984,7 @@ class PolyGraph:
         else:
             stored["vector"] = None
         self._validate_node_schema(stored)
+        self._validate_index_candidate(stored)
         if stored["vector"] is None:
             self.vectors.remove(stored["id"])
         self._nodes[stored["id"]] = stored
@@ -910,6 +1020,7 @@ class PolyGraph:
         candidate["updatedAt"] = int(time.time() * 1000)
         candidate["revision"] = int(node.get("revision", 0)) + 1
         self._validate_node_schema(candidate)
+        self._validate_index_candidate(candidate)
         node.clear()
         node.update(candidate)
         if vector is not None:
@@ -939,7 +1050,7 @@ class PolyGraph:
             "vectorCount": vector_count,
             "dirtyRecordCount": len(self._removed_node_ids) + len(self._removed_edge_ids) + len(self._removed_vector_ids),
             "pendingPersistence": bool(self._removed_node_ids or self._removed_edge_ids or self._removed_vector_ids),
-            "indexCount": 1,
+            "indexCount": 1 + len(self._indexes),
             "memoryEstimateBytes": memory_estimate,
         }
 
@@ -1220,12 +1331,15 @@ class PolyGraph:
         """Attach a directory-backed store and load any existing state."""
         self._store = _NativeStore(DirectoryStorage(directory, read_only=read_only))
         self._store_directory = Path(directory)
+        self._store_read_only = read_only
         self._load_from_store()
 
     def checkpoint(self) -> None:
         """Persist pending mutations and compact the WAL into a snapshot."""
         if self._store is None:
             raise PolypackStorageError("no store open; call open_store(path) first")
+        if self._store_read_only:
+            raise PolypackStorageError("store was opened read-only")
         self.save()
         self._store.compact()
 
@@ -1233,6 +1347,8 @@ class PolyGraph:
         """Create a consistent directory backup after checkpointing the store."""
         if self._store is None or self._store_directory is None:
             raise PolypackStorageError("no store open; call open_store(path) first")
+        if self._store_read_only:
+            raise PolypackStorageError("store was opened read-only")
         self.checkpoint()
         destination_path = Path(destination)
         destination_path.mkdir(parents=True, exist_ok=True)
@@ -1248,10 +1364,12 @@ class PolyGraph:
         mutations made since the last explicit `save()` — including inside
         a `with PolyGraph.open(...) as g:` block — would be silently lost."""
         if self._store is not None:
-            self.save()
+            if not self._store_read_only:
+                self.save()
             self._store.close()
             self._store = None
             self._store_directory = None
+            self._store_read_only = False
 
     def save(self) -> None:
         """Persist the full current graph state through the attached store.
@@ -1524,7 +1642,15 @@ class GraphQuery:
 
     def explain(self) -> dict:
         """Describe the query stages and a coarse execution-cost estimate."""
-        stages = ["record-scan"]
+        fields = {field for op, field, _ in self._attributes}
+        node_type = self._node_types[0] if self._node_types and len(self._node_types) == 1 else None
+        selected = next(
+            (definition for definition in self._graph._indexes.values()
+             if (not definition["nodeType"] or definition["nodeType"] == node_type)
+             and all(field in fields for field in definition["fields"])),
+            None,
+        )
+        stages = [f"property-index({selected['name']})" if selected else "record-scan"]
         if self._node_types:
             stages.append(f"type-filter({','.join(self._node_types)})")
         if self._attributes:
@@ -1539,10 +1665,10 @@ class GraphQuery:
             stages.append(f"limit({self._limit})")
         loaded = len(self._graph._nodes)
         return {
-            "index": None,
+            "index": selected["name"] if selected else None,
             "stages": stages,
             "loadedRecords": loaded,
-            "estimatedCost": max(1, loaded),
+            "estimatedCost": max(1, loaded * (0.25 if selected else 1)),
         }
 
     def _match(self, node: Node) -> bool:
