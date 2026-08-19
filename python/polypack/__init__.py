@@ -41,6 +41,7 @@ class ConflictError(PolypackError):
 
 __all__ = [
     "PolyGraph",
+    "GraphTransaction",
     "GraphQuery",
     "ExactIndex",
     "HnswIndex",
@@ -472,6 +473,99 @@ def _edge_key(source: str, edge_type: str, target: str) -> str:
     return f"{source}::{edge_type}::{target}"
 
 
+class GraphTransaction:
+    """Checkpointed transaction for ``PolyGraph``.
+
+    Mutations are applied to the graph immediately, providing read-your-own-
+    writes. A failed callback or explicit rollback restores the graph and
+    vector index. This is an in-process transaction boundary; callers should
+    not concurrently mutate the same graph from another thread.
+    """
+
+    def __init__(self, graph: "PolyGraph") -> None:
+        if graph._active_transaction is not None:
+            raise PolypackValueError("nested transactions are not supported")
+        self.graph = graph
+        self._snapshot = {
+            "nodes": copy.deepcopy(graph._nodes),
+            "edges": copy.deepcopy(graph._edges),
+            "incoming": copy.deepcopy(graph._incoming),
+            "removed_nodes": set(graph._removed_node_ids),
+            "removed_edges": set(graph._removed_edge_ids),
+            "removed_vectors": set(graph._removed_vector_ids),
+            "vectors": list(graph.vectors.entries()),
+        }
+        self._closed = False
+        graph._active_transaction = self
+
+    def _restore(self) -> None:
+        self.graph._nodes = self._snapshot["nodes"]
+        self.graph._edges = self._snapshot["edges"]
+        self.graph._incoming = self._snapshot["incoming"]
+        self.graph._removed_node_ids = self._snapshot["removed_nodes"]
+        self.graph._removed_edge_ids = self._snapshot["removed_edges"]
+        self.graph._removed_vector_ids = self._snapshot["removed_vectors"]
+        self.graph.vectors.clear()
+        self.graph.vectors.add_many(self._snapshot["vectors"])
+
+    def commit(self) -> None:
+        if self._closed:
+            return
+        try:
+            if self.graph._store is not None:
+                self.graph.save()
+        except Exception:
+            self._restore()
+            self.graph._active_transaction = None
+            self._closed = True
+            raise
+        self.graph._active_transaction = None
+        self._closed = True
+
+    def rollback(self) -> None:
+        if self._closed:
+            return
+        self._restore()
+        self.graph._active_transaction = None
+        self._closed = True
+
+    def __enter__(self) -> "GraphTransaction":
+        return self
+
+    def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
+        if exc_type is None:
+            self.commit()
+        else:
+            self.rollback()
+
+    def add_node(self, node: Node) -> None:
+        self.graph.add_node(node)
+
+    def update_node(self, *args: Any, **kwargs: Any) -> Optional[Node]:
+        return self.graph.update_node(*args, **kwargs)
+
+    def patch_node(self, *args: Any, **kwargs: Any) -> Optional[Node]:
+        return self.graph.patch_node(*args, **kwargs)
+
+    def remove_node(self, *args: Any, **kwargs: Any) -> None:
+        self.graph.remove_node(*args, **kwargs)
+
+    def add_edge(self, *args: Any, **kwargs: Any) -> None:
+        self.graph.add_edge(*args, **kwargs)
+
+    def update_edge(self, *args: Any, **kwargs: Any) -> Optional[dict]:
+        return self.graph.update_edge(*args, **kwargs)
+
+    def remove_edge(self, *args: Any, **kwargs: Any) -> bool:
+        return self.graph.remove_edge(*args, **kwargs)
+
+    def get_node(self, id_: str) -> Optional[Node]:
+        return self.graph.get_node(id_)
+
+    def get_edges(self, source: str, edge_type: Optional[str] = None) -> list:
+        return self.graph.get_edges(source, edge_type)
+
+
 class PolyGraph:
     """In-memory property graph with vector search and ownership semantics."""
 
@@ -489,8 +583,17 @@ class PolyGraph:
         self._removed_node_ids: set = set()
         self._removed_edge_ids: set = set()
         self._removed_vector_ids: set = set()
+        self._active_transaction: Optional["GraphTransaction"] = None
 
     # ── context manager ──
+
+    def transaction(self, callback: Optional[Callable[["GraphTransaction"], Any]] = None) -> "GraphTransaction":
+        """Create a checkpointed transaction, or execute a callback in one."""
+        tx = GraphTransaction(self)
+        if callback is not None:
+            with tx:
+                return callback(tx)
+        return tx
 
     def __enter__(self) -> "PolyGraph":
         return self
@@ -678,6 +781,49 @@ class PolyGraph:
             if edge_type is None or e["type"] == edge_type:
                 out.append(dict(e, data=dict(e.get("data") or {})))
         return out
+
+    def update_edge(
+        self,
+        id_: str,
+        data: Optional[dict] = None,
+        ownership: Optional[Ownership] = None,
+        expected_revision: Optional[int] = None,
+    ) -> Optional[dict]:
+        """Update an edge conditionally by its independent ID."""
+        for edges in self._edges.values():
+            edge = edges.get(id_)
+            if edge is None:
+                continue
+            actual = int(edge.get("revision", 0))
+            if expected_revision is not None and actual != expected_revision:
+                raise ConflictError(f"record {id_} has revision {actual}, expected {expected_revision}")
+            if data is not None:
+                edge["data"] = dict(data)
+            if ownership is not None:
+                edge.setdefault("data", {})[_OWNERSHIP_KEY] = ownership
+            edge["revision"] = actual + 1
+            return dict(edge, data=dict(edge.get("data") or {}))
+        return None
+
+    def remove_edge(self, id_: str, expected_revision: Optional[int] = None) -> bool:
+        """Remove exactly one edge by independent ID, conditionally by revision."""
+        for source, edges in list(self._edges.items()):
+            edge = edges.get(id_)
+            if edge is None:
+                continue
+            actual = int(edge.get("revision", 0))
+            if expected_revision is not None and actual != expected_revision:
+                raise ConflictError(f"record {id_} has revision {actual}, expected {expected_revision}")
+            if self._ownership(edge) == "owned" and not self._has_other_owned_source(edge["target"], source):
+                self.remove_node(edge["target"])
+                return True
+            del edges[id_]
+            if not edges:
+                self._edges.pop(source, None)
+            self._decrement_incoming(edge["target"], source)
+            self._removed_edge_ids.add(id_)
+            return True
+        return False
 
     def get_edge_targets(self, source: str, edge_type: str) -> list:
         return [e["target"] for e in self.get_edges(source, edge_type)]

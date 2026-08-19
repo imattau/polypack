@@ -117,6 +117,68 @@ pub struct Graph {
     pending_batch_events: Vec<GraphChangeEvent>,
 
     warmed: bool,
+    transaction_active: bool,
+}
+
+struct GraphCheckpoint {
+    nodes: HashMap<String, Node>,
+    edges: HashMap<String, HashMap<String, EdgeEntry>>,
+    node_to_edge: HashMap<String, HashSet<String>>,
+    by_type: HashMap<String, HashSet<String>>,
+    hot_cache_order: LruList,
+    evicted_dirty_nodes: HashMap<String, Node>,
+    hnsw: HnswIndex,
+    dirty_nodes: HashSet<String>,
+    dirty_edges: HashSet<String>,
+    dirty_vectors: HashSet<String>,
+    removed_node_ids: HashSet<String>,
+    removed_edge_ids: HashSet<String>,
+    removed_vector_ids: HashSet<String>,
+    batch_depth: u32,
+    pending_batch_events: Vec<GraphChangeEvent>,
+    warmed: bool,
+}
+
+impl GraphCheckpoint {
+    fn capture(graph: &Graph) -> Self {
+        Self {
+            nodes: graph.nodes.clone(),
+            edges: graph.edges.clone(),
+            node_to_edge: graph.node_to_edge.clone(),
+            by_type: graph.by_type.clone(),
+            hot_cache_order: graph.hot_cache_order.clone(),
+            evicted_dirty_nodes: graph.evicted_dirty_nodes.clone(),
+            hnsw: graph.hnsw.clone(),
+            dirty_nodes: graph.dirty_nodes.clone(),
+            dirty_edges: graph.dirty_edges.clone(),
+            dirty_vectors: graph.dirty_vectors.clone(),
+            removed_node_ids: graph.removed_node_ids.clone(),
+            removed_edge_ids: graph.removed_edge_ids.clone(),
+            removed_vector_ids: graph.removed_vector_ids.clone(),
+            batch_depth: graph.batch_depth,
+            pending_batch_events: graph.pending_batch_events.clone(),
+            warmed: graph.warmed,
+        }
+    }
+
+    fn restore(self, graph: &mut Graph) {
+        graph.nodes = self.nodes;
+        graph.edges = self.edges;
+        graph.node_to_edge = self.node_to_edge;
+        graph.by_type = self.by_type;
+        graph.hot_cache_order = self.hot_cache_order;
+        graph.evicted_dirty_nodes = self.evicted_dirty_nodes;
+        graph.hnsw = self.hnsw;
+        graph.dirty_nodes = self.dirty_nodes;
+        graph.dirty_edges = self.dirty_edges;
+        graph.dirty_vectors = self.dirty_vectors;
+        graph.removed_node_ids = self.removed_node_ids;
+        graph.removed_edge_ids = self.removed_edge_ids;
+        graph.removed_vector_ids = self.removed_vector_ids;
+        graph.batch_depth = self.batch_depth;
+        graph.pending_batch_events = self.pending_batch_events;
+        graph.warmed = self.warmed;
+    }
 }
 
 impl Graph {
@@ -146,6 +208,7 @@ impl Graph {
             batch_depth: 0,
             pending_batch_events: Vec::new(),
             warmed: false,
+            transaction_active: false,
         })
     }
 
@@ -187,6 +250,39 @@ impl Graph {
     }
 
     // ── lifecycle ──
+
+    /// Execute a checkpointed transaction. Mutations performed by the
+    /// callback are immediately readable, but queued change events are only
+    /// released after persistence succeeds. Any callback or persistence error
+    /// restores the complete in-memory graph state.
+    pub fn transaction<F, T>(&mut self, callback: F) -> Result<T>
+    where
+        F: FnOnce(&mut Graph) -> Result<T>,
+    {
+        if self.transaction_active {
+            return Err(PolypackError::InvalidArgument("nested transactions are not supported".into()));
+        }
+        let checkpoint = GraphCheckpoint::capture(self);
+        self.transaction_active = true;
+        self.start_batch();
+        let result = callback(self);
+        match result {
+            Ok(value) => {
+                if let Err(error) = self.flush().and_then(|_| self.end_batch()) {
+                    self.transaction_active = false;
+                    checkpoint.restore(self);
+                    return Err(error);
+                }
+                self.transaction_active = false;
+                Ok(value)
+            }
+            Err(error) => {
+                self.transaction_active = false;
+                checkpoint.restore(self);
+                Err(error)
+            }
+        }
+    }
 
     /// Load persisted nodes, vectors, and edges into the hot working set.
     /// Idempotent until `clear()`. Mirrors `PolyGraph.warm`.
@@ -1024,6 +1120,93 @@ impl Graph {
         Ok(())
     }
 
+    /// Update edge data and/or ownership only when the current revision
+    /// matches `expected_revision`.
+    pub fn update_edge_if_revision(
+        &mut self,
+        id: &str,
+        data: Option<serde_json::Map<String, serde_json::Value>>,
+        ownership: Option<EdgeOwnership>,
+        expected_revision: u64,
+    ) -> Result<bool> {
+        let Some((source, key)) = self.edges.iter().find_map(|(source, edges)| {
+            edges.iter().find_map(|(key, edge)| (edge.id == id).then_some((source.clone(), key.clone())))
+        }) else {
+            return Ok(false);
+        };
+        let edge = self.edges.get_mut(&source).and_then(|edges| edges.get_mut(&key)).expect("edge location checked");
+        if edge.revision != expected_revision {
+            return Err(PolypackError::Conflict {
+                id: id.to_string(),
+                expected: expected_revision,
+                actual: edge.revision,
+            });
+        }
+        if data.is_some() {
+            edge.data = data;
+        }
+        if let Some(ownership) = ownership {
+            edge.ownership = ownership;
+        }
+        edge.revision = edge.revision.saturating_add(1);
+        let edge_type = edge.edge_type.clone();
+        let target = edge.target.clone();
+        self.dirty_edges.insert(id.to_string());
+        self.emit(GraphChangeEvent::EdgeUpdated { edge_id: id.to_string(), edge_type, source, target });
+        Ok(true)
+    }
+
+    /// Remove exactly one edge by independent ID when its revision matches.
+    pub fn remove_edge_if_revision(&mut self, id: &str, expected_revision: u64) -> Result<bool> {
+        let Some((source, key, edge)) = self.edges.iter().find_map(|(source, edges)| {
+            edges.iter().find_map(|(key, edge)| (edge.id == id).then_some((source.clone(), key.clone(), edge.clone())))
+        }) else {
+            return Ok(false);
+        };
+        if edge.revision != expected_revision {
+            return Err(PolypackError::Conflict {
+                id: id.to_string(),
+                expected: expected_revision,
+                actual: edge.revision,
+            });
+        }
+        if edge.ownership == EdgeOwnership::Owned && !self.has_other_owned_source(&edge.target, &source) {
+            self.remove_node(&edge.target)?;
+            return Ok(true);
+        }
+        if let Some(source_edges) = self.edges.get_mut(&source) {
+            source_edges.remove(&key);
+            if source_edges.is_empty() {
+                self.edges.remove(&source);
+            }
+        }
+        let still_connected = self
+            .edges
+            .get(&source)
+            .is_some_and(|edges| edges.values().any(|other| other.target == edge.target));
+        if let Some(sources) = self.node_to_edge.get_mut(&edge.target) {
+            if !still_connected {
+                sources.remove(&source);
+            }
+            if sources.is_empty() {
+                self.node_to_edge.remove(&edge.target);
+            }
+        }
+        self.dirty_edges.remove(id);
+        self.removed_edge_ids.insert(id.to_string());
+        self.emit(GraphChangeEvent::EdgeRemoved {
+            edge_type: edge.edge_type.clone(),
+            source: source.clone(),
+            target: edge.target.clone(),
+        });
+        if edge.ownership == EdgeOwnership::Shared && !self.has_other_incoming(&edge.target, &source) {
+            if let Some(cb) = self.on_orphan.as_mut() {
+                cb(&edge.target);
+            }
+        }
+        Ok(true)
+    }
+
     /// Direct access to the vector index. Mutating it directly (rather than
     /// through `add_node`/`update_node`, which handle this themselves)
     /// bypasses dirty-tracking — call `mark_vector_dirty` afterwards so the
@@ -1779,6 +1962,31 @@ mod tests {
     }
 
     #[test]
+    fn conditional_edge_update_rejects_stale_revision() {
+        let mut g = test_graph();
+        g.add_edge_with_id("claim-1", "a", "REL", "b", None, EdgeOwnership::Reference).unwrap();
+        let mut data = serde_json::Map::new();
+        data.insert("source".into(), serde_json::json!("archive"));
+        let err = g.update_edge_if_revision("claim-1", Some(data), None, 1).unwrap_err();
+        assert!(matches!(err, PolypackError::Conflict { expected: 1, actual: 0, .. }));
+        assert_eq!(g.get_edges("a", Some("REL"))[0].revision, 0);
+    }
+
+    #[test]
+    fn conditional_edge_remove_only_removes_the_requested_parallel_edge() {
+        let mut g = test_graph();
+        g.add_edge("a", "REL", "b", None, EdgeOwnership::Reference).unwrap();
+        g.add_edge_with_id("claim-2", "a", "REL", "b", None, EdgeOwnership::Reference).unwrap();
+
+        assert!(g.remove_edge_if_revision("claim-2", 1).is_err());
+        assert_eq!(g.get_edges("a", Some("REL")).len(), 2);
+        assert!(g.remove_edge_if_revision("claim-2", 0).unwrap());
+        let remaining = g.get_edges("a", Some("REL"));
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].id, "a::REL::b");
+    }
+
+    #[test]
     fn add_edge_allows_multiple_edge_types_between_same_pair() {
         let mut g = test_graph();
         g.add_edge("a", "LIKES", "b", None, EdgeOwnership::Reference).unwrap();
@@ -2177,6 +2385,33 @@ mod tests {
         assert_eq!(updated.data["profile"]["name"], serde_json::json!("new"));
         assert_eq!(updated.data["profile"]["views"], serde_json::json!(5.0));
         assert!(!updated.data.contains_key("temporary"));
+    }
+
+    #[test]
+    fn transaction_rolls_back_callback_errors_and_commits_events_after_success() {
+        let mut g = test_graph();
+        let error: Result<()> = g.transaction(|tx| {
+            tx.add_node(node("rolled-back"))?;
+            assert!(tx.get_node("rolled-back").is_some());
+            Err(PolypackError::InvalidArgument("abort".into()))
+        });
+        assert!(error.is_err());
+        assert!(g.get_node("rolled-back").is_none());
+
+        g.transaction(|tx| {
+            tx.add_node(node("committed"))?;
+            assert!(tx.get_node("committed").is_some());
+            Ok(())
+        })
+        .unwrap();
+        assert!(g.get_node("committed").is_some());
+    }
+
+    #[test]
+    fn transaction_rejects_nesting() {
+        let mut g = test_graph();
+        let result = g.transaction(|tx| tx.transaction(|_| Ok(())));
+        assert!(matches!(result, Err(PolypackError::InvalidArgument(_))));
     }
 
     #[test]
