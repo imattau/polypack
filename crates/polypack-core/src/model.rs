@@ -40,13 +40,18 @@ pub struct Node {
     pub vector: Option<Vec<f64>>,
     pub inserted_at: i64,
     pub updated_at: i64,
+    /// Monotonically increasing record revision used for optimistic writes.
+    /// Legacy snapshots that do not carry a revision decode as zero.
+    #[serde(default)]
+    pub revision: u64,
     /// Durable, syncable activation. Optional — absent until first reinforced.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub activation: Option<NodeActivation>,
 }
 
-/// A directed property-graph edge. `id` is expected to be [`edge_id`] of
-/// `(source, edge_type, target)`; `validate_edge` checks this invariant.
+/// A directed property-graph edge. `id` is an independent durable identity;
+/// [`edge_id`] remains available as a deterministic legacy helper for callers
+/// that want one ID per source/type/target triple.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Edge {
@@ -58,6 +63,10 @@ pub struct Edge {
     #[serde(default)]
     pub data: Option<serde_json::Map<String, serde_json::Value>>,
     pub created_at: i64,
+    /// Monotonically increasing record revision used for optimistic writes.
+    /// Legacy snapshots that do not carry a revision decode as zero.
+    #[serde(default)]
+    pub revision: u64,
 }
 
 /// A single stored vector, keyed by node id.
@@ -134,16 +143,12 @@ pub fn validate_activation(a: &NodeActivation) -> Result<()> {
     Ok(())
 }
 
-/// Validate a single edge envelope.
+/// Validate a single edge envelope. Edge identity is independent of its
+/// source/type/target tuple, so parallel edges are valid.
 pub fn validate_edge(e: &Edge) -> Result<()> {
     if e.source.is_empty() || e.edge_type.is_empty() || e.target.is_empty() {
         return Err(PolypackError::InvalidArgument(
             "edge source, type, and target must not be empty".into(),
-        ));
-    }
-    if e.source.contains("::") || e.edge_type.contains("::") {
-        return Err(PolypackError::RangeOutOfBounds(
-            "edge source and type must not contain \"::\"".into(),
         ));
     }
     if e.created_at < 0 {
@@ -191,6 +196,7 @@ mod tests {
             vector: None,
             inserted_at: 1,
             updated_at: 1,
+            revision: 0,
             activation: None,
         }
     }
@@ -241,17 +247,15 @@ mod tests {
     #[test]
     fn edge_identity_and_reserved_separator() {
         assert_eq!(edge_id("a", "REL", "b"), "a::REL::b");
-        let mut e = Edge {
+        let e = Edge {
             id: edge_id("a::x", "REL", "b"),
             source: "a::x".into(),
             target: "b".into(),
             edge_type: "REL".into(),
             data: None,
             created_at: 1,
+            revision: 0,
         };
-        assert!(matches!(validate_edge(&e), Err(PolypackError::RangeOutOfBounds(_))));
-        e.source = "a".into();
-        e.id = edge_id("a", "REL", "b");
         assert!(validate_edge(&e).is_ok());
     }
 
@@ -264,6 +268,7 @@ mod tests {
             vector: Some(vec![0.1, 0.2]),
             inserted_at: 7,
             updated_at: 8,
+            revision: 12,
             activation: None,
         };
         let s = serde_json::to_string(&n).unwrap();
@@ -272,6 +277,7 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&s).unwrap();
         assert_eq!(parsed["type"], json!("doc"));
         assert_eq!(parsed["insertedAt"], json!(7));
+        assert_eq!(parsed["revision"], json!(12));
     }
 
     #[test]

@@ -681,7 +681,7 @@ mod tests {
         for (k, v) in data {
             map.insert((*k).to_string(), v.clone());
         }
-        Node { id: id.to_string(), node_type: node_type.to_string(), data: map, vector: None, inserted_at: 1, updated_at: 1, activation: None }
+        Node { id: id.to_string(), node_type: node_type.to_string(), data: map, vector: None, inserted_at: 1, updated_at: 1, revision: 0, activation: None }
     }
 
     struct Fixture {
@@ -705,6 +705,8 @@ mod tests {
             self.edges.entry(source.to_string()).or_default().insert(
                 inner,
                 EdgeEntry {
+                    id: format!("{source}::{edge_type}::{target}"),
+                    revision: 0,
                     target: target.to_string(),
                     edge_type: edge_type.to_string(),
                     data: None,

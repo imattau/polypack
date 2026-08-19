@@ -33,6 +33,12 @@ from ._core import (
     PolypackVersionError,
 )
 
+
+class ConflictError(PolypackError):
+    """Raised when a conditional write observes a stale record revision."""
+
+    pass
+
 __all__ = [
     "PolyGraph",
     "GraphQuery",
@@ -51,6 +57,7 @@ __all__ = [
     "PolypackVersionError",
     "PolypackCorruptDataError",
     "PolypackStorageError",
+    "ConflictError",
 ]
 
 Node = dict
@@ -92,6 +99,42 @@ def _validate_id(id_: str, name: str = "id") -> None:
 def _validate_timestamp(ts: Any) -> None:
     if not isinstance(ts, (int, float)) or not math.isfinite(float(ts)) or ts < 0:
         raise PolypackValueError("timestamps must be finite non-negative numbers")
+
+
+def _patch_parts(path: str) -> list[str]:
+    if not isinstance(path, str) or not path or any(not part for part in path.split(".")):
+        raise PolypackValueError("patch paths must not be empty")
+    return path.split(".")
+
+
+def _patch_set(root: dict, path: str, value: Any) -> None:
+    parts = _patch_parts(path)
+    current = root
+    for part in parts[:-1]:
+        if not isinstance(current.get(part), dict):
+            current[part] = {}
+        current = current[part]
+    current[parts[-1]] = copy.deepcopy(value)
+
+
+def _patch_unset(root: dict, path: str) -> None:
+    parts = _patch_parts(path)
+    current: Any = root
+    for part in parts[:-1]:
+        if not isinstance(current, dict) or part not in current:
+            return
+        current = current[part]
+    if isinstance(current, dict):
+        current.pop(parts[-1], None)
+
+
+def _patch_get(root: dict, path: str) -> Any:
+    current: Any = root
+    for part in _patch_parts(path):
+        if not isinstance(current, dict) or part not in current:
+            return None
+        current = current[part]
+    return current
 
 
 def _cosine(a: Sequence[float], b: Sequence[float]) -> float:
@@ -416,6 +459,7 @@ def _copy_node(node: Node) -> Node:
         "vector": None if node.get("vector") is None else list(node.get("vector")),
         "insertedAt": node["insertedAt"],
         "updatedAt": node["updatedAt"],
+        "revision": int(node.get("revision", 0)),
     }
     if node.get("activation") is not None:
         out["activation"] = dict(node["activation"])
@@ -471,7 +515,11 @@ class PolyGraph:
             "data": dict(node.get("data") or {}),
             "insertedAt": node["insertedAt"],
             "updatedAt": node["updatedAt"],
+            "revision": int(node.get("revision", 0)),
         }
+        previous = self._nodes.get(stored["id"])
+        if previous is not None:
+            stored["revision"] = int(previous.get("revision", 0)) + 1
         if node.get("activation") is not None:
             stored["activation"] = _validate_activation(node["activation"])
         if node.get("vector") is not None:
@@ -487,11 +535,22 @@ class PolyGraph:
         else:
             self._removed_vector_ids.add(stored["id"])
 
-    def update_node(self, id_: str, data: dict, vector: Any = None, activation: Optional[dict] = None) -> Optional[Node]:
+    def update_node(
+        self,
+        id_: str,
+        data: dict,
+        vector: Any = None,
+        activation: Optional[dict] = None,
+        expected_revision: Optional[int] = None,
+    ) -> Optional[Node]:
         """Shallow-merge `data` into a loaded node and optionally replace its vector or durable activation. Returns `None` if the node isn't loaded."""
         node = self._nodes.get(id_)
         if node is None:
             return None
+        if expected_revision is not None and int(node.get("revision", 0)) != expected_revision:
+            raise ConflictError(
+                f"record {id_} has revision {node.get('revision', 0)}, expected {expected_revision}"
+            )
         node["data"].update(data or {})
         if vector is not None:
             node["vector"] = _validate_vector(vector)
@@ -500,16 +559,58 @@ class PolyGraph:
         if activation is not None:
             node["activation"] = _validate_activation(activation)
         node["updatedAt"] = int(time.time() * 1000)
+        node["revision"] = int(node.get("revision", 0)) + 1
         return _copy_node(node)
 
     def get_node(self, id_: str) -> Optional[Node]:
         node = self._nodes.get(id_)
         return None if node is None else _copy_node(node)
 
+    def patch_node(
+        self,
+        id_: str,
+        set: Optional[dict] = None,
+        unset: Optional[Iterable[str]] = None,
+        increment: Optional[dict] = None,
+        expected_revision: Optional[int] = None,
+    ) -> Optional[Node]:
+        """Apply dotted-path set/unset/increment operations atomically to a node."""
+        node = self._nodes.get(id_)
+        if node is None:
+            return None
+        actual = int(node.get("revision", 0))
+        if expected_revision is not None and actual != expected_revision:
+            raise ConflictError(f"record {id_} has revision {actual}, expected {expected_revision}")
+
+        candidate = copy.deepcopy(node.get("data") or {})
+        for path, value in (set or {}).items():
+            _patch_set(candidate, path, value)
+        for path in unset or ():
+            _patch_unset(candidate, path)
+        for path, delta in (increment or {}).items():
+            if not isinstance(delta, (int, float)) or not math.isfinite(float(delta)):
+                raise PolypackValueError("increment values must be finite numbers")
+            current = _patch_get(candidate, path)
+            if current is None:
+                current = 0
+            if not isinstance(current, (int, float)) or isinstance(current, bool) or not math.isfinite(float(current)):
+                raise PolypackValueError("increment targets must be numeric")
+            _patch_set(candidate, path, float(current) + float(delta))
+
+        node["data"] = candidate
+        node["updatedAt"] = int(time.time() * 1000)
+        node["revision"] = actual + 1
+        return _copy_node(node)
+
     def get_nodes(self, ids: Iterable[str]) -> list:
         return [self.get_node(i) for i in ids if self.get_node(i) is not None]
 
-    def remove_node(self, id_: str, _visited: Optional[set] = None) -> None:
+    def remove_node(
+        self,
+        id_: str,
+        _visited: Optional[set] = None,
+        expected_revision: Optional[int] = None,
+    ) -> None:
         """Remove `id_` and cascade through 'owned' edges. A target of an 'owned' edge is also
         removed unless another 'owned' source keeps it alive. Cyclic owned edges are detected
         so each node is only removed once; `_visited` is an internal recursion argument."""
@@ -520,6 +621,10 @@ class PolyGraph:
         node = self._nodes.get(id_)
         if node is None:
             return
+        if expected_revision is not None and int(node.get("revision", 0)) != expected_revision:
+            raise ConflictError(
+                f"record {id_} has revision {node.get('revision', 0)}, expected {expected_revision}"
+            )
         for edge in list(self._edges.get(id_, {}).values()):
             if self._ownership(edge) == "owned" and not self._has_other_owned_source(edge["target"], id_):
                 self.remove_node(edge["target"], visited)
@@ -539,23 +644,28 @@ class PolyGraph:
         data: Optional[dict] = None,
         ownership: Optional[Ownership] = None,
         created_at: Optional[int] = None,
+        revision: int = 0,
+        id: Optional[str] = None,
     ) -> None:
         """Add one directed edge. A no-op if an edge with the same source/type/target already exists."""
         _validate_id(source, "edge source")
         _validate_id(edge_type, "edge type")
         _validate_id(target, "edge target")
-        key = _edge_key(source, edge_type, target)
+        key = id or _edge_key(source, edge_type, target)
+        _validate_id(key, "edge id")
         if key in self._edges.get(source, {}):
             return
         full = dict(data or {})
         if ownership is not None:
             full[_OWNERSHIP_KEY] = ownership
         self._edges.setdefault(source, {})[key] = {
+            "id": key,
             "source": source,
             "type": edge_type,
             "target": target,
             "data": full,
             "createdAt": created_at if created_at is not None else 0,
+            "revision": int(revision),
         }
         incoming = self._incoming.setdefault(target, {})
         incoming[source] = incoming.get(source, 0) + 1
@@ -667,12 +777,13 @@ class PolyGraph:
             for e in edge_map.values():
                 edges.append(
                     {
-                        "id": _edge_key(e["source"], e["type"], e["target"]),
+                        "id": e["id"] if "id" in e else _edge_key(e["source"], e["type"], e["target"]),
                         "source": e["source"],
                         "target": e["target"],
                         "type": e["type"],
                         "data": dict(e.get("data") or {}),
                         "createdAt": e.get("createdAt", 0),
+                        "revision": int(e.get("revision", 0)),
                     }
                 )
         vectors = [{"id": id_, "vector": vector} for id_, vector in self.vectors.entries()]
@@ -703,6 +814,8 @@ class PolyGraph:
                 edge["target"],
                 data,
                 created_at=edge.get("createdAt"),
+                revision=edge.get("revision", 0),
+                id=edge.get("id"),
             )
         for id_, vector in self._store.all_vectors():
             if id_ not in self._nodes:
@@ -1021,12 +1134,13 @@ class GraphQuery:
                 for e in edge_map.values():
                     edges.append(
                         {
-                            "id": _edge_key(e["source"], e["type"], e["target"]),
+                            "id": e["id"] if "id" in e else _edge_key(e["source"], e["type"], e["target"]),
                             "source": e["source"],
                             "target": e["target"],
                             "type": e["type"],
                             "data": dict(e.get("data") or {}),
                             "createdAt": e.get("createdAt", 0),
+                            "revision": int(e.get("revision", 0)),
                         }
                     )
             return list(_execute_query_plan(nodes, edges, plan))

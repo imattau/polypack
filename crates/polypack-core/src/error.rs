@@ -8,6 +8,7 @@ pub enum PolypackError {
     InvalidArgument(String),
     DimensionMismatch { expected: usize, got: usize },
     RangeOutOfBounds(String),
+    Conflict { id: String, expected: u64, actual: u64 },
     Closed,
     FormatVersion(u64),
     CorruptData(String),
@@ -23,6 +24,9 @@ impl fmt::Display for PolypackError {
                 write!(f, "dimension_mismatch: expected {expected} dimensions, got {got}")
             }
             PolypackError::RangeOutOfBounds(m) => write!(f, "range_out_of_bounds: {m}"),
+            PolypackError::Conflict { id, expected, actual } => {
+                write!(f, "conflict: record {id} has revision {actual}, expected {expected}")
+            }
             PolypackError::Closed => write!(f, "closed: operation on a closed store"),
             PolypackError::FormatVersion(v) => write!(f, "format_version: unsupported version {v}"),
             PolypackError::CorruptData(m) => write!(f, "corrupt_data: {m}"),
@@ -41,6 +45,7 @@ impl PolypackError {
             PolypackError::InvalidArgument(_) => "invalid_argument",
             PolypackError::DimensionMismatch { .. } => "dimension_mismatch",
             PolypackError::RangeOutOfBounds(_) => "range_out_of_bounds",
+            PolypackError::Conflict { .. } => "conflict",
             PolypackError::Closed => "closed",
             PolypackError::FormatVersion(_) => "format_version",
             PolypackError::CorruptData(_) => "corrupt_data",

@@ -20,6 +20,42 @@ use crate::lru::LruList;
 use crate::persisted_query::PersistedGraphQuery;
 use crate::query::GraphQuery;
 
+fn set_data_path(root: &mut serde_json::Value, path: &[&str], value: serde_json::Value) -> Result<()> {
+    let Some(object) = root.as_object_mut() else {
+        return Err(PolypackError::InvalidArgument("node data must be an object".into()));
+    };
+    if path.len() == 1 {
+        object.insert(path[0].to_string(), value);
+        return Ok(());
+    }
+    let child = object
+        .entry(path[0].to_string())
+        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+    if !child.is_object() {
+        *child = serde_json::Value::Object(serde_json::Map::new());
+    }
+    set_data_path(child, &path[1..], value)
+}
+
+fn unset_data_path(root: &mut serde_json::Value, path: &[&str]) {
+    let Some(object) = root.as_object_mut() else { return };
+    if path.len() == 1 {
+        object.remove(path[0]);
+        return;
+    }
+    if let Some(child) = object.get_mut(path[0]) {
+        unset_data_path(child, &path[1..]);
+    }
+}
+
+fn get_data_path<'a>(root: &'a serde_json::Value, path: &[&str]) -> Option<&'a serde_json::Value> {
+    let object = root.as_object()?;
+    if path.len() == 1 {
+        return object.get(path[0]);
+    }
+    get_data_path(object.get(path[0])?, &path[1..])
+}
+
 type OnChangeCallback = Box<dyn FnMut(GraphChangeEvent)>;
 type OnOrphanCallback = Box<dyn FnMut(&str)>;
 
@@ -216,14 +252,12 @@ impl Graph {
         self.node_to_edge.clear();
         let all_edges = self.store.edges_snapshot()?;
         for (id, edge) in all_edges {
-            if id != edge_id(&edge.source, &edge.edge_type, &edge.target) {
-                return Err(PolypackError::CorruptData(format!("invalid persisted edge id: {id}")));
-            }
+            let legacy_key = format!("{}::{}", edge.edge_type, edge.target);
+            let key = if id == edge_id(&edge.source, &edge.edge_type, &edge.target) { legacy_key } else { id.clone() };
             let (ownership, data) = decode_ownership(edge.data);
-            let inner = format!("{}::{}", edge.edge_type, edge.target);
             self.edges.entry(edge.source.clone()).or_default().insert(
-                inner,
-                EdgeEntry { target: edge.target.clone(), edge_type: edge.edge_type, data, ownership },
+                key,
+                EdgeEntry { id, revision: edge.revision, target: edge.target.clone(), edge_type: edge.edge_type, data, ownership },
             );
             self.node_to_edge.entry(edge.target).or_default().insert(edge.source);
         }
@@ -270,15 +304,17 @@ impl Graph {
         let put_edges: Vec<Edge> = dirty_edge_ids
             .iter()
             .filter_map(|id| {
-                let (source, inner) = id.split_once("::")?;
-                let entry = self.edges.get(source)?.get(inner)?;
+                let (source, entry) = self.edges.iter().find_map(|(source, edges)| {
+                    edges.values().find(|entry| entry.id == *id).map(|entry| (source, entry))
+                })?;
                 Some(Edge {
                     id: id.clone(),
-                    source: source.to_string(),
+                    source: source.clone(),
                     target: entry.target.clone(),
                     edge_type: entry.edge_type.clone(),
                     data: encode_ownership(entry.data.clone(), entry.ownership),
                     created_at: now_millis(),
+                    revision: entry.revision,
                 })
             })
             .collect();
@@ -372,12 +408,13 @@ impl Graph {
         for (source, inner) in &self.edges {
             for entry in inner.values() {
                 put_edges.push(Edge {
-                    id: edge_id(source, &entry.edge_type, &entry.target),
+                    id: entry.id.clone(),
                     source: source.clone(),
                     target: entry.target.clone(),
                     edge_type: entry.edge_type.clone(),
                     data: encode_ownership(entry.data.clone(), entry.ownership),
                     created_at: now_millis(),
+                    revision: entry.revision,
                 });
             }
         }
@@ -563,6 +600,7 @@ impl Graph {
                 node.activation = activation.clone();
             }
             node.updated_at = now_millis();
+            node.revision = node.revision.saturating_add(1);
             node.node_type.clone()
         };
 
@@ -572,6 +610,97 @@ impl Graph {
             self.dirty_vectors.insert(id.to_string());
         }
 
+        self.touch_hot_cache(id);
+        self.mark_dirty(id);
+        self.emit(GraphChangeEvent::NodeUpdated { node_id: id.to_string(), node_type });
+        Ok(self.nodes.get(id))
+    }
+
+    /// Update a node only when its current revision matches `expected_revision`.
+    /// The revision check happens before validation or mutation.
+    pub fn update_node_if_revision(
+        &mut self,
+        id: &str,
+        expected_revision: u64,
+        data: serde_json::Map<String, serde_json::Value>,
+        vector: Option<Vec<f64>>,
+        activation: Option<NodeActivation>,
+    ) -> Result<Option<&Node>> {
+        let Some(node) = self.nodes.get(id) else { return Ok(None) };
+        if node.revision != expected_revision {
+            return Err(PolypackError::Conflict {
+                id: id.to_string(),
+                expected: expected_revision,
+                actual: node.revision,
+            });
+        }
+        self.update_node(id, data, vector, activation)
+    }
+
+    /// Apply dotted-path `set`, `unset`, and numeric `increment` operations to
+    /// node data. All operations are evaluated against a copy before the node
+    /// is mutated, and an optional revision check is performed first.
+    pub fn patch_node(
+        &mut self,
+        id: &str,
+        set: serde_json::Map<String, serde_json::Value>,
+        unset: Vec<String>,
+        increment: serde_json::Map<String, serde_json::Value>,
+        expected_revision: Option<u64>,
+    ) -> Result<Option<&Node>> {
+        let Some(existing) = self.nodes.get(id) else { return Ok(None) };
+        if let Some(expected) = expected_revision {
+            if existing.revision != expected {
+                return Err(PolypackError::Conflict {
+                    id: id.to_string(),
+                    expected,
+                    actual: existing.revision,
+                });
+            }
+        }
+
+        let mut candidate = serde_json::Value::Object(existing.data.clone());
+        for (path, value) in set {
+            let parts: Vec<&str> = path.split('.').collect();
+            if parts.iter().any(|part| part.is_empty()) {
+                return Err(PolypackError::InvalidArgument("patch paths must not be empty".into()));
+            }
+            set_data_path(&mut candidate, &parts, value)?;
+        }
+        for path in unset {
+            let parts: Vec<&str> = path.split('.').collect();
+            if parts.iter().any(|part| part.is_empty()) {
+                return Err(PolypackError::InvalidArgument("patch paths must not be empty".into()));
+            }
+            unset_data_path(&mut candidate, &parts);
+        }
+        for (path, delta) in increment {
+            let parts: Vec<&str> = path.split('.').collect();
+            if parts.iter().any(|part| part.is_empty()) {
+                return Err(PolypackError::InvalidArgument("patch paths must not be empty".into()));
+            }
+            let delta = delta
+                .as_f64()
+                .ok_or_else(|| PolypackError::InvalidArgument("increment values must be numeric".into()))?;
+            let current = match get_data_path(&candidate, &parts) {
+                None => 0.0,
+                Some(value) => value
+                    .as_f64()
+                    .ok_or_else(|| PolypackError::InvalidArgument("increment targets must be numeric".into()))?,
+            };
+            if !current.is_finite() || !delta.is_finite() {
+                return Err(PolypackError::InvalidArgument("increment values must be finite".into()));
+            }
+            set_data_path(&mut candidate, &parts, serde_json::json!(current + delta))?;
+        }
+
+        let node_type = {
+            let node = self.nodes.get_mut(id).expect("node checked above");
+            node.data = candidate.as_object().cloned().expect("patch root is an object");
+            node.updated_at = now_millis();
+            node.revision = node.revision.saturating_add(1);
+            node.node_type.clone()
+        };
         self.touch_hot_cache(id);
         self.mark_dirty(id);
         self.emit(GraphChangeEvent::NodeUpdated { node_id: id.to_string(), node_type });
@@ -662,6 +791,19 @@ impl Graph {
         self.remove_node_cascade(id, &mut visited)
     }
 
+    /// Remove a node only when its current revision matches `expected_revision`.
+    pub fn remove_node_if_revision(&mut self, id: &str, expected_revision: u64) -> Result<()> {
+        let Some(node) = self.nodes.get(id) else { return Ok(()) };
+        if node.revision != expected_revision {
+            return Err(PolypackError::Conflict {
+                id: id.to_string(),
+                expected: expected_revision,
+                actual: node.revision,
+            });
+        }
+        self.remove_node(id)
+    }
+
     fn remove_node_cascade(&mut self, id: &str, visited: &mut HashSet<String>) -> Result<()> {
         if !visited.insert(id.to_string()) {
             return Ok(());
@@ -739,7 +881,7 @@ impl Graph {
 
     /// Mirrors `PolyGraph.recordRemovedEdge`.
     fn record_removed_edge(&mut self, source: &str, edge: &EdgeEntry) {
-        let id = edge_id(source, &edge.edge_type, &edge.target);
+        let id = edge.id.clone();
         self.dirty_edges.remove(&id);
         self.removed_edge_ids.insert(id);
         self.emit(GraphChangeEvent::EdgeRemoved {
@@ -826,12 +968,55 @@ impl Graph {
         }
         source_edges.insert(
             inner,
-            EdgeEntry { target: target.to_string(), edge_type: edge_type.to_string(), data, ownership },
+                EdgeEntry { id: id.clone(), revision: 0, target: target.to_string(), edge_type: edge_type.to_string(), data, ownership },
         );
         self.node_to_edge.entry(target.to_string()).or_default().insert(source.to_string());
         self.dirty_edges.insert(id.clone());
         self.emit(GraphChangeEvent::EdgeAdded {
             edge_id: id,
+            edge_type: edge_type.to_string(),
+            source: source.to_string(),
+            target: target.to_string(),
+        });
+        Ok(())
+    }
+
+    /// Add a directed edge with an explicit independent identity. Unlike
+    /// [`add_edge`], this permits parallel edges with the same
+    /// source/type/target triple.
+    pub fn add_edge_with_id(
+        &mut self,
+        id: &str,
+        source: &str,
+        edge_type: &str,
+        target: &str,
+        data: Option<serde_json::Map<String, serde_json::Value>>,
+        ownership: EdgeOwnership,
+    ) -> Result<()> {
+        if id.is_empty() || source.is_empty() || edge_type.is_empty() || target.is_empty() {
+            return Err(PolypackError::InvalidArgument("edge id, source, type, and target must not be empty".into()));
+        }
+        if self.edges.values().any(|edges| edges.values().any(|edge| edge.id == id)) {
+            return Ok(());
+        }
+        self.removed_edge_ids.remove(id);
+        let legacy_id = edge_id(source, edge_type, target);
+        let key = if id == legacy_id { format!("{edge_type}::{target}") } else { id.to_string() };
+        self.edges.entry(source.to_string()).or_default().insert(
+            key,
+            EdgeEntry {
+                id: id.to_string(),
+                revision: 0,
+                target: target.to_string(),
+                edge_type: edge_type.to_string(),
+                data,
+                ownership,
+            },
+        );
+        self.node_to_edge.entry(target.to_string()).or_default().insert(source.to_string());
+        self.dirty_edges.insert(id.to_string());
+        self.emit(GraphChangeEvent::EdgeAdded {
+            edge_id: id.to_string(),
             edge_type: edge_type.to_string(),
             source: source.to_string(),
             target: target.to_string(),
@@ -928,15 +1113,19 @@ impl Graph {
         let remove_all = edge_type.is_none() && target.is_none();
         for edge in &removed {
             if !remove_all {
-                let inner = format!("{}::{}", edge.edge_type, edge.target);
                 if let Some(source_edges) = self.edges.get_mut(source) {
-                    source_edges.remove(&inner);
+                    if let Some(key) = source_edges
+                        .iter()
+                        .find_map(|(key, current)| (current.id == edge.id).then_some(key.clone()))
+                    {
+                        source_edges.remove(&key);
+                    }
                 }
             }
             if let Some(set) = self.node_to_edge.get_mut(&edge.target) {
                 set.remove(source);
             }
-            let id = edge_id(source, &edge.edge_type, &edge.target);
+            let id = edge.id.clone();
             self.dirty_edges.remove(&id);
             self.removed_edge_ids.insert(id);
             self.emit(GraphChangeEvent::EdgeRemoved {
@@ -1053,12 +1242,13 @@ impl Graph {
         for (source, inner) in &self.edges {
             for entry in inner.values() {
                 edges.push(Edge {
-                    id: edge_id(source, &entry.edge_type, &entry.target),
+                    id: entry.id.clone(),
                     source: source.clone(),
                     target: entry.target.clone(),
                     edge_type: entry.edge_type.clone(),
                     data: entry.data.clone(),
                     created_at: 0,
+                    revision: entry.revision,
                 });
             }
         }
@@ -1266,12 +1456,15 @@ impl Graph {
 
     /// Mirrors `PolyGraph.insertNode`: assumes the node has already passed
     /// `validate_node`.
-    fn insert_node(&mut self, node: Node) {
+    fn insert_node(&mut self, mut node: Node) {
         let id = node.id.clone();
         let node_type = node.node_type.clone();
         let vector = node.vector.clone();
 
         if self.nodes.contains_key(&id) {
+            if let Some(previous) = self.nodes.get(&id) {
+                node.revision = previous.revision.saturating_add(1);
+            }
             self.unindex_node(&id);
         }
         if vector.is_none() {
@@ -1391,6 +1584,7 @@ mod tests {
             vector: None,
             inserted_at: 1,
             updated_at: 1,
+            revision: 0,
             activation: None,
         }
     }
@@ -1426,7 +1620,7 @@ mod tests {
         let inner = format!("{}::{}", "REL", "b");
         g.edges.entry("a".into()).or_default().insert(
             inner,
-            EdgeEntry { target: "b".into(), edge_type: "REL".into(), data: None, ownership: EdgeOwnership::Reference },
+            EdgeEntry { id: "a::REL::b".into(), revision: 0, target: "b".into(), edge_type: "REL".into(), data: None, ownership: EdgeOwnership::Reference },
         );
         g.dirty_edges.insert(id.clone());
 
@@ -1566,6 +1760,22 @@ mod tests {
         assert_eq!(entry.ownership, EdgeOwnership::Owned);
         assert!(entry.data.is_some());
         assert_eq!(g.edges["a"].len(), 1);
+    }
+
+    #[test]
+    fn explicit_edge_ids_allow_parallel_edges_and_round_trip() {
+        let mut g = test_graph();
+        g.add_node(node("a")).unwrap();
+        g.add_node(node("b")).unwrap();
+        g.add_edge("a", "REL", "b", None, EdgeOwnership::Reference).unwrap();
+        g.add_edge_with_id("claim-2", "a", "REL", "b", None, EdgeOwnership::Reference).unwrap();
+        assert_eq!(g.get_edges("a", Some("REL")).len(), 2);
+
+        g.flush().unwrap();
+        g.clear();
+        g.warm().unwrap();
+        let ids: HashSet<String> = g.get_edges("a", Some("REL")).iter().map(|edge| edge.id.clone()).collect();
+        assert_eq!(ids, HashSet::from(["a::REL::b".into(), "claim-2".into()]));
     }
 
     #[test]
@@ -1908,6 +2118,7 @@ mod tests {
         let updated = g.update_node("a", patch, None, None).unwrap().unwrap();
 
         assert_eq!(updated.data.get("title"), Some(&serde_json::json!("hello")));
+        assert_eq!(updated.revision, 1);
         assert!(g.dirty_nodes.contains("a"));
     }
 
@@ -1924,6 +2135,48 @@ mod tests {
 
         assert_eq!(updated.data.get("kept"), Some(&serde_json::json!(1)));
         assert_eq!(updated.data.get("added"), Some(&serde_json::json!(2)));
+    }
+
+    #[test]
+    fn conditional_update_rejects_stale_revision_without_mutation() {
+        let mut g = test_graph();
+        g.add_node(node("a")).unwrap();
+        let mut patch = serde_json::Map::new();
+        patch.insert("title".into(), serde_json::json!("new"));
+
+        let err = g.update_node_if_revision("a", 1, patch, None, None).unwrap_err();
+        assert!(matches!(err, PolypackError::Conflict { expected: 1, actual: 0, .. }));
+        assert!(g.get_node("a").unwrap().data.get("title").is_none());
+    }
+
+    #[test]
+    fn conditional_remove_rejects_stale_revision_without_removing() {
+        let mut g = test_graph();
+        g.add_node(node("a")).unwrap();
+
+        let err = g.remove_node_if_revision("a", 1).unwrap_err();
+        assert!(matches!(err, PolypackError::Conflict { expected: 1, actual: 0, .. }));
+        assert!(g.get_node("a").is_some());
+    }
+
+    #[test]
+    fn patch_node_applies_nested_set_unset_and_increment_atomically() {
+        let mut g = test_graph();
+        let mut n = node("a");
+        n.data.insert("profile".into(), serde_json::json!({"name": "old", "views": 2}));
+        n.data.insert("temporary".into(), serde_json::json!(true));
+        g.add_node(n).unwrap();
+
+        let mut set = serde_json::Map::new();
+        set.insert("profile.name".into(), serde_json::json!("new"));
+        let mut increment = serde_json::Map::new();
+        increment.insert("profile.views".into(), serde_json::json!(3));
+        let updated = g.patch_node("a", set, vec!["temporary".into()], increment, Some(0)).unwrap().unwrap();
+
+        assert_eq!(updated.revision, 1);
+        assert_eq!(updated.data["profile"]["name"], serde_json::json!("new"));
+        assert_eq!(updated.data["profile"]["views"], serde_json::json!(5.0));
+        assert!(!updated.data.contains_key("temporary"));
     }
 
     #[test]

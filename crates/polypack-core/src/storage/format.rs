@@ -110,7 +110,7 @@ fn node_to_msg(node: &Node) -> Msg {
         .as_ref()
         .map(|v| Msg::Array(v.iter().map(|x| Msg::Float(*x)).collect()))
         .unwrap_or(Msg::Nil);
-    Msg::map(vec![
+    let mut fields = vec![
         ("id", Msg::Str(node.id.clone())),
         ("type", Msg::Str(node.node_type.clone())),
         ("data", json_to_msg(&serde_json::Value::Object(node.data.clone()))),
@@ -118,7 +118,11 @@ fn node_to_msg(node: &Node) -> Msg {
         ("insertedAt", Msg::Int(node.inserted_at)),
         ("updatedAt", Msg::Int(node.updated_at)),
         ("activation", activation_to_msg(&node.activation)),
-    ])
+    ];
+    if node.revision != 0 {
+        fields.push(("revision", Msg::Int(node.revision as i64)));
+    }
+    Msg::map(fields)
 }
 
 fn msg_to_node(msg: &Msg) -> Result<Node> {
@@ -143,6 +147,7 @@ fn msg_to_node(msg: &Msg) -> Result<Node> {
     };
     let inserted_at = msg_int_field(msg, "insertedAt")?;
     let updated_at = msg_int_field(msg, "updatedAt")?;
+    let revision = msg_u64_field_default(msg, "revision", 0)?;
     let activation = msg_to_activation(msg)?;
     Ok(Node {
         id,
@@ -151,6 +156,7 @@ fn msg_to_node(msg: &Msg) -> Result<Node> {
         vector,
         inserted_at,
         updated_at,
+        revision,
         activation,
     })
 }
@@ -174,20 +180,33 @@ fn msg_int_field(msg: &Msg, key: &str) -> Result<i64> {
     }
 }
 
+fn msg_u64_field_default(msg: &Msg, key: &str, default: u64) -> Result<u64> {
+    match msg.get(key) {
+        None | Some(Msg::Nil) => Ok(default),
+        Some(Msg::Int(i)) if *i >= 0 => Ok(*i as u64),
+        Some(Msg::Float(f)) if f.is_finite() && *f >= 0.0 && f.fract() == 0.0 => Ok(*f as u64),
+        Some(_) => Err(PolypackError::CorruptData(format!("invalid {key}"))),
+    }
+}
+
 fn edge_to_msg(edge: &Edge) -> Msg {
     let data = edge
         .data
         .as_ref()
         .map(|d| json_to_msg(&serde_json::Value::Object(d.clone())))
         .unwrap_or(Msg::Nil);
-    Msg::map(vec![
+    let mut fields = vec![
         ("id", Msg::Str(edge.id.clone())),
         ("source", Msg::Str(edge.source.clone())),
         ("target", Msg::Str(edge.target.clone())),
         ("type", Msg::Str(edge.edge_type.clone())),
         ("data", data),
         ("createdAt", Msg::Int(edge.created_at)),
-    ])
+    ];
+    if edge.revision != 0 {
+        fields.push(("revision", Msg::Int(edge.revision as i64)));
+    }
+    Msg::map(fields)
 }
 
 fn msg_to_edge(msg: &Msg) -> Result<Edge> {
@@ -214,6 +233,7 @@ fn msg_to_edge(msg: &Msg) -> Result<Edge> {
         _ => return Err(PolypackError::CorruptData("edge data must be a map or null".into())),
     };
     let created_at = msg_int_field(msg, "createdAt")?;
+    let revision = msg_u64_field_default(msg, "revision", 0)?;
     Ok(Edge {
         id,
         source,
@@ -221,6 +241,7 @@ fn msg_to_edge(msg: &Msg) -> Result<Edge> {
         edge_type,
         data,
         created_at,
+        revision,
     })
 }
 
@@ -441,6 +462,7 @@ mod tests {
             vector: Some(vec![0.1, 0.2, 0.3]),
             inserted_at: 7,
             updated_at: 8,
+            revision: 0,
             activation: None,
         }
     }
@@ -458,6 +480,7 @@ mod tests {
             edge_type: "REL".into(),
             data: None,
             created_at: 9,
+            revision: 0,
         };
         let bytes = encode_snapshot(
             &[("n1".to_string(), n)],

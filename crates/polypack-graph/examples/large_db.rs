@@ -312,6 +312,7 @@ fn seed(graph: &mut Graph, args: &Args, centroids: &HashMap<&'static str, Vec<f6
         vector: None,
         inserted_at: now,
         updated_at: now,
+        revision: 0,
         activation: None,
     })?;
     add_nodes_in_chunks(graph, docs, |i| {
@@ -326,6 +327,7 @@ fn seed(graph: &mut Graph, args: &Args, centroids: &HashMap<&'static str, Vec<f6
             vector: Some(doc_vector(&mut rng, &centroids[topic])),
             inserted_at: now,
             updated_at: now,
+            revision: 0,
         activation: None,
         }
     })?;
@@ -336,6 +338,7 @@ fn seed(graph: &mut Graph, args: &Args, centroids: &HashMap<&'static str, Vec<f6
         vector: None,
         inserted_at: now,
         updated_at: now,
+        revision: 0,
         activation: None,
     })?;
     add_nodes_in_chunks(graph, chunks, |i| {
@@ -351,6 +354,7 @@ fn seed(graph: &mut Graph, args: &Args, centroids: &HashMap<&'static str, Vec<f6
             vector: None,
             inserted_at: now,
             updated_at: now,
+            revision: 0,
         activation: None,
         }
     })?;

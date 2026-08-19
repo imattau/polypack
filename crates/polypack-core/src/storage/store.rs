@@ -709,6 +709,7 @@ mod tests {
             vector: None,
             inserted_at: 1,
             updated_at: 1,
+            revision: 0,
             activation: None,
         }
     }
@@ -854,6 +855,7 @@ mod tests {
             vector: None,
             inserted_at: 1,
             updated_at: 1,
+            revision: 0,
             activation: None,
         }
     }
@@ -878,6 +880,7 @@ mod tests {
                 vector: None,
                 inserted_at: 1,
                 updated_at: 1,
+                revision: 0,
                 activation: None,
             }],
             ..Default::default()
@@ -943,6 +946,7 @@ mod tests {
             edge_type: etype.into(),
             data: None,
             created_at: 1,
+            revision: 0,
         };
         s.apply(&ChangeBatch {
             put_edges: vec![
@@ -1039,8 +1043,8 @@ mod tests {
     fn type_index_drops_stale_entry_when_a_node_changes_type() {
         let storage = shared();
         let mut s = Store::new(Box::new(storage), StoreConfig::default());
-        let n1 = Node { id: "a".into(), node_type: "draft".into(), data: Default::default(), vector: None, inserted_at: 1, updated_at: 1, activation: None };
-        let n2 = Node { id: "a".into(), node_type: "published".into(), data: Default::default(), vector: None, inserted_at: 2, updated_at: 2, activation: None };
+        let n1 = Node { id: "a".into(), node_type: "draft".into(), data: Default::default(), vector: None, inserted_at: 1, updated_at: 1, revision: 0, activation: None };
+        let n2 = Node { id: "a".into(), node_type: "published".into(), data: Default::default(), vector: None, inserted_at: 2, updated_at: 2, revision: 0, activation: None };
         s.apply(&ChangeBatch { put_nodes: vec![n1], ..Default::default() }).unwrap();
         s.apply(&ChangeBatch { put_nodes: vec![n2], ..Default::default() }).unwrap();
         assert_eq!(

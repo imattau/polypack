@@ -16,12 +16,14 @@ pyo3::create_exception!(polypack, PolypackClosedError, PolypackError, "Operation
 pyo3::create_exception!(polypack, PolypackVersionError, PolypackError, "Unsupported format version");
 pyo3::create_exception!(polypack, PolypackCorruptDataError, PolypackError, "Corrupt data");
 pyo3::create_exception!(polypack, PolypackStorageError, PolypackError, "Storage failure");
+pyo3::create_exception!(polypack, ConflictError, PolypackError, "Optimistic concurrency conflict");
 
 fn to_pyerr(e: CoreError) -> PyErr {
     match e {
         CoreError::InvalidArgument(m) => PolypackValueError::new_err(m),
         CoreError::DimensionMismatch { .. } => PolypackDimensionError::new_err(e.to_string()),
         CoreError::RangeOutOfBounds(m) => PolypackValueError::new_err(m),
+        CoreError::Conflict { .. } => ConflictError::new_err(e.to_string()),
         CoreError::Closed => PolypackClosedError::new_err(e.to_string()),
         CoreError::FormatVersion(v) => PolypackVersionError::new_err(v.to_string()),
         CoreError::CorruptData(m) => PolypackCorruptDataError::new_err(m),
@@ -349,6 +351,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("PolypackVersionError", m.py().get_type::<PolypackVersionError>())?;
     m.add("PolypackCorruptDataError", m.py().get_type::<PolypackCorruptDataError>())?;
     m.add("PolypackStorageError", m.py().get_type::<PolypackStorageError>())?;
+    m.add("ConflictError", m.py().get_type::<ConflictError>())?;
     Ok(())
 }
 

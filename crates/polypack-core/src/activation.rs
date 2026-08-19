@@ -152,6 +152,7 @@ mod tests {
             vector: None,
             inserted_at: 1,
             updated_at: 1,
+            revision: 0,
             activation,
         };
         let now = 1000;
@@ -201,6 +202,7 @@ mod tests {
             vector: None,
             inserted_at: 1,
             updated_at: 1,
+            revision: 0,
             activation: None,
         };
         let json = serde_json::to_value(&n).unwrap();

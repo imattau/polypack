@@ -14,6 +14,7 @@ condition.
 | `invalid_argument`  | `TypeError`      | Empty or invalid ID / edge source / edge type / edge target; invalid query parameters; non-finite vector or threshold input. |
 | `dimension_mismatch`| `RangeError`     | Query vector and stored vector dimensions differ; index build/query mismatch. |
 | `range_out_of_bounds`| `RangeError`    | Negative `topK`, `offset`, `limit`, or traversal `depth`; non-finite range bounds. |
+| `conflict`           | `ConflictError` | Conditional write supplied a stale record revision.                    |
 | `closed`            | `Error`          | Operation attempted on a closed adapter or store.                    |
 | `format_version`    | `Error`          | Snapshot or WAL version unsupported.                                 |
 | `corrupt_data`      | `Error`          | Snapshot or WAL bytes fail to decode structurally.                   |
@@ -37,6 +38,7 @@ condition.
 | `invalid_argument`  | `PolypackValueError`        | `PolypackError::InvalidArgument` |
 | `dimension_mismatch`| `PolypackDimensionError`    | `PolypackError::DimensionMismatch` |
 | `range_out_of_bounds`| `PolypackValueError`       | `PolypackError::InvalidArgument` |
+| `conflict`           | `ConflictError`             | `PolypackError::Conflict` |
 | `closed`            | `PolypackClosedError`       | `PolypackError::Closed`    |
 | `format_version`    | `PolypackVersionError`      | `PolypackError::FormatVersion` |
 | `corrupt_data`      | `PolypackCorruptDataError`  | `PolypackError::CorruptData` |

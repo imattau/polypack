@@ -14,10 +14,12 @@ pub enum EdgeOwnership {
     Reference,
 }
 
-/// One outgoing edge from a source node, keyed by `(edge_type, target)` in
-/// [`crate::Graph`]'s edge index.
+/// One outgoing edge from a source node. The adjacency map uses a private
+/// lookup key, while `id` is the independent durable identity.
 #[derive(Clone, Debug)]
 pub struct EdgeEntry {
+    pub id: String,
+    pub revision: u64,
     pub target: String,
     pub edge_type: String,
     pub data: Option<serde_json::Map<String, serde_json::Value>>,

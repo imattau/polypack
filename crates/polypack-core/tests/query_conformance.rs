@@ -43,6 +43,7 @@ fn to_edge(value: &Value) -> Edge {
         edge_type,
         data,
         created_at: 0,
+        revision: 0,
     }
 }
 
