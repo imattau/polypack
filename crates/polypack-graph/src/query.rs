@@ -13,10 +13,11 @@ use std::collections::{HashMap, HashSet};
 use polypack_core::activation::{activation_score_of, DEFAULT_ACTIVATION};
 use polypack_core::query::Direction;
 use polypack_core::vector::cosine;
-use polypack_core::Node;
+use polypack_core::{Node, PolypackError, Result};
 
 use crate::edge::EdgeEntry;
 use crate::graph::now_millis;
+use crate::persisted_query::QueryExplain;
 
 /// A `join` predicate closure: `Some` to filter by the connected node,
 /// `None` to require only that a connection exists.
@@ -217,6 +218,63 @@ impl<'a> GraphQuery<'a> {
     pub fn similar_to(mut self, vector: Vec<f64>, threshold: f64, top_k: Option<usize>) -> Self {
         self.similarity = Some(SimilaritySpec { vector, threshold, top_k });
         self
+    }
+
+    /// Describe the hot-query stages without materializing results.
+    pub fn explain(&self) -> QueryExplain {
+        let index = self.node_types.as_ref().filter(|types| !types.is_empty()).map(|_| "type-index".to_string());
+        let mut stages = vec![index.clone().unwrap_or_else(|| "record-scan".to_string())];
+        if let Some(types) = &self.node_types {
+            if !types.is_empty() {
+                stages.push(format!("type-filter({})", types.join(",")));
+            }
+        }
+        if !self.attributes.is_empty() || !self.attribute_ranges.is_empty() {
+            stages.push("property-filter".to_string());
+        }
+        if !self.join_filters.is_empty() {
+            stages.push(format!("join(count={})", self.join_filters.len()));
+        }
+        if !self.traversal_steps.is_empty() {
+            let depth = self.traversal_steps.iter().map(|step| step.depth).max().unwrap_or(0);
+            stages.push(format!("traversal(depth={depth})"));
+        }
+        if let Some((field, direction)) = &self.order_by {
+            stages.push(format!("order({field},{direction:?})").to_lowercase());
+        }
+        if let Some(limit) = self.limit {
+            stages.push(format!("limit({limit})"));
+        }
+        let loaded_records = self.nodes.len();
+        QueryExplain {
+            index,
+            stages,
+            loaded_records,
+            estimated_cost: (loaded_records as f64 * if self.node_types.is_some() { 0.25 } else { 1.0 }).max(1.0),
+        }
+    }
+
+    /// Materialize results while enforcing traversal and result limits.
+    pub fn to_array_limited(&self, limits: &crate::QueryResourceLimits) -> Result<Vec<Node>> {
+        for step in &self.traversal_steps {
+            if let Some(max_depth) = limits.max_traversal_depth {
+                if step.depth > max_depth {
+                    return Err(PolypackError::ResourceLimit { name: "maxTraversalDepth".into(), limit: max_depth });
+                }
+            }
+        }
+        let results = self.to_array();
+        if let Some(max_nodes) = limits.max_nodes_visited {
+            if results.len() > max_nodes {
+                return Err(PolypackError::ResourceLimit { name: "maxNodesVisited".into(), limit: max_nodes });
+            }
+        }
+        if let Some(max_results) = limits.max_results {
+            if results.len() > max_results {
+                return Err(PolypackError::ResourceLimit { name: "maxResults".into(), limit: max_results });
+            }
+        }
+        Ok(results)
     }
 
     /// Constrain results to nodes connected via `edge_type`. Unlike

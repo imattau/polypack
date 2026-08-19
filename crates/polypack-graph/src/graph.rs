@@ -57,6 +57,18 @@ fn get_data_path<'a>(root: &'a serde_json::Value, path: &[&str]) -> Option<&'a s
     get_data_path(object.get(path[0])?, &path[1..])
 }
 
+fn matches_json_type(value: &serde_json::Value, expected: &str) -> bool {
+    match expected {
+        "string" => value.is_string(),
+        "number" => value.as_f64().is_some(),
+        "integer" => value.as_i64().is_some() || value.as_u64().is_some(),
+        "boolean" => value.is_boolean(),
+        "array" => value.is_array(),
+        "object" => value.is_object(),
+        _ => false,
+    }
+}
+
 type OnChangeCallback = Box<dyn FnMut(GraphChangeEvent)>;
 type OnOrphanCallback = Box<dyn FnMut(&str)>;
 
@@ -84,6 +96,7 @@ pub struct GraphStats {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct NodeTypeDefinition {
     pub required_fields: Vec<String>,
+    pub data_types: HashMap<String, String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -91,6 +104,8 @@ pub struct EdgeTypeDefinition {
     pub source_types: Vec<String>,
     pub target_types: Vec<String>,
     pub cardinality: Option<String>,
+    pub required_fields: Vec<String>,
+    pub data_types: HashMap<String, String>,
 }
 
 impl Default for GraphConfig {
@@ -142,6 +157,8 @@ pub struct Graph {
 
     warmed: bool,
     transaction_active: bool,
+    transaction_sequence: u64,
+    current_transaction_id: Option<String>,
     node_type_definitions: HashMap<String, NodeTypeDefinition>,
     edge_type_definitions: HashMap<String, EdgeTypeDefinition>,
 }
@@ -235,6 +252,8 @@ impl Graph {
             pending_batch_events: Vec::new(),
             warmed: false,
             transaction_active: false,
+            transaction_sequence: 0,
+            current_transaction_id: None,
             node_type_definitions: HashMap::new(),
             edge_type_definitions: HashMap::new(),
         })
@@ -245,17 +264,47 @@ impl Graph {
         self.store.capabilities()
     }
 
+    /// Return the active transaction identifier while inside a transaction.
+    pub fn transaction_id(&self) -> Option<&str> {
+        self.current_transaction_id.as_deref()
+    }
+
     /// Verify the persisted snapshot, WAL, records, endpoints, and vectors.
     pub fn verify(&mut self) -> Result<VerificationReport> {
         self.store.verify()
     }
 
-    pub fn register_node_type(&mut self, node_type: impl Into<String>, definition: NodeTypeDefinition) {
-        self.node_type_definitions.insert(node_type.into(), definition);
+    pub fn register_node_type(&mut self, node_type: impl Into<String>, definition: NodeTypeDefinition) -> Result<()> {
+        let node_type = node_type.into();
+        let previous = self.node_type_definitions.insert(node_type.clone(), definition);
+        let validation = self.nodes.values().filter(|node| node.node_type == node_type).try_for_each(|node| self.validate_node_schema(node));
+        if validation.is_err() {
+            if let Some(previous) = previous {
+                self.node_type_definitions.insert(node_type, previous);
+            } else {
+                self.node_type_definitions.remove(&node_type);
+            }
+        }
+        validation
     }
 
-    pub fn register_edge_type(&mut self, edge_type: impl Into<String>, definition: EdgeTypeDefinition) {
-        self.edge_type_definitions.insert(edge_type.into(), definition);
+    pub fn register_edge_type(&mut self, edge_type: impl Into<String>, definition: EdgeTypeDefinition) -> Result<()> {
+        let edge_type = edge_type.into();
+        let previous = self.edge_type_definitions.insert(edge_type.clone(), definition);
+        let validation = self.edges.iter().try_for_each(|(source, edges)| {
+            edges.values().filter(|edge| edge.edge_type == edge_type).try_for_each(|edge| {
+                self.validate_edge_schema(source, &edge_type, &edge.target, Some(&edge.id))?;
+                self.validate_edge_data_schema(&edge_type, edge.data.as_ref())
+            })
+        });
+        if validation.is_err() {
+            if let Some(previous) = previous {
+                self.edge_type_definitions.insert(edge_type.clone(), previous);
+            } else {
+                self.edge_type_definitions.remove(&edge_type);
+            }
+        }
+        validation
     }
 
     fn validate_node_schema(&self, node: &Node) -> Result<()> {
@@ -265,6 +314,34 @@ impl Graph {
             let parts: Vec<&str> = field.split('.').collect();
             if parts.iter().any(|part| part.is_empty()) || get_data_path(&data, &parts).is_none() {
                 return Err(PolypackError::InvalidArgument(format!("node {} is missing required field {field}", node.id)));
+            }
+        }
+        for (field, expected) in &definition.data_types {
+            let parts: Vec<&str> = field.split('.').collect();
+            if let Some(value) = get_data_path(&data, &parts) {
+                if !matches_json_type(value, expected) {
+                    return Err(PolypackError::InvalidArgument(format!("node {} field {field} must be {expected}", node.id)));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_edge_data_schema(&self, edge_type: &str, data: Option<&serde_json::Map<String, serde_json::Value>>) -> Result<()> {
+        let Some(definition) = self.edge_type_definitions.get(edge_type) else { return Ok(()) };
+        let value = serde_json::Value::Object(data.cloned().unwrap_or_default());
+        for field in &definition.required_fields {
+            let parts: Vec<&str> = field.split('.').collect();
+            if parts.iter().any(|part| part.is_empty()) || get_data_path(&value, &parts).is_none() {
+                return Err(PolypackError::InvalidArgument(format!("edge {edge_type} is missing required field {field}")));
+            }
+        }
+        for (field, expected) in &definition.data_types {
+            let parts: Vec<&str> = field.split('.').collect();
+            if let Some(field_value) = get_data_path(&value, &parts) {
+                if !matches_json_type(field_value, expected) {
+                    return Err(PolypackError::InvalidArgument(format!("edge {edge_type} field {field} must be {expected}")));
+                }
             }
         }
         Ok(())
@@ -381,6 +458,8 @@ impl Graph {
             return Err(PolypackError::InvalidArgument("nested transactions are not supported".into()));
         }
         let checkpoint = GraphCheckpoint::capture(self);
+        self.transaction_sequence = self.transaction_sequence.saturating_add(1);
+        self.current_transaction_id = Some(format!("tx-{}-{}", now_millis(), self.transaction_sequence));
         self.transaction_active = true;
         self.start_batch();
         let result = callback(self);
@@ -388,14 +467,17 @@ impl Graph {
             Ok(value) => {
                 if let Err(error) = self.flush().and_then(|_| self.end_batch()) {
                     self.transaction_active = false;
+                    self.current_transaction_id = None;
                     checkpoint.restore(self);
                     return Err(error);
                 }
                 self.transaction_active = false;
+                self.current_transaction_id = None;
                 Ok(value)
             }
             Err(error) => {
                 self.transaction_active = false;
+                self.current_transaction_id = None;
                 checkpoint.restore(self);
                 Err(error)
             }
@@ -1205,6 +1287,7 @@ impl Graph {
             ));
         }
         self.validate_edge_schema(source, edge_type, target, None)?;
+        self.validate_edge_data_schema(edge_type, data.as_ref())?;
         let id = edge_id(source, edge_type, target);
         self.removed_edge_ids.remove(&id);
         let inner = format!("{edge_type}::{target}");
@@ -1243,6 +1326,7 @@ impl Graph {
             return Err(PolypackError::InvalidArgument("edge id, source, type, and target must not be empty".into()));
         }
         self.validate_edge_schema(source, edge_type, target, None)?;
+        self.validate_edge_data_schema(edge_type, data.as_ref())?;
         if self.edges.values().any(|edges| edges.values().any(|edge| edge.id == id)) {
             return Ok(());
         }
@@ -2557,6 +2641,7 @@ mod tests {
     fn transaction_rolls_back_callback_errors_and_commits_events_after_success() {
         let mut g = test_graph();
         let error: Result<()> = g.transaction(|tx| {
+            assert!(tx.transaction_id().is_some());
             tx.add_node(node("rolled-back"))?;
             assert!(tx.get_node("rolled-back").is_some());
             Err(PolypackError::InvalidArgument("abort".into()))
@@ -2565,12 +2650,14 @@ mod tests {
         assert!(g.get_node("rolled-back").is_none());
 
         g.transaction(|tx| {
+            assert!(tx.transaction_id().is_some());
             tx.add_node(node("committed"))?;
             assert!(tx.get_node("committed").is_some());
             Ok(())
         })
         .unwrap();
         assert!(g.get_node("committed").is_some());
+        assert!(g.transaction_id().is_none());
     }
 
     #[test]
@@ -2606,11 +2693,11 @@ mod tests {
     #[test]
     fn schema_hooks_validate_nodes_and_edge_endpoint_types() {
         let mut g = test_graph();
-        g.register_node_type("person", NodeTypeDefinition { required_fields: vec!["name".into()] });
+        g.register_node_type("person", NodeTypeDefinition { required_fields: vec!["name".into()], data_types: HashMap::new() }).unwrap();
         g.register_edge_type(
             "KNOWS",
-            EdgeTypeDefinition { source_types: vec!["person".into()], target_types: vec!["person".into()], cardinality: None },
-        );
+            EdgeTypeDefinition { source_types: vec!["person".into()], target_types: vec!["person".into()], cardinality: None, required_fields: vec![], data_types: HashMap::new() },
+        ).unwrap();
         let mut invalid = node_of_type("a", "person");
         assert!(g.add_node(invalid.clone()).is_err());
         invalid.data.insert("name".into(), serde_json::json!("Ada"));
@@ -2627,8 +2714,8 @@ mod tests {
         g.add_node(node_of_type("c", "person")).unwrap();
         g.register_edge_type(
             "PARENT",
-            EdgeTypeDefinition { source_types: vec![], target_types: vec![], cardinality: Some("one-to-many".into()) },
-        );
+            EdgeTypeDefinition { source_types: vec![], target_types: vec![], cardinality: Some("one-to-many".into()), required_fields: vec![], data_types: HashMap::new() },
+        ).unwrap();
         g.add_edge("a", "PARENT", "b", None, EdgeOwnership::Reference).unwrap();
         assert!(g.add_edge("c", "PARENT", "b", None, EdgeOwnership::Reference).is_err());
         assert!(g.add_edge("a", "PARENT", "missing", None, EdgeOwnership::Reference).is_err());
