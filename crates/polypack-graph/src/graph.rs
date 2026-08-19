@@ -18,7 +18,7 @@ use crate::edge::{decode_ownership, encode_ownership, EdgeEntry, EdgeOwnership};
 use crate::embedding::{create_embedding, EmbeddingProvider, FeatureHashEmbedding};
 use crate::event::GraphChangeEvent;
 use crate::lru::LruList;
-use crate::persisted_query::PersistedGraphQuery;
+use crate::persisted_query::{PersistedGraphQuery, QueryResourceLimits};
 use crate::query::GraphQuery;
 
 fn set_data_path(root: &mut serde_json::Value, path: &[&str], value: serde_json::Value) -> Result<()> {
@@ -81,6 +81,17 @@ pub struct GraphStats {
     pub index_count: usize,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct NodeTypeDefinition {
+    pub required_fields: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct EdgeTypeDefinition {
+    pub source_types: Vec<String>,
+    pub target_types: Vec<String>,
+}
+
 impl Default for GraphConfig {
     fn default() -> Self {
         Self { hot_cache_max: 50_000, hnsw: HnswConfig::default(), embedding: Box::new(FeatureHashEmbedding::default()) }
@@ -130,6 +141,8 @@ pub struct Graph {
 
     warmed: bool,
     transaction_active: bool,
+    node_type_definitions: HashMap<String, NodeTypeDefinition>,
+    edge_type_definitions: HashMap<String, EdgeTypeDefinition>,
 }
 
 struct GraphCheckpoint {
@@ -221,12 +234,51 @@ impl Graph {
             pending_batch_events: Vec::new(),
             warmed: false,
             transaction_active: false,
+            node_type_definitions: HashMap::new(),
+            edge_type_definitions: HashMap::new(),
         })
     }
 
     /// Report the guarantees declared by the underlying storage adapter.
     pub fn capabilities(&self) -> AdapterCapabilities {
         self.store.capabilities()
+    }
+
+    pub fn register_node_type(&mut self, node_type: impl Into<String>, definition: NodeTypeDefinition) {
+        self.node_type_definitions.insert(node_type.into(), definition);
+    }
+
+    pub fn register_edge_type(&mut self, edge_type: impl Into<String>, definition: EdgeTypeDefinition) {
+        self.edge_type_definitions.insert(edge_type.into(), definition);
+    }
+
+    fn validate_node_schema(&self, node: &Node) -> Result<()> {
+        let Some(definition) = self.node_type_definitions.get(&node.node_type) else { return Ok(()) };
+        let data = serde_json::Value::Object(node.data.clone());
+        for field in &definition.required_fields {
+            let parts: Vec<&str> = field.split('.').collect();
+            if parts.iter().any(|part| part.is_empty()) || get_data_path(&data, &parts).is_none() {
+                return Err(PolypackError::InvalidArgument(format!("node {} is missing required field {field}", node.id)));
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_edge_schema(&self, source: &str, edge_type: &str, target: &str) -> Result<()> {
+        let Some(definition) = self.edge_type_definitions.get(edge_type) else { return Ok(()) };
+        if !definition.source_types.is_empty() {
+            let source_type = self.nodes.get(source).map(|node| node.node_type.as_str());
+            if source_type.is_none() || !definition.source_types.iter().any(|allowed| Some(allowed.as_str()) == source_type) {
+                return Err(PolypackError::InvalidArgument(format!("edge source type is not permitted for {edge_type}")));
+            }
+        }
+        if !definition.target_types.is_empty() {
+            let target_type = self.nodes.get(target).map(|node| node.node_type.as_str());
+            if target_type.is_none() || !definition.target_types.iter().any(|allowed| Some(allowed.as_str()) == target_type) {
+                return Err(PolypackError::InvalidArgument(format!("edge target type is not permitted for {edge_type}")));
+            }
+        }
+        Ok(())
     }
 
     /// Return operational counters without coupling the graph to a metrics
@@ -621,6 +673,7 @@ impl Graph {
     /// vector-finiteness).
     pub fn add_node(&mut self, node: Node) -> Result<()> {
         validate_node(&node)?;
+        self.validate_node_schema(&node)?;
         self.insert_node(node);
         Ok(())
     }
@@ -632,6 +685,7 @@ impl Graph {
     pub fn add_nodes(&mut self, nodes: Vec<Node>) -> Result<()> {
         for n in &nodes {
             validate_node(n)?;
+            self.validate_node_schema(n)?;
         }
         self.start_batch();
         for n in nodes {
@@ -723,6 +777,17 @@ impl Graph {
         }
 
         let node_type = {
+            let mut candidate = self.nodes.get(id).cloned().expect("node checked above");
+            candidate.data.extend(data.clone());
+            if let Some(vector) = &vector {
+                candidate.vector = Some(vector.clone());
+            }
+            if activation.is_some() {
+                candidate.activation = activation.clone();
+            }
+            candidate.updated_at = now_millis();
+            candidate.revision = candidate.revision.saturating_add(1);
+            self.validate_node_schema(&candidate)?;
             let node = self.nodes.get_mut(id).unwrap();
             node.data.extend(data);
             if let Some(vector) = &vector {
@@ -825,6 +890,18 @@ impl Graph {
             }
             set_data_path(&mut candidate, &parts, serde_json::json!(current + delta))?;
         }
+
+        let candidate_node = Node {
+            id: existing.id.clone(),
+            node_type: existing.node_type.clone(),
+            data: candidate.as_object().cloned().expect("patch root is an object"),
+            vector: existing.vector.clone(),
+            inserted_at: existing.inserted_at,
+            updated_at: now_millis(),
+            revision: existing.revision.saturating_add(1),
+            activation: existing.activation.clone(),
+        };
+        self.validate_node_schema(&candidate_node)?;
 
         let node_type = {
             let node = self.nodes.get_mut(id).expect("node checked above");
@@ -1091,6 +1168,7 @@ impl Graph {
                 "edge source, type, and target must not be empty".into(),
             ));
         }
+        self.validate_edge_schema(source, edge_type, target)?;
         let id = edge_id(source, edge_type, target);
         self.removed_edge_ids.remove(&id);
         let inner = format!("{edge_type}::{target}");
@@ -1128,6 +1206,7 @@ impl Graph {
         if id.is_empty() || source.is_empty() || edge_type.is_empty() || target.is_empty() {
             return Err(PolypackError::InvalidArgument("edge id, source, type, and target must not be empty".into()));
         }
+        self.validate_edge_schema(source, edge_type, target)?;
         if self.edges.values().any(|edges| edges.values().any(|edge| edge.id == id)) {
             return Ok(());
         }
@@ -1419,6 +1498,11 @@ impl Graph {
     /// results into the hot working set. Mirrors `PolyGraph.queryPersisted`.
     pub fn query_persisted(&mut self) -> PersistedGraphQuery<'_> {
         PersistedGraphQuery::new(&mut self.store)
+    }
+
+    /// Create a persisted query with explicit traversal and result limits.
+    pub fn query_persisted_with_limits(&mut self, limits: QueryResourceLimits) -> PersistedGraphQuery<'_> {
+        PersistedGraphQuery::new(&mut self.store).with_resource_limits(limits)
     }
 
     /// Start an in-memory similarity query from text, embedded with the
@@ -2474,6 +2558,22 @@ mod tests {
     }
 
     #[test]
+    fn schema_hooks_validate_nodes_and_edge_endpoint_types() {
+        let mut g = test_graph();
+        g.register_node_type("person", NodeTypeDefinition { required_fields: vec!["name".into()] });
+        g.register_edge_type(
+            "KNOWS",
+            EdgeTypeDefinition { source_types: vec!["person".into()], target_types: vec!["person".into()] },
+        );
+        let mut invalid = node_of_type("a", "person");
+        assert!(g.add_node(invalid.clone()).is_err());
+        invalid.data.insert("name".into(), serde_json::json!("Ada"));
+        g.add_node(invalid).unwrap();
+        g.add_node(node_of_type("b", "doc")).unwrap();
+        assert!(g.add_edge("a", "KNOWS", "b", None, EdgeOwnership::Reference).is_err());
+    }
+
+    #[test]
     fn update_node_replaces_the_vector_and_marks_it_dirty() {
         let mut g = test_graph();
         g.add_node(node("a")).unwrap();
@@ -3201,6 +3301,23 @@ mod tests {
         let expanded =
             g.query_persisted().where_node_type(vec!["user".into()]).traverse("RATED", 1, Direction::Out).to_array().unwrap();
         assert_eq!(ids_of(expanded), vec!["alice", "bob", "fantasy1", "scifi1"]);
+    }
+
+    #[test]
+    fn persisted_query_enforces_resource_limits() {
+        let mut g = persisted_library();
+        let limited = g
+            .query_persisted_with_limits(crate::QueryResourceLimits { max_results: Some(1), ..Default::default() })
+            .where_node_type(vec!["book".into()])
+            .to_array();
+        assert!(matches!(limited, Err(PolypackError::ResourceLimit { .. })));
+
+        let limited = g
+            .query_persisted_with_limits(crate::QueryResourceLimits { max_traversal_depth: Some(0), ..Default::default() })
+            .where_node_type(vec!["user".into()])
+            .traverse("RATED", 1, Direction::Out)
+            .to_array();
+        assert!(matches!(limited, Err(PolypackError::ResourceLimit { .. })));
     }
 
     #[test]

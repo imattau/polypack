@@ -9,6 +9,7 @@ pub mod wal;
 
 pub use store::{
     AdapterCapabilities, Durability, InMemoryStorage, NodeQuery, OrderBy, RangeQuery, Storage, Store, StoreConfig,
+    VerificationReport,
     VectorSearchCapability,
     DEFAULT_COMPACT_THRESHOLD, SNAPSHOT_FILE, WAL_FILE,
 };

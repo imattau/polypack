@@ -17,6 +17,7 @@ pyo3::create_exception!(polypack, PolypackVersionError, PolypackError, "Unsuppor
 pyo3::create_exception!(polypack, PolypackCorruptDataError, PolypackError, "Corrupt data");
 pyo3::create_exception!(polypack, PolypackStorageError, PolypackError, "Storage failure");
 pyo3::create_exception!(polypack, ConflictError, PolypackError, "Optimistic concurrency conflict");
+pyo3::create_exception!(polypack, ResourceLimitError, PolypackError, "Resource limit exceeded");
 
 fn to_pyerr(e: CoreError) -> PyErr {
     match e {
@@ -24,6 +25,7 @@ fn to_pyerr(e: CoreError) -> PyErr {
         CoreError::DimensionMismatch { .. } => PolypackDimensionError::new_err(e.to_string()),
         CoreError::RangeOutOfBounds(m) => PolypackValueError::new_err(m),
         CoreError::Conflict { .. } => ConflictError::new_err(e.to_string()),
+        CoreError::ResourceLimit { .. } => ResourceLimitError::new_err(e.to_string()),
         CoreError::Closed => PolypackClosedError::new_err(e.to_string()),
         CoreError::FormatVersion(v) => PolypackVersionError::new_err(v.to_string()),
         CoreError::CorruptData(m) => PolypackCorruptDataError::new_err(m),
@@ -569,6 +571,18 @@ impl NativeStore {
             polypack_core::storage::VectorSearchCapability::Ann => "ann",
         };
         out.set_item("vectorSearch", vector_search)?;
+        Ok(out.unbind())
+    }
+
+    fn verify(&self, py: Python<'_>) -> PyResult<Py<PyDict>> {
+        let report = self.inner.lock().unwrap().verify().map_err(to_pyerr)?;
+        let out = PyDict::new(py);
+        out.set_item("ok", report.ok)?;
+        out.set_item("errors", report.errors)?;
+        out.set_item("nodeCount", report.node_count)?;
+        out.set_item("edgeCount", report.edge_count)?;
+        out.set_item("vectorCount", report.vector_count)?;
+        out.set_item("mutationCount", report.mutation_count)?;
         Ok(out.unbind())
     }
 

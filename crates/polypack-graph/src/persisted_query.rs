@@ -31,6 +31,21 @@ struct SimilaritySpec {
     top_k: Option<usize>,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct QueryExplain {
+    pub index: Option<String>,
+    pub stages: Vec<String>,
+    pub loaded_records: usize,
+    pub estimated_cost: f64,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct QueryResourceLimits {
+    pub max_traversal_depth: Option<usize>,
+    pub max_nodes_visited: Option<usize>,
+    pub max_results: Option<usize>,
+}
+
 /// Chainable query over all persisted nodes in a `Store`. Results are
 /// detached clones. Mirrors `PersistedGraphQuery`.
 pub struct PersistedGraphQuery<'a> {
@@ -51,6 +66,7 @@ pub struct PersistedGraphQuery<'a> {
     traversals: Vec<(String, usize, Direction)>,
     activation_above: Option<f64>,
     activation_order: Option<OrderDirection>,
+    limits: QueryResourceLimits,
 }
 
 impl<'a> PersistedGraphQuery<'a> {
@@ -71,6 +87,7 @@ impl<'a> PersistedGraphQuery<'a> {
             traversals: Vec::new(),
             activation_above: None,
             activation_order: None,
+            limits: QueryResourceLimits::default(),
         }
     }
 
@@ -153,6 +170,46 @@ impl<'a> PersistedGraphQuery<'a> {
     pub fn similar_to(mut self, vector: Vec<f64>, threshold: f64, top_k: Option<usize>) -> Self {
         self.similarity = Some(SimilaritySpec { vector, threshold, top_k });
         self
+    }
+
+    pub fn with_resource_limits(mut self, limits: QueryResourceLimits) -> Self {
+        self.limits = limits;
+        self
+    }
+
+    /// Describe the selected persisted-query stages without materializing rows.
+    pub fn explain(&mut self) -> Result<QueryExplain> {
+        let loaded_records = self.store.node_count()?;
+        let mut stages = Vec::new();
+        let index = self.node_types.as_ref().filter(|types| !types.is_empty()).map(|_| "type-index".to_string());
+        stages.push(index.clone().unwrap_or_else(|| "record-scan".to_string()));
+        if let Some(types) = &self.node_types {
+            if !types.is_empty() {
+                stages.push(format!("type-filter({})", types.join(",")));
+            }
+        }
+        if !self.attributes.is_empty() || !self.attribute_ranges.is_empty() {
+            stages.push("property-filter".to_string());
+        }
+        if !self.joins.is_empty() {
+            stages.push(format!("join(count={})", self.joins.len()));
+        }
+        if !self.traversals.is_empty() {
+            let depth = self.traversals.iter().map(|(_, depth, _)| *depth).max().unwrap_or(0);
+            stages.push(format!("traversal(depth={depth})"));
+        }
+        if let Some((field, direction)) = &self.order_by {
+            stages.push(format!("order({field},{direction:?})").to_lowercase());
+        }
+        if let Some(limit) = self.result_limit {
+            stages.push(format!("limit({limit})"));
+        }
+        Ok(QueryExplain {
+            index,
+            stages,
+            loaded_records,
+            estimated_cost: (loaded_records as f64 * if self.node_types.is_some() { 0.25 } else { 1.0 }).max(1.0),
+        })
     }
 
     // ── internals ──
@@ -239,7 +296,17 @@ impl<'a> PersistedGraphQuery<'a> {
         let mut current_ids: Vec<String> = nodes.iter().map(|n| n.id.clone()).collect();
         for i in 0..self.traversals.len() {
             let (edge_type, depth, direction) = self.traversals[i].clone();
+            if let Some(max_depth) = self.limits.max_traversal_depth {
+                if depth > max_depth {
+                    return Err(polypack_core::PolypackError::ResourceLimit { name: "maxTraversalDepth".into(), limit: max_depth });
+                }
+            }
             let mut visited: HashSet<String> = current_ids.iter().cloned().collect();
+            if let Some(max_nodes) = self.limits.max_nodes_visited {
+                if visited.len() > max_nodes {
+                    return Err(polypack_core::PolypackError::ResourceLimit { name: "maxNodesVisited".into(), limit: max_nodes });
+                }
+            }
             let mut frontier = current_ids.clone();
             for _ in 0..depth {
                 if frontier.is_empty() {
@@ -253,6 +320,11 @@ impl<'a> PersistedGraphQuery<'a> {
                 for e in &edges {
                     let id = match direction { Direction::Out => e.target.clone(), Direction::In => e.source.clone() };
                     if visited.insert(id.clone()) {
+                        if let Some(max_nodes) = self.limits.max_nodes_visited {
+                            if visited.len() > max_nodes {
+                                return Err(polypack_core::PolypackError::ResourceLimit { name: "maxNodesVisited".into(), limit: max_nodes });
+                            }
+                        }
                         next.push(id);
                     }
                 }
@@ -342,6 +414,11 @@ impl<'a> PersistedGraphQuery<'a> {
             }
         }
 
+        if let Some(max_results) = self.limits.max_results {
+            if nodes.len() > max_results {
+                return Err(polypack_core::PolypackError::ResourceLimit { name: "maxResults".into(), limit: max_results });
+            }
+        }
         Ok(nodes)
     }
 

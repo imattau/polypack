@@ -23,8 +23,8 @@ pub use embedding::{
     build_embedding_text, create_embedding, EmbeddingProvider, FeatureHashEmbedding, FeatureHashEmbeddingOptions,
 };
 pub use event::GraphChangeEvent;
-pub use graph::{Graph, GraphConfig, GraphStats};
-pub use persisted_query::PersistedGraphQuery;
+pub use graph::{EdgeTypeDefinition, Graph, GraphConfig, GraphStats, NodeTypeDefinition};
+pub use persisted_query::{PersistedGraphQuery, QueryExplain, QueryResourceLimits};
 pub use query::{AggregateOp, AggregateResult, GraphQuery, GroupedRow, OrderDirection};
 // `Direction` is a required parameter of `GraphQuery`/`PersistedGraphQuery`'s
 // `traverse`/`join`, so it must be nameable without adding `polypack-core` as

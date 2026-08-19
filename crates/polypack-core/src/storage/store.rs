@@ -155,6 +155,16 @@ pub struct AdapterCapabilities {
     pub vector_search: VectorSearchCapability,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VerificationReport {
+    pub ok: bool,
+    pub errors: Vec<String>,
+    pub node_count: usize,
+    pub edge_count: usize,
+    pub vector_count: usize,
+    pub mutation_count: usize,
+}
+
 impl Default for AdapterCapabilities {
     fn default() -> Self {
         Self {
@@ -325,6 +335,59 @@ impl Store {
 
     pub fn capabilities(&self) -> AdapterCapabilities {
         self.storage.capabilities()
+    }
+
+    pub fn verify(&mut self) -> Result<VerificationReport> {
+        self.assert_open()?;
+        let mut errors = Vec::new();
+        let mut node_count = 0;
+        let mut edge_count = 0;
+        let mut vector_count = 0;
+        if let Some(data) = self.storage.read(SNAPSHOT_FILE)? {
+            match decode_snapshot(&data) {
+                Ok(snapshot) => {
+                    node_count = snapshot.nodes.len();
+                    edge_count = snapshot.edges.len();
+                    vector_count = snapshot.vectors.len();
+                    let node_ids: HashSet<String> = snapshot.nodes.iter().map(|(id, _)| id.clone()).collect();
+                    for (id, node) in &snapshot.nodes {
+                        if let Err(error) = crate::model::validate_node(node) {
+                            errors.push(format!("node {id}: {error}"));
+                        }
+                    }
+                    for (id, edge) in &snapshot.edges {
+                        if let Err(error) = crate::model::validate_edge(edge) {
+                            errors.push(format!("edge {id}: {error}"));
+                        }
+                        if !node_ids.contains(&edge.source) {
+                            errors.push(format!("edge {id}: missing source {}", edge.source));
+                        }
+                        if !node_ids.contains(&edge.target) {
+                            errors.push(format!("edge {id}: missing target {}", edge.target));
+                        }
+                    }
+                    for (id, vector) in &snapshot.vectors {
+                        if !vector.iter().all(|value| value.is_finite()) {
+                            errors.push(format!("vector {id}: contains non-finite values"));
+                        }
+                    }
+                }
+                Err(error) => errors.push(format!("snapshot: {error}")),
+            }
+        }
+        let mutation_count = self
+            .storage
+            .read(WAL_FILE)?
+            .map(|data| decode_wal(&data).len())
+            .unwrap_or(0);
+        Ok(VerificationReport {
+            ok: errors.is_empty(),
+            errors,
+            node_count,
+            edge_count,
+            vector_count,
+            mutation_count,
+        })
     }
 
     // ── secondary indexes ──
@@ -1037,6 +1100,24 @@ mod tests {
         s.close().unwrap();
         let mut s2 = Store::new(Box::new(storage.clone()), StoreConfig::default());
         assert_eq!(s2.get_edges_by_sources(&["a".into()], None).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn verify_reports_snapshot_contents_and_wal_mutations() {
+        let storage = shared();
+        let mut store = Store::new(Box::new(storage), StoreConfig::default());
+        store.apply(&batch(&[node("a")])).unwrap();
+
+        let before_compaction = store.verify().unwrap();
+        assert!(before_compaction.ok);
+        assert_eq!(before_compaction.mutation_count, 1);
+
+        store.compact().unwrap();
+        let after_compaction = store.verify().unwrap();
+        assert!(after_compaction.ok);
+        assert_eq!(after_compaction.node_count, 1);
+        assert_eq!(after_compaction.edge_count, 0);
+        assert_eq!(after_compaction.vector_count, 0);
     }
 
     #[test]

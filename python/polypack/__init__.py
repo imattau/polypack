@@ -39,6 +39,15 @@ class ConflictError(PolypackError):
 
     pass
 
+
+class ResourceLimitError(PolypackError):
+    """Raised when a configured graph or query resource limit is exceeded."""
+
+    def __init__(self, limit_name: str, limit: int) -> None:
+        super().__init__(f"Resource exceeded {limit_name} limit of {limit}")
+        self.limit_name = limit_name
+        self.limit = limit
+
 __all__ = [
     "PolyGraph",
     "GraphTransaction",
@@ -59,6 +68,7 @@ __all__ = [
     "PolypackCorruptDataError",
     "PolypackStorageError",
     "ConflictError",
+    "ResourceLimitError",
 ]
 
 Node = dict
@@ -599,6 +609,7 @@ class PolyGraph:
         self._active_transaction: Optional["GraphTransaction"] = None
         self._node_type_definitions: dict[str, dict] = {}
         self._edge_type_definitions: dict[str, dict] = {}
+        self._resource_limits: dict[str, int] = {}
 
     @property
     def capabilities(self) -> dict:
@@ -614,6 +625,23 @@ class PolyGraph:
             "concurrentWriters": False,
             "vectorSearch": "exact",
         }
+
+    def set_resource_limits(self, limits: Optional[dict] = None, **kwargs: int) -> None:
+        """Configure positive integer limits for writes and graph queries."""
+        values = dict(limits or {})
+        values.update(kwargs)
+        allowed = {"maxVectorDimensions", "maxNodePayloadBytes", "maxBatchSize", "maxTraversalDepth", "maxNodesVisited", "maxResults"}
+        unknown = set(values) - allowed
+        if unknown:
+            raise PolypackValueError(f"unknown resource limit: {sorted(unknown)[0]}")
+        for name, value in values.items():
+            if value is not None and (not isinstance(value, int) or isinstance(value, bool) or value < 1):
+                raise PolypackValueError(f"{name} must be a positive integer")
+        self._resource_limits = {name: value for name, value in values.items() if value is not None}
+
+    @property
+    def resource_limit_config(self) -> dict:
+        return dict(self._resource_limits)
 
     def register_node_type(
         self,
@@ -777,6 +805,35 @@ class PolyGraph:
             "pendingPersistence": bool(self._removed_node_ids or self._removed_edge_ids or self._removed_vector_ids),
             "indexCount": 1,
             "memoryEstimateBytes": memory_estimate,
+        }
+
+    def verify(self) -> dict:
+        """Verify persisted storage or the currently loaded in-memory graph."""
+        if self._store is not None:
+            return dict(self._store.verify())
+
+        errors = []
+        node_ids = set(self._nodes)
+        edge_count = 0
+        for source, edges in self._edges.items():
+            for edge in edges.values():
+                edge_count += 1
+                if source not in node_ids:
+                    errors.append(f"edge {edge.get('id')} has missing source {source}")
+                if edge.get("target") not in node_ids:
+                    errors.append(f"edge {edge.get('id')} has missing target {edge.get('target')}")
+        for node_id, vector in self.vectors.entries():
+            if node_id not in node_ids:
+                errors.append(f"vector {node_id} has no node")
+            if any(not math.isfinite(float(value)) for value in vector):
+                errors.append(f"vector {node_id} contains a non-finite value")
+        return {
+            "ok": not errors,
+            "errors": errors,
+            "nodeCount": len(node_ids),
+            "edgeCount": edge_count,
+            "vectorCount": self.vectors.size,
+            "mutationCount": 0,
         }
 
     def patch_node(
@@ -1224,6 +1281,7 @@ class GraphQuery:
         self._similarity: Optional[dict] = None
         self._activation_above: Optional[float] = None
         self._activation_order: Optional[str] = None
+        self._limits = graph.resource_limit_config
 
     def where_type(self, *types: str) -> "GraphQuery":
         self._node_types = list(types)
@@ -1275,6 +1333,9 @@ class GraphQuery:
         _validate_id(edge_type, "edge type")
         if not isinstance(depth, int) or depth < 0:
             raise PolypackValueError("depth must be a non-negative integer")
+        maximum = self._limits.get("maxTraversalDepth")
+        if maximum is not None and depth > maximum:
+            raise ResourceLimitError("maxTraversalDepth", maximum)
         self._traversal.append((edge_type, depth, direction))
         return self
 
@@ -1289,6 +1350,29 @@ class GraphQuery:
             raise PolypackValueError("threshold must be finite")
         self._similarity = {"vector": q, "threshold": float(threshold), "top_k": top_k}
         return self
+
+    def explain(self) -> dict:
+        """Describe the query stages and a coarse execution-cost estimate."""
+        stages = ["record-scan"]
+        if self._node_types:
+            stages.append(f"type-filter({','.join(self._node_types)})")
+        if self._attributes:
+            stages.append("property-filter")
+        if self._joins:
+            stages.append(f"join(count={len(self._joins)})")
+        if self._traversal:
+            stages.append(f"traversal(depth={max(step[1] for step in self._traversal)})")
+        if self._order_by:
+            stages.append(f"order({self._order_by[0]},{self._order_by[1]})")
+        if self._limit is not None:
+            stages.append(f"limit({self._limit})")
+        loaded = len(self._graph._nodes)
+        return {
+            "index": None,
+            "stages": stages,
+            "loadedRecords": loaded,
+            "estimatedCost": max(1, loaded),
+        }
 
     def _match(self, node: Node) -> bool:
         if self._node_types is not None and node["type"] not in self._node_types:
@@ -1321,6 +1405,9 @@ class GraphQuery:
         """Breadth-first expansion; returns nodes in discovery order (seeds first)."""
         visited = list(seeds)
         seen = set(seeds)
+        maximum = self._limits.get("maxNodesVisited")
+        if maximum is not None and len(seen) > maximum:
+            raise ResourceLimitError("maxNodesVisited", maximum)
         frontier = list(seeds)
         for _ in range(depth):
             if not frontier:
@@ -1333,6 +1420,8 @@ class GraphQuery:
                         if t not in seen:
                             seen.add(t)
                             visited.append(t)
+                            if maximum is not None and len(seen) > maximum:
+                                raise ResourceLimitError("maxNodesVisited", maximum)
                             nxt.append(t)
                 else:
                     sources = self._graph.get_edge_sources(node_id, edge_type)
@@ -1340,6 +1429,8 @@ class GraphQuery:
                         if s not in seen:
                             seen.add(s)
                             visited.append(s)
+                            if maximum is not None and len(seen) > maximum:
+                                raise ResourceLimitError("maxNodesVisited", maximum)
                             nxt.append(s)
             frontier = nxt
         return visited
@@ -1418,8 +1509,15 @@ class GraphQuery:
         plan = self._to_plan()
         native_ids = self._native_ids(plan)
         if native_ids is not None:
+            maximum = self._limits.get("maxNodesVisited")
+            if maximum is not None and len(native_ids) > maximum:
+                raise ResourceLimitError("maxNodesVisited", maximum)
             by_id = {n["id"]: n for n in self._graph._nodes.values()}
-            return [by_id[i] for i in native_ids if i in by_id]
+            results = [by_id[i] for i in native_ids if i in by_id]
+            maximum = self._limits.get("maxResults")
+            if maximum is not None and len(results) > maximum:
+                raise ResourceLimitError("maxResults", maximum)
+            return results
         # Fallback: pure-Python pipeline (only reached if the native path
         # failed, e.g. a non-JSON-serialisable filter value).
         return self._collect_python(plan)
@@ -1463,6 +1561,9 @@ class GraphQuery:
             results = results[self._offset :]
         if self._limit is not None:
             results = results[: self._limit]
+        maximum = self._limits.get("maxResults")
+        if maximum is not None and len(results) > maximum:
+            raise ResourceLimitError("maxResults", maximum)
         return results
 
     def to_list(self) -> list:
