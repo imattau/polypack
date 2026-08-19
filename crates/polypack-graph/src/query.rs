@@ -16,7 +16,7 @@ use polypack_core::vector::cosine;
 use polypack_core::{Node, PolypackError, Result};
 
 use crate::edge::EdgeEntry;
-use crate::graph::now_millis;
+use crate::graph::{now_millis, IndexDefinition};
 use crate::persisted_query::QueryExplain;
 
 /// A `join` predicate closure: `Some` to filter by the connected node,
@@ -99,6 +99,8 @@ pub struct GraphQuery<'a> {
     nodes: &'a HashMap<String, Node>,
     edges: &'a HashMap<String, HashMap<String, EdgeEntry>>,
     node_to_edge: &'a HashMap<String, HashSet<String>>,
+    indexes: &'a HashMap<String, IndexDefinition>,
+    secondary_indexes: &'a HashMap<String, HashMap<String, HashSet<String>>>,
 
     node_types: Option<Vec<String>>,
     attributes: HashMap<String, serde_json::Value>,
@@ -121,11 +123,15 @@ impl<'a> GraphQuery<'a> {
         nodes: &'a HashMap<String, Node>,
         edges: &'a HashMap<String, HashMap<String, EdgeEntry>>,
         node_to_edge: &'a HashMap<String, HashSet<String>>,
+        indexes: &'a HashMap<String, IndexDefinition>,
+        secondary_indexes: &'a HashMap<String, HashMap<String, HashSet<String>>>,
     ) -> Self {
         Self {
             nodes,
             edges,
             node_to_edge,
+            indexes,
+            secondary_indexes,
             node_types: None,
             attributes: HashMap::new(),
             attribute_ranges: HashMap::new(),
@@ -222,8 +228,20 @@ impl<'a> GraphQuery<'a> {
 
     /// Describe the hot-query stages without materializing results.
     pub fn explain(&self) -> QueryExplain {
-        let index = self.node_types.as_ref().filter(|types| !types.is_empty()).map(|_| "type-index".to_string());
-        let mut stages = vec![index.clone().unwrap_or_else(|| "record-scan".to_string())];
+        let property_index = self.indexes.values().find(|definition| {
+            !definition.fields.is_empty()
+                && definition.fields.iter().all(|field| self.attributes.contains_key(field))
+                && self.node_types.as_ref().is_none_or(|types| definition.node_type.as_ref().is_none_or(|node_type| types.len() == 1 && types[0] == *node_type))
+        }).map(|definition| definition.name.clone());
+        let range_index = self.indexes.values().find(|definition| {
+            definition.fields.len() == 1
+                && self.attribute_ranges.contains_key(&definition.fields[0])
+                && self.node_types.as_ref().is_none_or(|types| definition.node_type.as_ref().is_none_or(|node_type| types.len() == 1 && types[0] == *node_type))
+        }).map(|definition| definition.name.clone());
+        let index = property_index.or(range_index).or_else(|| self.node_types.as_ref().filter(|types| !types.is_empty()).map(|_| "type-index".to_string()));
+        let mut stages = vec![index.as_ref().map_or_else(|| "record-scan".to_string(), |name| {
+            if name == "type-index" { name.clone() } else { format!("property-index({name})") }
+        })];
         if let Some(types) = &self.node_types {
             if !types.is_empty() {
                 stages.push(format!("type-filter({})", types.join(",")));
@@ -404,6 +422,35 @@ impl<'a> GraphQuery<'a> {
         }
 
         if !ids.is_empty() {
+            return ids.iter().filter_map(|id| self.nodes.get(id)).collect();
+        }
+
+        if let Some(index) = self.indexes.values().find(|definition| {
+            !definition.fields.is_empty()
+                && definition.fields.iter().all(|field| self.attributes.contains_key(field))
+                && self.node_types.as_ref().is_none_or(|types| definition.node_type.as_ref().is_none_or(|node_type| types.iter().any(|kind| kind == node_type)))
+        }) {
+            let values = index.fields.iter().map(|field| self.attributes.get(field).cloned().unwrap_or(serde_json::Value::Null)).collect::<Vec<_>>();
+            let key = serde_json::to_string(&values).expect("JSON index key serialization cannot fail");
+            if let Some(ids) = self.secondary_indexes.get(&index.name).and_then(|buckets| buckets.get(&key)) {
+                return ids.iter().filter_map(|id| self.nodes.get(id)).collect();
+            }
+            return Vec::new();
+        }
+
+        if let Some(index) = self.indexes.values().find(|definition| {
+            definition.fields.len() == 1
+                && self.attribute_ranges.contains_key(&definition.fields[0])
+                && self.node_types.as_ref().is_none_or(|types| definition.node_type.as_ref().is_none_or(|node_type| types.len() == 1 && types[0] == *node_type))
+        }) {
+            let field = &index.fields[0];
+            let range = &self.attribute_ranges[field];
+            let ids: HashSet<String> = self.secondary_indexes.get(&index.name).into_iter().flat_map(|buckets| buckets.iter()).filter_map(|(encoded, bucket)| {
+                let values = serde_json::from_str::<Vec<serde_json::Value>>(encoded).ok()?;
+                let value = values.first()?.as_f64()?;
+                if range.above.is_some_and(|above| value <= above) || range.below.is_some_and(|below| value >= below) { return None; }
+                Some(bucket.iter().cloned())
+            }).flatten().collect();
             return ids.iter().filter_map(|id| self.nodes.get(id)).collect();
         }
 
@@ -746,11 +793,13 @@ mod tests {
         nodes: HashMap<String, Node>,
         edges: HashMap<String, HashMap<String, EdgeEntry>>,
         node_to_edge: HashMap<String, HashSet<String>>,
+        indexes: HashMap<String, IndexDefinition>,
+        secondary_indexes: HashMap<String, HashMap<String, HashSet<String>>>,
     }
 
     impl Fixture {
         fn new() -> Self {
-            Self { nodes: HashMap::new(), edges: HashMap::new(), node_to_edge: HashMap::new() }
+            Self { nodes: HashMap::new(), edges: HashMap::new(), node_to_edge: HashMap::new(), indexes: HashMap::new(), secondary_indexes: HashMap::new() }
         }
 
         fn add(&mut self, node: Node) -> &mut Self {
@@ -776,7 +825,7 @@ mod tests {
         }
 
         fn query(&self) -> GraphQuery<'_> {
-            GraphQuery::new(&self.nodes, &self.edges, &self.node_to_edge)
+            GraphQuery::new(&self.nodes, &self.edges, &self.node_to_edge, &self.indexes, &self.secondary_indexes)
         }
     }
 

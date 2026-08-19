@@ -545,6 +545,7 @@ class DirectoryStorage:
             fcntl.flock(self._lock_file.fileno(), fcntl.LOCK_SH if read_only else fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError as exc:
             self._lock_file.close()
+            self._lock_file = None
             raise PolypackStorageError(f"store is already locked: {directory}") from exc
         if not read_only:
             self._lock_file.seek(0)
@@ -799,6 +800,15 @@ class PolyGraph:
             "concurrentWriters": False,
             "vectorSearch": "exact",
         }
+
+    def require_adapter_capabilities(self, required: Optional[dict] = None, **kwargs: Any) -> None:
+        """Reject the graph unless its adapter declares the requested guarantees."""
+        expectations = dict(required or {})
+        expectations.update(kwargs)
+        capabilities = self.capabilities
+        for name, expected in expectations.items():
+            if capabilities.get(name) != expected:
+                raise PolypackValueError(f"persistence adapter does not support capability: {name}")
 
     def set_resource_limits(self, limits: Optional[dict] = None, **kwargs: int) -> None:
         """Configure positive integer limits for writes and graph queries."""

@@ -264,6 +264,7 @@ name = "polypack-graph"
 version = "2.5.0"
 dependencies = [
  "polypack-core",
+ "serde",
  "serde_json",
 ]
 

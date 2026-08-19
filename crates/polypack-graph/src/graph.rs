@@ -12,7 +12,7 @@ use polypack_core::{
     aggregate as core_aggregate, execute as core_execute, ChangeBatch, Edge, GraphSnapshot, HnswConfig,
     HnswIndex, Node, PolypackError, QueryPlan, Result, Storage, Store, StoreConfig,
 };
-use polypack_core::storage::{AdapterCapabilities, MutationRecord, VerificationReport};
+use polypack_core::storage::{AdapterCapabilities, MutationRecord, VerificationReport, INDEXES_FILE};
 
 use crate::edge::{decode_ownership, encode_ownership, EdgeEntry, EdgeOwnership};
 use crate::embedding::{create_embedding, EmbeddingProvider, FeatureHashEmbedding};
@@ -56,6 +56,20 @@ fn get_data_path<'a>(root: &'a serde_json::Value, path: &[&str]) -> Option<&'a s
         return object.get(path[0]);
     }
     get_data_path(object.get(path[0])?, &path[1..])
+}
+
+pub(crate) fn indexed_value_key(node: &Node, index: &IndexDefinition) -> Option<String> {
+    if index.node_type.as_deref().is_some_and(|node_type| node_type != node.node_type) {
+        return None;
+    }
+    let data = serde_json::Value::Object(node.data.clone());
+    let values: Vec<serde_json::Value> = index
+        .fields
+        .iter()
+        .map(|field| get_data_path(&data, &field.split('.').collect::<Vec<_>>()).cloned().unwrap_or(serde_json::Value::Null))
+        .collect();
+    if index.sparse && values.iter().any(serde_json::Value::is_null) { return None; }
+    Some(serde_json::to_string(&values).expect("JSON index key serialization cannot fail"))
 }
 
 fn matches_json_type(value: &serde_json::Value, expected: &str) -> bool {
@@ -107,6 +121,15 @@ pub struct EdgeTypeDefinition {
     pub cardinality: Option<String>,
     pub required_fields: Vec<String>,
     pub data_types: HashMap<String, String>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Default, PartialEq, Eq)]
+pub struct IndexDefinition {
+    pub name: String,
+    pub node_type: Option<String>,
+    pub fields: Vec<String>,
+    pub unique: bool,
+    pub sparse: bool,
 }
 
 impl Default for GraphConfig {
@@ -163,6 +186,8 @@ pub struct Graph {
     current_operation_id: Option<String>,
     node_type_definitions: HashMap<String, NodeTypeDefinition>,
     edge_type_definitions: HashMap<String, EdgeTypeDefinition>,
+    indexes: HashMap<String, IndexDefinition>,
+    secondary_indexes: HashMap<String, HashMap<String, HashSet<String>>>,
     migrations: MigrationRegistry,
 }
 
@@ -182,6 +207,7 @@ struct GraphCheckpoint {
     removed_vector_ids: HashSet<String>,
     batch_depth: u32,
     pending_batch_events: Vec<GraphChangeEvent>,
+    secondary_indexes: HashMap<String, HashMap<String, HashSet<String>>>,
     warmed: bool,
 }
 
@@ -203,6 +229,7 @@ impl GraphCheckpoint {
             removed_vector_ids: graph.removed_vector_ids.clone(),
             batch_depth: graph.batch_depth,
             pending_batch_events: graph.pending_batch_events.clone(),
+            secondary_indexes: graph.secondary_indexes.clone(),
             warmed: graph.warmed,
         }
     }
@@ -223,6 +250,7 @@ impl GraphCheckpoint {
         graph.removed_vector_ids = self.removed_vector_ids;
         graph.batch_depth = self.batch_depth;
         graph.pending_batch_events = self.pending_batch_events;
+        graph.secondary_indexes = self.secondary_indexes;
         graph.warmed = self.warmed;
     }
 }
@@ -232,7 +260,7 @@ impl Graph {
     pub fn open(storage: Box<dyn Storage>, store_config: StoreConfig, config: GraphConfig) -> Result<Self> {
         let store = Store::new(storage, store_config);
         let hnsw = HnswIndex::new(config.hnsw, 0)?;
-        Ok(Self {
+        let mut graph = Self {
             store,
             hnsw,
             config,
@@ -260,13 +288,128 @@ impl Graph {
             current_operation_id: None,
             node_type_definitions: HashMap::new(),
             edge_type_definitions: HashMap::new(),
+            indexes: HashMap::new(),
+            secondary_indexes: HashMap::new(),
             migrations: MigrationRegistry::default(),
-        })
+        };
+        graph.load_index_metadata()?;
+        Ok(graph)
     }
 
     /// Report the guarantees declared by the underlying storage adapter.
     pub fn capabilities(&self) -> AdapterCapabilities {
         self.store.capabilities()
+    }
+
+    /// Reject a graph configuration unless the backing adapter declares every
+    /// requested guarantee. `vector_search` is treated as a minimum: ANN
+    /// satisfies exact-search requirements, while `None` imposes no vector
+    /// requirement.
+    pub fn require_capabilities(&self, required: AdapterCapabilities) -> Result<()> {
+        let actual = self.capabilities();
+        let checks = [
+            (required.atomic_batches, actual.atomic_batches, "atomic_batches"),
+            (required.transactions, actual.transactions, "transactions"),
+            (required.fsync, actual.fsync, "fsync"),
+            (required.secondary_indexes, actual.secondary_indexes, "secondary_indexes"),
+            (required.snapshots, actual.snapshots, "snapshots"),
+            (required.change_feed, actual.change_feed, "change_feed"),
+            (required.concurrent_writers, actual.concurrent_writers, "concurrent_writers"),
+        ];
+        if let Some((_, _, name)) = checks.into_iter().find(|(needed, supported, _)| *needed && !*supported) {
+            return Err(PolypackError::InvalidArgument(format!("persistence adapter does not support capability: {name}")));
+        }
+        let vector_ok = match required.vector_search {
+            polypack_core::storage::VectorSearchCapability::None => true,
+            polypack_core::storage::VectorSearchCapability::Exact => actual.vector_search != polypack_core::storage::VectorSearchCapability::None,
+            polypack_core::storage::VectorSearchCapability::Ann => actual.vector_search == polypack_core::storage::VectorSearchCapability::Ann,
+        };
+        if !vector_ok {
+            return Err(PolypackError::InvalidArgument("persistence adapter does not support capability: vector_search".into()));
+        }
+        Ok(())
+    }
+
+    /// Define a node-data index. Unique indexes are enforced before every
+    /// mutation; the first implementation keeps the index metadata in the
+    /// graph and uses a validation scan, leaving planner acceleration to a
+    /// storage-specific implementation.
+    pub fn define_index(&mut self, definition: IndexDefinition) -> Result<()> {
+        if definition.name.is_empty() || definition.fields.is_empty() || definition.fields.iter().any(|field| field.is_empty()) {
+            return Err(PolypackError::InvalidArgument("index name and fields must not be empty".into()));
+        }
+        if self.indexes.contains_key(&definition.name) {
+            return Err(PolypackError::InvalidArgument(format!("index {} is already defined", definition.name)));
+        }
+        self.indexes.insert(definition.name.clone(), definition.clone());
+        self.secondary_indexes.insert(definition.name.clone(), HashMap::new());
+        let mut indexed_nodes: HashMap<String, Node> = self.store.query_nodes(&NodeQuery::default())?.into_iter().map(|node| (node.id.clone(), node)).collect();
+        indexed_nodes.extend(self.nodes.iter().map(|(id, node)| (id.clone(), node.clone())));
+        let validation = indexed_nodes.values().try_for_each(|node| self.validate_node_indexes(node, Some(&node.id)));
+        if let Err(error) = validation {
+            self.indexes.remove(&definition.name);
+            self.secondary_indexes.remove(&definition.name);
+            return Err(error);
+        }
+        let nodes: Vec<Node> = indexed_nodes.into_values().collect();
+        for node in &nodes { self.add_secondary_index_entry(node); }
+        if let Err(error) = self.persist_index_metadata() {
+            self.drop_index_memory(&definition.name);
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    pub fn drop_index(&mut self, name: &str) -> Result<bool> {
+        if !self.indexes.contains_key(name) { return Ok(false); }
+        let definition = self.indexes.remove(name).expect("index existence checked");
+        self.secondary_indexes.remove(name);
+        if let Err(error) = self.persist_index_metadata() {
+            self.secondary_indexes.insert(name.to_string(), HashMap::new());
+            self.indexes.insert(name.to_string(), definition);
+            let nodes: Vec<Node> = self.nodes.values().cloned().collect();
+            for node in &nodes { self.add_secondary_index_entry(node); }
+            return Err(error);
+        }
+        Ok(true)
+    }
+
+    pub fn indexes(&self) -> Vec<IndexDefinition> {
+        let mut indexes: Vec<_> = self.indexes.values().cloned().collect();
+        indexes.sort_by(|a, b| a.name.cmp(&b.name));
+        indexes
+    }
+
+    fn drop_index_memory(&mut self, name: &str) {
+        self.secondary_indexes.remove(name);
+        self.indexes.remove(name);
+    }
+
+    fn load_index_metadata(&mut self) -> Result<()> {
+        let Some(data) = self.store.read_auxiliary(INDEXES_FILE)? else { return Ok(()); };
+        let definitions: Vec<IndexDefinition> = serde_json::from_slice(&data)
+            .map_err(|error| PolypackError::CorruptData(format!("index metadata: {error}")))?;
+        for definition in definitions {
+            if definition.name.is_empty() || definition.fields.is_empty() || definition.fields.iter().any(|field| field.is_empty()) || self.indexes.contains_key(&definition.name) {
+                return Err(PolypackError::CorruptData("invalid index metadata".into()));
+            }
+            self.secondary_indexes.insert(definition.name.clone(), HashMap::new());
+            self.indexes.insert(definition.name.clone(), definition);
+        }
+        // `Store` materializes its persisted records independently of the
+        // graph's hot cache. Build the lookup buckets from that full view so
+        // persisted queries remain indexed after reopen and cache eviction.
+        let nodes = self.store.query_nodes(&NodeQuery::default())?;
+        for node in &nodes {
+            self.add_secondary_index_entry(node);
+        }
+        Ok(())
+    }
+
+    fn persist_index_metadata(&mut self) -> Result<()> {
+        let data = serde_json::to_vec(&self.indexes())
+            .map_err(|error| PolypackError::InvalidArgument(format!("index metadata: {error}")))?;
+        self.store.write_auxiliary(INDEXES_FILE, &data)
     }
 
     /// Return the active transaction identifier while inside a transaction.
@@ -424,6 +567,20 @@ impl Graph {
             if let Some(value) = get_data_path(&data, &parts) {
                 if !matches_json_type(value, expected) {
                     return Err(PolypackError::InvalidArgument(format!("node {} field {field} must be {expected}", node.id)));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_node_indexes(&self, node: &Node, exclude_id: Option<&str>) -> Result<()> {
+        for index in self.indexes.values().filter(|index| index.unique && index.node_type.as_deref().is_none_or(|node_type| node_type == node.node_type)) {
+            let values: Vec<_> = index.fields.iter().map(|field| get_data_path(&serde_json::Value::Object(node.data.clone()), &field.split('.').collect::<Vec<_>>()).cloned()).collect();
+            if index.sparse && values.iter().any(Option::is_none) { continue; }
+            for other in self.nodes.values().filter(|other| Some(other.id.as_str()) != exclude_id && index.node_type.as_deref().is_none_or(|node_type| node_type == other.node_type)) {
+                let other_values: Vec<_> = index.fields.iter().map(|field| get_data_path(&serde_json::Value::Object(other.data.clone()), &field.split('.').collect::<Vec<_>>()).cloned()).collect();
+                if values == other_values {
+                    return Err(PolypackError::InvalidArgument(format!("unique index {} would be violated by node {}", index.name, node.id)));
                 }
             }
         }
@@ -870,6 +1027,9 @@ impl Graph {
         self.hot_cache_order = LruList::new();
         self.node_to_edge.clear();
         self.by_type.clear();
+        // Secondary buckets represent the complete persisted store view, not
+        // only the hot cache. Keep them available for persisted queries after
+        // clearing the in-memory working set.
         self.evicted_dirty_nodes.clear();
         self.dirty_edges.clear();
         self.dirty_vectors.clear();
@@ -914,6 +1074,7 @@ impl Graph {
     pub fn add_node(&mut self, node: Node) -> Result<()> {
         validate_node(&node)?;
         self.validate_node_schema(&node)?;
+        self.validate_node_indexes(&node, Some(&node.id))?;
         self.insert_node(node);
         Ok(())
     }
@@ -1028,6 +1189,8 @@ impl Graph {
             candidate.updated_at = now_millis();
             candidate.revision = candidate.revision.saturating_add(1);
             self.validate_node_schema(&candidate)?;
+            self.validate_node_indexes(&candidate, Some(id))?;
+            self.unindex_node(id);
             let node = self.nodes.get_mut(id).unwrap();
             node.data.extend(data);
             if let Some(vector) = &vector {
@@ -1040,6 +1203,7 @@ impl Graph {
             node.revision = node.revision.saturating_add(1);
             node.node_type.clone()
         };
+        self.index_node(id, &node_type);
 
         if let Some(vector) = vector {
             self.removed_vector_ids.remove(id);
@@ -1142,14 +1306,17 @@ impl Graph {
             activation: existing.activation.clone(),
         };
         self.validate_node_schema(&candidate_node)?;
+        self.validate_node_indexes(&candidate_node, Some(id))?;
 
         let node_type = {
+            self.unindex_node(id);
             let node = self.nodes.get_mut(id).expect("node checked above");
             node.data = candidate.as_object().cloned().expect("patch root is an object");
             node.updated_at = now_millis();
             node.revision = node.revision.saturating_add(1);
             node.node_type.clone()
         };
+        self.index_node(id, &node_type);
         self.touch_hot_cache(id);
         self.mark_dirty(id);
         self.emit(GraphChangeEvent::NodeUpdated { node_id: id.to_string(), node_type });
@@ -1733,18 +1900,18 @@ impl Graph {
     /// Start a fluent query over the current hot working set. Mirrors
     /// `PolyGraph.query`.
     pub fn query(&self) -> GraphQuery<'_> {
-        GraphQuery::new(&self.nodes, &self.edges, &self.node_to_edge)
+        GraphQuery::new(&self.nodes, &self.edges, &self.node_to_edge, &self.indexes, &self.secondary_indexes)
     }
 
     /// Start a fluent query over every persisted node, without loading
     /// results into the hot working set. Mirrors `PolyGraph.queryPersisted`.
     pub fn query_persisted(&mut self) -> PersistedGraphQuery<'_> {
-        PersistedGraphQuery::new(&mut self.store)
+        PersistedGraphQuery::new(&mut self.store, &self.indexes, &self.secondary_indexes)
     }
 
     /// Create a persisted query with explicit traversal and result limits.
     pub fn query_persisted_with_limits(&mut self, limits: QueryResourceLimits) -> PersistedGraphQuery<'_> {
-        PersistedGraphQuery::new(&mut self.store).with_resource_limits(limits)
+        PersistedGraphQuery::new(&mut self.store, &self.indexes, &self.secondary_indexes).with_resource_limits(limits)
     }
 
     /// Start an in-memory similarity query from text, embedded with the
@@ -2037,16 +2204,35 @@ impl Graph {
     /// Mirrors `PolyGraph.indexNode`'s `_byType` bookkeeping.
     fn index_node(&mut self, id: &str, node_type: &str) {
         self.by_type.entry(node_type.to_string()).or_default().insert(id.to_string());
+        if let Some(node) = self.nodes.get(id).cloned() { self.add_secondary_index_entry(&node); }
     }
 
     /// Mirrors `PolyGraph.unindexNode`.
     fn unindex_node(&mut self, id: &str) {
-        let Some(node) = self.nodes.get(id) else { return };
+        let Some(node) = self.nodes.get(id).cloned() else { return };
+        self.remove_secondary_index_entry(&node);
         if let Some(set) = self.by_type.get_mut(&node.node_type) {
             set.remove(id);
             if set.is_empty() {
                 let node_type = node.node_type.clone();
                 self.by_type.remove(&node_type);
+            }
+        }
+    }
+
+    fn add_secondary_index_entry(&mut self, node: &Node) {
+        for (name, definition) in &self.indexes {
+            let Some(key) = indexed_value_key(node, definition) else { continue };
+            self.secondary_indexes.entry(name.clone()).or_default().entry(key).or_default().insert(node.id.clone());
+        }
+    }
+
+    fn remove_secondary_index_entry(&mut self, node: &Node) {
+        for (name, definition) in &self.indexes {
+            let Some(key) = indexed_value_key(node, definition) else { continue };
+            if let Some(bucket) = self.secondary_indexes.get_mut(name).and_then(|buckets| buckets.get_mut(&key)) {
+                bucket.remove(&node.id);
+                if bucket.is_empty() { self.secondary_indexes.get_mut(name).unwrap().remove(&key); }
             }
         }
     }
@@ -2856,6 +3042,91 @@ mod tests {
         assert!(capabilities.transactions);
         assert_eq!(capabilities.vector_search, polypack_core::storage::VectorSearchCapability::Exact);
         assert!(!capabilities.concurrent_writers);
+    }
+
+    #[test]
+    fn enforces_required_adapter_capabilities() {
+        let graph = test_graph();
+        graph.require_capabilities(AdapterCapabilities {
+            atomic_batches: true,
+            transactions: true,
+            vector_search: polypack_core::storage::VectorSearchCapability::Exact,
+            ..Default::default()
+        }).unwrap();
+        let error = graph.require_capabilities(AdapterCapabilities { fsync: true, ..Default::default() }).unwrap_err();
+        assert!(error.to_string().contains("fsync"));
+    }
+
+    #[test]
+    fn unique_indexes_reject_duplicate_insert_update_and_patch() {
+        let mut graph = test_graph();
+        graph.define_index(IndexDefinition {
+            name: "external-id".into(),
+            node_type: Some("record".into()),
+            fields: vec!["provider".into(), "externalId".into()],
+            unique: true,
+            sparse: true,
+        }).unwrap();
+        let mut first = node_of_type("a", "record");
+        first.data.insert("provider".into(), "acme".into());
+        first.data.insert("externalId".into(), "1".into());
+        graph.add_node(first).unwrap();
+        let mut duplicate = node_of_type("b", "record");
+        duplicate.data.insert("provider".into(), "acme".into());
+        duplicate.data.insert("externalId".into(), "1".into());
+        assert!(graph.add_node(duplicate).is_err());
+        assert!(graph.patch_node("a", serde_json::Map::from_iter([(String::from("externalId"), "2".into())]), Vec::new(), serde_json::Map::new(), None).is_ok());
+        assert!(graph.update_node("a", serde_json::Map::from_iter([(String::from("externalId"), "1".into())]), None, None).is_ok());
+        assert_eq!(graph.indexes()[0].name, "external-id");
+        let query = graph.query().where_field("provider", "acme".into()).where_field("externalId", "1".into());
+        assert_eq!(query.explain().index.as_deref(), Some("external-id"));
+        assert_eq!(query.to_array().iter().map(|node| node.id.as_str()).collect::<Vec<_>>(), vec!["a"]);
+        drop(query);
+        graph.clear();
+        assert!(graph.query().where_field("provider", "acme".into()).where_field("externalId", "1".into()).to_array().is_empty());
+    }
+
+    #[test]
+    fn numeric_range_queries_use_secondary_index_candidates() {
+        let mut graph = test_graph();
+        graph.define_index(IndexDefinition { name: "birth-year".into(), fields: vec!["birthYear".into()], sparse: true, ..Default::default() }).unwrap();
+        for (id, year) in [("young", 1980), ("middle", 2020), ("old", 2050)] {
+            let mut node = node_of_type(id, "person");
+            node.data.insert("birthYear".into(), year.into());
+            graph.add_node(node).unwrap();
+        }
+        let query = graph.query().where_node_type(vec!["person".into()]).where_attribute_range("birthYear", Some(2000.0), None);
+        assert_eq!(query.explain().index.as_deref(), Some("birth-year"));
+        assert_eq!(query.explain().stages[0], "property-index(birth-year)");
+        let mut hot_ids = query.to_array().into_iter().map(|node| node.id).collect::<Vec<_>>();
+        hot_ids.sort();
+        assert_eq!(hot_ids, vec!["middle", "old"]);
+        drop(query);
+        graph.flush().unwrap();
+        graph.clear();
+        let mut persisted_ids = graph.query_persisted().where_attribute_range("birthYear", Some(2000.0), None).ids().unwrap();
+        persisted_ids.sort();
+        assert_eq!(persisted_ids, vec!["middle", "old"]);
+    }
+
+    #[test]
+    fn index_metadata_survives_store_reopen() {
+        let storage = shared_storage();
+        let mut first = graph_on(&storage, GraphConfig::default());
+        first.define_index(IndexDefinition { name: "lookup".into(), fields: vec!["key".into()], ..Default::default() }).unwrap();
+        let mut record = node_of_type("persisted", "record");
+        record.data.insert("key".into(), "value".into());
+        first.add_node(record).unwrap();
+        first.flush().unwrap();
+        first.clear();
+        let mut persisted = first.query_persisted().where_field("key", "value".into());
+        assert_eq!(persisted.explain().unwrap().index.as_deref(), Some("lookup"));
+        assert_eq!(persisted.explain().unwrap().stages[0], "property-index(lookup)");
+        assert_eq!(persisted.ids().unwrap(), vec!["persisted"]);
+        drop(persisted);
+        let mut second = graph_on(&storage, GraphConfig::default());
+        assert_eq!(second.indexes().iter().map(|index| index.name.as_str()).collect::<Vec<_>>(), vec!["lookup"]);
+        assert_eq!(second.query_persisted().where_field("key", "value".into()).ids().unwrap(), vec!["persisted"]);
     }
 
     #[test]

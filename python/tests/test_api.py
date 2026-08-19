@@ -85,6 +85,13 @@ def test_validation_errors():
         graph.add_edge("a::b", "REL", "c")
 
 
+def test_adapter_capability_requirements():
+    graph = PolyGraph()
+    graph.require_adapter_capabilities({"transactions": True, "vectorSearch": "exact"})
+    with pytest.raises(PolypackValueError, match="fsync"):
+        graph.require_adapter_capabilities(fsync=True)
+
+
 def test_context_manager_and_change_batch():
     with PolyGraph() as graph:
         graph.add_node({"id": "a", "type": "t", "data": {}, "insertedAt": 1, "updatedAt": 1})
@@ -138,6 +145,10 @@ def test_persist_recovers_from_truncated_wal(tmp_path):
     # Crash mid-append: the final in-flight frame is partial. Recovery must
     # still read the acknowledged frames before it.
     (tmp_path / "wal.msgpack").write_bytes(wal[: len(wal) - 2])
+    # Release the writer lock without saving or compacting, simulating the
+    # original process exiting before recovery starts.
+    g._store.close()
+    g._store = None
 
     g2 = PolyGraph.open(str(tmp_path))
     assert g2.get_node("n1") is not None

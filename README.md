@@ -58,6 +58,7 @@ migration notes.
 - **Reactive** — RxJS change events, batching, React hooks
 - **Pluggable persistence** — MemoryAdapter, BinaryStoreAdapter (MessagePack + WAL), build your own
 - **Database core** — atomic transactions, revisions, conditional writes, patches, schema hooks, and resource limits
+- **Capability checks** — inspect adapter guarantees and reject configurations that require unsupported durability, indexing, concurrency, or vector-search features
 - **Operational durability** — checkpoint/backup/verification APIs, durable logical mutation logs, cursors, and idempotent operation IDs
 - **Schema migrations** — contiguous, validated, retry-safe application migrations with dry runs, resume cursors, and progress reporting
 - **Explainable queries** — persisted and hot-query plans with index selection, estimated cost, and operational metrics

@@ -13,6 +13,7 @@ use std::collections::{HashMap, HashSet};
 pub const SNAPSHOT_FILE: &str = "snapshot.msgpack";
 pub const WAL_FILE: &str = "wal.msgpack";
 pub const MUTATION_LOG_FILE: &str = "mutations.jsonl";
+pub const INDEXES_FILE: &str = "indexes.json";
 pub const DEFAULT_COMPACT_THRESHOLD: usize = 10_000;
 /// Compact once the WAL holds at least this share of the store's record count.
 const COMPACT_RATIO: usize = 4;
@@ -96,6 +97,11 @@ pub struct OrderBy {
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct NodeQuery {
+    /// Optional candidate ids selected by a higher-level persisted index.
+    /// The store still applies every predicate, so this is an optimization,
+    /// not a correctness shortcut.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate_ids: Option<Vec<String>>,
     #[serde(default)]
     pub node_types: Option<Vec<String>>,
     #[serde(default)]
@@ -393,6 +399,26 @@ impl Store {
         self.storage.capabilities()
     }
 
+    pub fn read_auxiliary(&mut self, name: &str) -> Result<Option<Vec<u8>>> {
+        self.assert_open()?;
+        self.storage.read(name)
+    }
+
+    pub fn write_auxiliary(&mut self, name: &str, data: &[u8]) -> Result<()> {
+        self.assert_open()?;
+        self.storage.write(name, data)?;
+        if self.config.durability == Durability::Fsync {
+            self.storage.sync(name)?;
+            self.storage.sync_dir()?;
+        }
+        Ok(())
+    }
+
+    pub fn delete_auxiliary(&mut self, name: &str) -> Result<()> {
+        self.assert_open()?;
+        self.storage.delete(name)
+    }
+
     pub fn mutation_log(&mut self) -> Result<Vec<MutationRecord>> {
         self.assert_open()?;
         let Some(data) = self.storage.read(MUTATION_LOG_FILE)? else { return Ok(Vec::new()) };
@@ -449,6 +475,26 @@ impl Store {
                     }
                 }
                 Err(error) => errors.push(format!("snapshot: {error}")),
+            }
+        }
+        if let Some(data) = self.storage.read(INDEXES_FILE)? {
+            match serde_json::from_slice::<Vec<serde_json::Value>>(&data) {
+                Ok(definitions) => {
+                    let mut names = HashSet::new();
+                    for (position, definition) in definitions.iter().enumerate() {
+                        let Some(name) = definition.get("name").and_then(|value| value.as_str()) else {
+                            errors.push(format!("index metadata: index {position}: missing name"));
+                            continue;
+                        };
+                        if name.is_empty() || !names.insert(name.to_string()) {
+                            errors.push(format!("index metadata: index {name}: duplicate or empty name"));
+                        }
+                        if definition.get("fields").and_then(|value| value.as_array()).is_none_or(|fields| fields.is_empty()) {
+                            errors.push(format!("index metadata: index {name}: fields must not be empty"));
+                        }
+                    }
+                }
+                Err(error) => errors.push(format!("index metadata: {error}")),
             }
         }
         let mutation_count = self.mutation_log()?.len();
@@ -830,9 +876,12 @@ impl Store {
     /// fallback, mirroring the TypeScript adapter's `queryNodes`.
     pub fn query_nodes(&mut self, query: &NodeQuery) -> Result<Vec<Node>> {
         self.ensure_loaded()?;
-        let candidate_ids: Vec<String> = match self.type_only_ids(query) {
+        let candidate_ids: Vec<String> = match &query.candidate_ids {
+            Some(ids) => ids.clone(),
+            None => match self.type_only_ids(query) {
             Some(ids) => ids.into_iter().collect(),
             None => self.nodes.keys().cloned().collect(),
+            },
         };
         let mut results: Vec<Node> = candidate_ids
             .iter()
@@ -867,7 +916,9 @@ impl Store {
         self.ensure_loaded()?;
         let no_filters =
             query.node_types.is_none() && query.attributes.is_none() && query.attribute_ranges.is_none();
-        let count = if no_filters {
+        let count = if let Some(ids) = &query.candidate_ids {
+            ids.iter().filter_map(|id| self.nodes.get(id)).filter(|n| matches_node(n, query)).count()
+        } else if no_filters {
             self.nodes.len()
         } else if let Some(ids) = self.type_only_ids(query) {
             ids.len()
@@ -1249,6 +1300,16 @@ mod tests {
         assert_eq!(after_compaction.node_count, 1);
         assert_eq!(after_compaction.edge_count, 0);
         assert_eq!(after_compaction.vector_count, 0);
+    }
+
+    #[test]
+    fn verify_reports_invalid_index_metadata() {
+        let storage = shared();
+        storage.lock().unwrap().write(INDEXES_FILE, br#"[{"name":"dup","fields":["a"]},{"name":"dup","fields":[]}] "#).unwrap();
+        let mut store = Store::new(Box::new(storage), StoreConfig::default());
+        let report = store.verify().unwrap();
+        assert!(!report.ok);
+        assert!(report.errors.iter().any(|error| error.contains("index metadata")));
     }
 
     #[test]

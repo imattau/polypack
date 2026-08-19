@@ -17,7 +17,7 @@ use polypack_core::storage::{NodeQuery, OrderBy, RangeQuery};
 use polypack_core::vector::cosine;
 use polypack_core::{Node, Result, Store};
 
-use crate::graph::now_millis;
+use crate::graph::{now_millis, IndexDefinition};
 use crate::query::OrderDirection;
 
 /// A `join`/`join`-predicate closure: `Some` to filter by the connected
@@ -46,10 +46,22 @@ pub struct QueryResourceLimits {
     pub max_results: Option<usize>,
 }
 
+fn query_field_value(attributes: &HashMap<String, serde_json::Value>, field: &str) -> serde_json::Value {
+    if let Some(value) = attributes.get(field) {
+        return value.clone();
+    }
+    attributes
+        .get(field.strip_prefix("data.").unwrap_or(field))
+        .cloned()
+        .unwrap_or(serde_json::Value::Null)
+}
+
 /// Chainable query over all persisted nodes in a `Store`. Results are
 /// detached clones. Mirrors `PersistedGraphQuery`.
 pub struct PersistedGraphQuery<'a> {
     store: &'a mut Store,
+    indexes: &'a HashMap<String, IndexDefinition>,
+    secondary_indexes: &'a HashMap<String, HashMap<String, HashSet<String>>>,
 
     node_types: Option<Vec<String>>,
     attributes: HashMap<String, serde_json::Value>,
@@ -70,9 +82,15 @@ pub struct PersistedGraphQuery<'a> {
 }
 
 impl<'a> PersistedGraphQuery<'a> {
-    pub(crate) fn new(store: &'a mut Store) -> Self {
+    pub(crate) fn new(
+        store: &'a mut Store,
+        indexes: &'a HashMap<String, IndexDefinition>,
+        secondary_indexes: &'a HashMap<String, HashMap<String, HashSet<String>>>,
+    ) -> Self {
         Self {
             store,
+            indexes,
+            secondary_indexes,
             node_types: None,
             attributes: HashMap::new(),
             attribute_ranges: HashMap::new(),
@@ -181,8 +199,14 @@ impl<'a> PersistedGraphQuery<'a> {
     pub fn explain(&mut self) -> Result<QueryExplain> {
         let loaded_records = self.store.node_count()?;
         let mut stages = Vec::new();
-        let index = self.node_types.as_ref().filter(|types| !types.is_empty()).map(|_| "type-index".to_string());
-        stages.push(index.clone().unwrap_or_else(|| "record-scan".to_string()));
+        let selected = self.selected_index();
+        let selected_range = selected.or_else(|| self.selected_range_index());
+        let index = selected_range.map(|definition| definition.name.clone()).or_else(|| {
+            self.node_types.as_ref().filter(|types| !types.is_empty()).map(|_| "type-index".to_string())
+        });
+        stages.push(selected_range.map_or_else(|| {
+            if index.as_deref() == Some("type-index") { "type-index".to_string() } else { "record-scan".to_string() }
+        }, |definition| format!("property-index({})", definition.name)));
         if let Some(types) = &self.node_types {
             if !types.is_empty() {
                 stages.push(format!("type-filter({})", types.join(",")));
@@ -215,7 +239,26 @@ impl<'a> PersistedGraphQuery<'a> {
     // ── internals ──
 
     fn base_query(&self, include_order: bool, include_pagination: bool) -> NodeQuery {
+        let candidate_ids = self.selected_index().and_then(|definition| {
+            let values = definition.fields.iter().map(|field| query_field_value(&self.attributes, field)).collect::<Vec<_>>();
+            if definition.sparse && values.iter().any(serde_json::Value::is_null) {
+                return None;
+            }
+            let key = serde_json::to_string(&values).ok()?;
+            self.secondary_indexes.get(&definition.name)?.get(&key).map(|ids| ids.iter().cloned().collect())
+        });
+        let candidate_ids = candidate_ids.or_else(|| self.selected_range_index().and_then(|definition| {
+            let range = self.attribute_ranges.get(&definition.fields[0])?;
+            let buckets = self.secondary_indexes.get(&definition.name)?;
+            let ids = buckets.iter().filter_map(|(encoded, bucket)| {
+                let value = serde_json::from_str::<Vec<serde_json::Value>>(encoded).ok()?.first()?.as_f64()?;
+                if range.0.is_some_and(|above| value <= above) || range.1.is_some_and(|below| value >= below) { return None; }
+                Some(bucket.iter().cloned())
+            }).flatten().collect();
+            Some(ids)
+        }));
         NodeQuery {
+            candidate_ids,
             node_types: self.node_types.clone(),
             attributes: (!self.attributes.is_empty()).then(|| self.attributes.clone().into_iter().collect()),
             attribute_ranges: (!self.attribute_ranges.is_empty()).then(|| {
@@ -231,6 +274,27 @@ impl<'a> PersistedGraphQuery<'a> {
             offset: if include_pagination { self.result_offset } else { None },
             limit: if include_pagination { self.result_limit } else { None },
         }
+    }
+
+    fn selected_index(&self) -> Option<&IndexDefinition> {
+        self.indexes.values().filter(|definition| {
+            !definition.fields.is_empty()
+                && definition.fields.iter().all(|field| {
+                    self.attributes.contains_key(field) || self.attributes.contains_key(field.strip_prefix("data.").unwrap_or(field))
+                })
+                && (!definition.sparse || definition.fields.iter().all(|field| !query_field_value(&self.attributes, field).is_null()))
+                && self.node_types.as_ref().is_none_or(|types| {
+                    definition.node_type.as_ref().is_none_or(|node_type| types.len() == 1 && types[0] == *node_type)
+                })
+        }).min_by_key(|definition| definition.fields.len())
+    }
+
+    fn selected_range_index(&self) -> Option<&IndexDefinition> {
+        self.indexes.values().find(|definition| {
+            definition.fields.len() == 1
+                && self.attribute_ranges.contains_key(&definition.fields[0])
+                && self.node_types.as_ref().is_none_or(|types| definition.node_type.as_ref().is_none_or(|node_type| types.len() == 1 && types[0] == *node_type))
+        })
     }
 
     fn apply_edge_filters(&mut self, nodes: Vec<Node>) -> Result<Vec<Node>> {

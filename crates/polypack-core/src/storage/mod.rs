@@ -11,6 +11,6 @@ pub use store::{
     AdapterCapabilities, Durability, InMemoryStorage, MutationOperation, MutationRecord, NodeQuery, OrderBy, RangeQuery,
     Storage, Store, StoreConfig, VerificationReport,
     VectorSearchCapability,
-    DEFAULT_COMPACT_THRESHOLD, MUTATION_LOG_FILE, SNAPSHOT_FILE, WAL_FILE,
+    DEFAULT_COMPACT_THRESHOLD, INDEXES_FILE, MUTATION_LOG_FILE, SNAPSHOT_FILE, WAL_FILE,
 };
 pub use wal::WalEntry;
