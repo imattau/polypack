@@ -7,8 +7,10 @@ Semantics mirror `specification/data-model.md` and the TypeScript reference.
 from __future__ import annotations
 
 import copy
+import fcntl
 import math
 import os
+import shutil
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -48,6 +50,106 @@ class ResourceLimitError(PolypackError):
         self.limit_name = limit_name
         self.limit = limit
 
+
+class MigrationError(PolypackError):
+    """Raised when an application migration is invalid or cannot run."""
+
+
+class MigrationRegistry:
+    """Registry for resumable application-level node and edge migrations."""
+
+    def __init__(self) -> None:
+        self._definitions: dict[int, dict] = {}
+
+    def register(self, definition: dict) -> None:
+        source = definition.get("from")
+        target = definition.get("to")
+        if not isinstance(source, int) or not isinstance(target, int) or target <= source:
+            raise MigrationError("migration versions must be integers with to greater than from")
+        if source in self._definitions:
+            raise MigrationError(f"migration from {source} is already registered")
+        if not callable(definition.get("migrateNode")):
+            raise MigrationError("migration requires migrateNode")
+        self._definitions[source] = dict(definition)
+
+    @property
+    def all(self) -> list[dict]:
+        return [self._definitions[key] for key in sorted(self._definitions)]
+
+    def _path(self, source: int, target: int) -> list[dict]:
+        path = []
+        version = source
+        while version < target:
+            definition = self._definitions.get(version)
+            if definition is None or definition["to"] > target:
+                raise MigrationError(f"no contiguous migration path from {version} to {target}")
+            path.append(definition)
+            version = definition["to"]
+        return path
+
+    def run(self, graph: "PolyGraph", source: int, target: int, options: Optional[dict] = None) -> dict:
+        options = dict(options or {})
+        if not isinstance(source, int) or not isinstance(target, int) or target < source:
+            raise MigrationError("migration versions must be integers with to greater than or equal to from")
+        batch_size = options.get("batchSize", 2**63 - 1)
+        if not isinstance(batch_size, int) or batch_size < 1:
+            raise MigrationError("migration batchSize must be a positive integer")
+        path = self._path(source, target)
+        all_nodes = sorted(graph._nodes.values(), key=lambda node: node["id"])
+        all_edges = sorted((edge for edges in graph._edges.values() for edge in edges.values()), key=lambda edge: edge["id"])
+        resume = options.get("resumeAfter") or {}
+        nodes = [node for node in all_nodes if not resume.get("nodeId") or node["id"] > resume["nodeId"]]
+        edges = [edge for edge in all_edges if not resume.get("edgeId") or edge["id"] > resume["edgeId"]]
+        report = {"from": source, "to": target, "processed": 0, "total": len(nodes) + len(edges), "migrated": 0, "dryRun": options.get("dryRun", False)}
+        migrate_node = lambda node: self._apply_node(path, node)
+        migrate_edge = lambda edge: self._apply_edge(path, edge)
+        for start in range(0, len(nodes), batch_size):
+            batch = [migrate_node(copy.deepcopy(node)) for node in nodes[start:start + batch_size]]
+            if not report["dryRun"] and path:
+                with graph.transaction() as tx:
+                    for node in batch:
+                        tx.add_node(node)
+            report["processed"] += len(batch)
+            report["migrated"] += len(batch) if path else 0
+            report["lastProcessed"] = {"kind": "node", "id": batch[-1]["id"]}
+            callback = options.get("onProgress")
+            if callback:
+                callback(dict(report))
+        edge_migrations = any(callable(definition.get("migrateEdge")) for definition in path)
+        for start in range(0, len(edges), batch_size):
+            original = edges[start:start + batch_size]
+            batch = [migrate_edge(copy.deepcopy(edge)) for edge in original]
+            changed = [edge for before, edge in zip(original, batch) if edge.get("data") != before.get("data")]
+            if not report["dryRun"] and changed:
+                with graph.transaction() as tx:
+                    for edge in changed:
+                        tx.update_edge(edge["id"], edge.get("data") or {})
+            report["processed"] += len(batch)
+            report["migrated"] += len(batch) if edge_migrations else 0
+            report["lastProcessed"] = {"kind": "edge", "id": batch[-1]["id"]}
+            callback = options.get("onProgress")
+            if callback:
+                callback(dict(report))
+        return report
+
+    @staticmethod
+    def _apply_node(path: list[dict], node: Node) -> Node:
+        for definition in path:
+            result = definition["migrateNode"](_copy_node(node))
+            if result is not None:
+                node = result
+        return node
+
+    @staticmethod
+    def _apply_edge(path: list[dict], edge: dict) -> dict:
+        for definition in path:
+            callback = definition.get("migrateEdge")
+            if callback:
+                result = callback(copy.deepcopy(edge))
+                if result is not None:
+                    edge = result
+        return edge
+
 __all__ = [
     "PolyGraph",
     "GraphTransaction",
@@ -69,6 +171,8 @@ __all__ = [
     "PolypackStorageError",
     "ConflictError",
     "ResourceLimitError",
+    "MigrationError",
+    "MigrationRegistry",
 ]
 
 Node = dict
@@ -425,9 +529,33 @@ class HnswIndex:
 class DirectoryStorage:
     """Host byte-storage adapter over a directory (snapshot.msgpack / wal.msgpack)."""
 
-    def __init__(self, directory: str) -> None:
+    def __init__(self, directory: str, read_only: bool = False) -> None:
         self._dir = Path(directory)
         self._dir.mkdir(parents=True, exist_ok=True)
+        self._read_only = read_only
+        self._lock_file = open(self._dir / "store.lock", "a+b")
+        try:
+            fcntl.flock(self._lock_file.fileno(), fcntl.LOCK_SH if read_only else fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            self._lock_file.close()
+            raise PolypackStorageError(f"store is already locked: {directory}") from exc
+        if not read_only:
+            self._lock_file.seek(0)
+            self._lock_file.truncate()
+            self._lock_file.write(f"pid={os.getpid()}\n".encode())
+            self._lock_file.flush()
+
+    def close(self) -> None:
+        if getattr(self, "_lock_file", None) is not None:
+            fcntl.flock(self._lock_file.fileno(), fcntl.LOCK_UN)
+            self._lock_file.close()
+            self._lock_file = None
+
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except (OSError, AttributeError):
+            pass
 
     @property
     def capabilities(self) -> dict:
@@ -450,6 +578,8 @@ class DirectoryStorage:
         return path.read_bytes() if path.exists() else None
 
     def write(self, name: str, data: bytes) -> None:
+        if self._read_only:
+            raise PolypackStorageError("store was opened read-only")
         # Write-then-rename: a crash mid-write leaves the previous snapshot
         # intact instead of a torn file, and the tmp file is fsynced first
         # so the rename can never land ahead of its data on disk.
@@ -462,10 +592,14 @@ class DirectoryStorage:
         os.replace(tmp_path, target)
 
     def append(self, name: str, data: bytes) -> None:
+        if self._read_only:
+            raise PolypackStorageError("store was opened read-only")
         with open(self._path(name), "ab") as f:
             f.write(bytes(data))
 
     def delete(self, name: str) -> None:
+        if self._read_only:
+            raise PolypackStorageError("store was opened read-only")
         try:
             self._path(name).unlink()
         except FileNotFoundError:
@@ -603,6 +737,7 @@ class PolyGraph:
         self.vectors = vector_index or ExactIndex()
         self._on_orphan = on_orphan
         self._store: Optional[_NativeStore] = None
+        self._store_directory: Optional[Path] = None
         self._removed_node_ids: set = set()
         self._removed_edge_ids: set = set()
         self._removed_vector_ids: set = set()
@@ -610,6 +745,7 @@ class PolyGraph:
         self._node_type_definitions: dict[str, dict] = {}
         self._edge_type_definitions: dict[str, dict] = {}
         self._resource_limits: dict[str, int] = {}
+        self.migrations = MigrationRegistry()
 
     @property
     def capabilities(self) -> dict:
@@ -1060,16 +1196,50 @@ class PolyGraph:
     # ── persistence (Rust storage state machine) ──
 
     @classmethod
-    def open(cls, directory: str) -> "PolyGraph":
+    def open(cls, directory: str, read_only: bool = False) -> "PolyGraph":
         """Open a directory-backed binary store and load its graph."""
         graph = cls()
-        graph.open_store(directory)
+        graph.open_store(directory, read_only=read_only)
         return graph
 
-    def open_store(self, directory: str) -> None:
+    @classmethod
+    def restore(cls, source: str, destination: str) -> "PolyGraph":
+        """Restore a directory backup into ``destination`` and open it."""
+        source_path = Path(source)
+        destination_path = Path(destination)
+        if not source_path.is_dir():
+            raise PolypackStorageError(f"backup source does not exist: {source}")
+        destination_path.mkdir(parents=True, exist_ok=True)
+        for name in ("snapshot.msgpack", "wal.msgpack"):
+            source_file = source_path / name
+            if source_file.exists():
+                shutil.copy2(source_file, destination_path / name)
+        return cls.open(str(destination_path))
+
+    def open_store(self, directory: str, read_only: bool = False) -> None:
         """Attach a directory-backed store and load any existing state."""
-        self._store = _NativeStore(DirectoryStorage(directory))
+        self._store = _NativeStore(DirectoryStorage(directory, read_only=read_only))
+        self._store_directory = Path(directory)
         self._load_from_store()
+
+    def checkpoint(self) -> None:
+        """Persist pending mutations and compact the WAL into a snapshot."""
+        if self._store is None:
+            raise PolypackStorageError("no store open; call open_store(path) first")
+        self.save()
+        self._store.compact()
+
+    def backup(self, destination: str) -> None:
+        """Create a consistent directory backup after checkpointing the store."""
+        if self._store is None or self._store_directory is None:
+            raise PolypackStorageError("no store open; call open_store(path) first")
+        self.checkpoint()
+        destination_path = Path(destination)
+        destination_path.mkdir(parents=True, exist_ok=True)
+        for name in ("snapshot.msgpack", "wal.msgpack"):
+            source_file = self._store_directory / name
+            if source_file.exists():
+                shutil.copy2(source_file, destination_path / name)
 
     def close_store(self) -> None:
         """Persist any unsaved changes, then compact and close the attached
@@ -1081,6 +1251,7 @@ class PolyGraph:
             self.save()
             self._store.close()
             self._store = None
+            self._store_directory = None
 
     def save(self) -> None:
         """Persist the full current graph state through the attached store.
