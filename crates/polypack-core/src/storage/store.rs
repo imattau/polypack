@@ -445,6 +445,34 @@ impl Store {
         Ok(self.mutation_log()?.last().map(|record| record.sequence).unwrap_or(0))
     }
 
+    /// Create a consistent administrative backup in another byte storage.
+    /// The recovery WAL is compacted first; logical mutations and auxiliary
+    /// metadata are copied alongside the snapshot.
+    pub fn backup(&mut self, destination: &mut dyn Storage) -> Result<()> {
+        self.compact()?;
+        for name in [SNAPSHOT_FILE, WAL_FILE, MUTATION_LOG_FILE, INDEXES_FILE] {
+            if let Some(data) = self.storage.read(name)? {
+                destination.write(name, &data)?;
+            } else {
+                destination.delete(name)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Restore a store from an adapter-neutral backup and validate that it
+    /// can be loaded before returning it to the caller.
+    pub fn restore(source: &dyn Storage, destination: Box<dyn Storage>, config: StoreConfig) -> Result<Self> {
+        let mut store = Store::new(destination, config);
+        for name in [SNAPSHOT_FILE, WAL_FILE, MUTATION_LOG_FILE, INDEXES_FILE] {
+            if let Some(data) = source.read(name)? {
+                store.storage.write(name, &data)?;
+            }
+        }
+        store.ensure_loaded()?;
+        Ok(store)
+    }
+
     pub fn verify(&mut self) -> Result<VerificationReport> {
         self.assert_open()?;
         let mut errors = Vec::new();
@@ -1318,6 +1346,20 @@ mod tests {
         let report = store.verify().unwrap();
         assert!(!report.ok);
         assert!(report.errors.iter().any(|error| error.contains("index metadata")));
+    }
+
+    #[test]
+    fn backup_and_restore_copy_all_durable_files() {
+        let mut source = Store::new(Box::new(InMemoryStorage::new()), StoreConfig::default());
+        source.apply(&batch(&[node("a")])).unwrap();
+        source.write_auxiliary(INDEXES_FILE, br"[]").unwrap();
+        let mut backup = InMemoryStorage::new();
+        source.backup(&mut backup).unwrap();
+
+        let mut restored = Store::restore(&backup, Box::new(InMemoryStorage::new()), StoreConfig::default()).unwrap();
+        assert_eq!(restored.get_node("a").unwrap().unwrap().id, "a");
+        assert_eq!(restored.latest_mutation_sequence().unwrap(), 1);
+        assert!(restored.verify().unwrap().ok);
     }
 
     #[test]

@@ -980,6 +980,12 @@ impl Graph {
         self.store.compact()
     }
 
+    /// Create a consistent backup of the graph's durable store.
+    pub fn backup(&mut self, destination: &mut dyn Storage) -> Result<()> {
+        self.flush()?;
+        self.store.backup(destination)
+    }
+
     /// Flush pending mutations and close the underlying `Store`.
     pub fn close(&mut self) -> Result<()> {
         self.flush()?;

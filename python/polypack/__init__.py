@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import copy
 import ast
-import fcntl
 import json
 import math
 import os
@@ -18,6 +17,11 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator, Optional, Sequence
+
+if os.name == "nt":
+    import msvcrt
+else:
+    import fcntl
 
 import numpy as np
 
@@ -534,6 +538,31 @@ class HnswIndex:
 # ── Graph ──
 
 
+def _lock_store_file(lock_file: Any, read_only: bool) -> None:
+    """Acquire the platform-specific lock for a directory-backed store."""
+    if os.name == "nt":
+        # msvcrt.locking requires a byte to exist and locks from the current
+        # file position. Windows has no shared-lock equivalent in msvcrt, so
+        # read-only opens use a non-blocking exclusive lock as well.
+        lock_file.seek(0)
+        if lock_file.read(1) == b"":
+            lock_file.seek(0)
+            lock_file.write(b"\0")
+            lock_file.flush()
+        lock_file.seek(0)
+        msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+    else:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_SH if read_only else fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def _unlock_store_file(lock_file: Any) -> None:
+    if os.name == "nt":
+        lock_file.seek(0)
+        msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+    else:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
 class DirectoryStorage:
     """Host byte-storage adapter over a directory (snapshot.msgpack / wal.msgpack)."""
 
@@ -543,7 +572,7 @@ class DirectoryStorage:
         self._read_only = read_only
         self._lock_file = open(self._dir / "store.lock", "a+b")
         try:
-            fcntl.flock(self._lock_file.fileno(), fcntl.LOCK_SH if read_only else fcntl.LOCK_EX | fcntl.LOCK_NB)
+            _lock_store_file(self._lock_file, read_only)
         except OSError as exc:
             self._lock_file.close()
             self._lock_file = None
@@ -556,7 +585,7 @@ class DirectoryStorage:
 
     def close(self) -> None:
         if getattr(self, "_lock_file", None) is not None:
-            fcntl.flock(self._lock_file.fileno(), fcntl.LOCK_UN)
+            _unlock_store_file(self._lock_file)
             self._lock_file.close()
             self._lock_file = None
 
