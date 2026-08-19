@@ -131,6 +131,43 @@ pub trait Storage: Send + Sync {
     fn sync_dir(&self) -> Result<()> {
         Ok(())
     }
+    fn capabilities(&self) -> AdapterCapabilities {
+        AdapterCapabilities::default()
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VectorSearchCapability {
+    None,
+    Exact,
+    Ann,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AdapterCapabilities {
+    pub atomic_batches: bool,
+    pub transactions: bool,
+    pub fsync: bool,
+    pub secondary_indexes: bool,
+    pub snapshots: bool,
+    pub change_feed: bool,
+    pub concurrent_writers: bool,
+    pub vector_search: VectorSearchCapability,
+}
+
+impl Default for AdapterCapabilities {
+    fn default() -> Self {
+        Self {
+            atomic_batches: false,
+            transactions: false,
+            fsync: false,
+            secondary_indexes: false,
+            snapshots: false,
+            change_feed: false,
+            concurrent_writers: false,
+            vector_search: VectorSearchCapability::None,
+        }
+    }
 }
 
 /// A `Storage` implementation that never touches disk. Useful for tests and
@@ -169,6 +206,9 @@ impl<T: Storage + ?Sized> Storage for &mut T {
     fn sync_dir(&self) -> Result<()> {
         (**self).sync_dir()
     }
+    fn capabilities(&self) -> AdapterCapabilities {
+        (**self).capabilities()
+    }
 }
 
 impl Storage for std::sync::Arc<std::sync::Mutex<InMemoryStorage>> {
@@ -193,6 +233,9 @@ impl Storage for std::sync::Arc<std::sync::Mutex<InMemoryStorage>> {
     fn sync_dir(&self) -> Result<()> {
         self.lock().unwrap().sync_dir()
     }
+    fn capabilities(&self) -> AdapterCapabilities {
+        self.lock().unwrap().capabilities()
+    }
 }
 
 impl Storage for InMemoryStorage {
@@ -215,6 +258,16 @@ impl Storage for InMemoryStorage {
     }
     fn exists(&self, name: &str) -> Result<bool> {
         Ok(self.files.contains_key(name))
+    }
+    fn capabilities(&self) -> AdapterCapabilities {
+        AdapterCapabilities {
+            atomic_batches: true,
+            transactions: true,
+            secondary_indexes: true,
+            snapshots: true,
+            vector_search: VectorSearchCapability::Exact,
+            ..Default::default()
+        }
     }
 }
 
@@ -268,6 +321,10 @@ impl Store {
             closed: false,
             loaded: false,
         }
+    }
+
+    pub fn capabilities(&self) -> AdapterCapabilities {
+        self.storage.capabilities()
     }
 
     // ── secondary indexes ──

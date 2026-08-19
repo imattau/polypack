@@ -419,6 +419,19 @@ class DirectoryStorage:
         self._dir = Path(directory)
         self._dir.mkdir(parents=True, exist_ok=True)
 
+    @property
+    def capabilities(self) -> dict:
+        return {
+            "atomicBatches": True,
+            "transactions": True,
+            "fsync": True,
+            "secondaryIndexes": True,
+            "snapshots": True,
+            "changeFeed": False,
+            "concurrentWriters": False,
+            "vectorSearch": "exact",
+        }
+
     def _path(self, name: str) -> Path:
         return self._dir / name
 
@@ -584,6 +597,74 @@ class PolyGraph:
         self._removed_edge_ids: set = set()
         self._removed_vector_ids: set = set()
         self._active_transaction: Optional["GraphTransaction"] = None
+        self._node_type_definitions: dict[str, dict] = {}
+        self._edge_type_definitions: dict[str, dict] = {}
+
+    @property
+    def capabilities(self) -> dict:
+        if self._store is not None:
+            return dict(self._store.capabilities())
+        return {
+            "atomicBatches": True,
+            "transactions": True,
+            "fsync": False,
+            "secondaryIndexes": True,
+            "snapshots": True,
+            "changeFeed": False,
+            "concurrentWriters": False,
+            "vectorSearch": "exact",
+        }
+
+    def register_node_type(
+        self,
+        node_type: str,
+        validate: Optional[Callable[[Node], Any]] = None,
+        required_fields: Optional[Iterable[str]] = None,
+    ) -> None:
+        _validate_id(node_type, "node type")
+        self._node_type_definitions[node_type] = {
+            "validate": validate,
+            "requiredFields": tuple(required_fields or ()),
+        }
+
+    def register_edge_type(
+        self,
+        edge_type: str,
+        source_types: Optional[Iterable[str]] = None,
+        target_types: Optional[Iterable[str]] = None,
+        validate: Optional[Callable[[dict], Any]] = None,
+    ) -> None:
+        _validate_id(edge_type, "edge type")
+        self._edge_type_definitions[edge_type] = {
+            "sourceTypes": frozenset(source_types or ()),
+            "targetTypes": frozenset(target_types or ()),
+            "validate": validate,
+        }
+
+    def _validate_node_schema(self, node: Node) -> None:
+        definition = self._node_type_definitions.get(node["type"])
+        if not definition:
+            return
+        for field_name in definition["requiredFields"]:
+            if _patch_get(node.get("data") or {}, field_name) is None:
+                raise PolypackValueError(f"node {node['id']} is missing required field {field_name}")
+        validator = definition["validate"]
+        if validator is not None and validator(_copy_node(node)) is False:
+            raise PolypackValueError(f"node validator rejected {node['id']}")
+
+    def _validate_edge_schema(self, edge: dict) -> None:
+        definition = self._edge_type_definitions.get(edge["type"])
+        if not definition:
+            return
+        source = self._nodes.get(edge["source"])
+        target = self._nodes.get(edge["target"])
+        if definition["sourceTypes"] and (source is None or source["type"] not in definition["sourceTypes"]):
+            raise PolypackValueError(f"edge source type is not permitted for {edge['type']}")
+        if definition["targetTypes"] and (target is None or target["type"] not in definition["targetTypes"]):
+            raise PolypackValueError(f"edge target type is not permitted for {edge['type']}")
+        validator = definition["validate"]
+        if validator is not None and validator(dict(edge, data=dict(edge.get("data") or {}))) is False:
+            raise PolypackValueError(f"edge validator rejected {edge['id']}")
 
     # ── context manager ──
 
@@ -629,6 +710,8 @@ class PolyGraph:
             stored["vector"] = _validate_vector(node["vector"])
         else:
             stored["vector"] = None
+        self._validate_node_schema(stored)
+        if stored["vector"] is None:
             self.vectors.remove(stored["id"])
         self._nodes[stored["id"]] = stored
         self._removed_node_ids.discard(stored["id"])
@@ -654,20 +737,47 @@ class PolyGraph:
             raise ConflictError(
                 f"record {id_} has revision {node.get('revision', 0)}, expected {expected_revision}"
             )
-        node["data"].update(data or {})
+        candidate = _copy_node(node)
+        candidate["data"].update(data or {})
         if vector is not None:
-            node["vector"] = _validate_vector(vector)
+            candidate["vector"] = _validate_vector(vector)
+        if activation is not None:
+            candidate["activation"] = _validate_activation(activation)
+        candidate["updatedAt"] = int(time.time() * 1000)
+        candidate["revision"] = int(node.get("revision", 0)) + 1
+        self._validate_node_schema(candidate)
+        node.clear()
+        node.update(candidate)
+        if vector is not None:
             self.vectors.add(id_, node["vector"])
             self._removed_vector_ids.discard(id_)
-        if activation is not None:
-            node["activation"] = _validate_activation(activation)
-        node["updatedAt"] = int(time.time() * 1000)
-        node["revision"] = int(node.get("revision", 0)) + 1
         return _copy_node(node)
 
     def get_node(self, id_: str) -> Optional[Node]:
         node = self._nodes.get(id_)
         return None if node is None else _copy_node(node)
+
+    def stats(self) -> dict:
+        """Return operational graph counters without a monitoring dependency."""
+        if self._store is None:
+            persisted_node_count = len(self._nodes)
+            edge_count = sum(len(edges) for edges in self._edges.values())
+            vector_count = self.vectors.size
+        else:
+            persisted_node_count = self._store.node_count()
+            edge_count = len(self._store.all_edges())
+            vector_count = len(self._store.all_vectors())
+        memory_estimate = len(repr(self._nodes).encode("utf-8")) + len(repr(self._edges).encode("utf-8"))
+        return {
+            "loadedNodeCount": len(self._nodes),
+            "persistedNodeCount": persisted_node_count,
+            "edgeCount": edge_count,
+            "vectorCount": vector_count,
+            "dirtyRecordCount": len(self._removed_node_ids) + len(self._removed_edge_ids) + len(self._removed_vector_ids),
+            "pendingPersistence": bool(self._removed_node_ids or self._removed_edge_ids or self._removed_vector_ids),
+            "indexCount": 1,
+            "memoryEstimateBytes": memory_estimate,
+        }
 
     def patch_node(
         self,
@@ -700,9 +810,13 @@ class PolyGraph:
                 raise PolypackValueError("increment targets must be numeric")
             _patch_set(candidate, path, float(current) + float(delta))
 
-        node["data"] = candidate
-        node["updatedAt"] = int(time.time() * 1000)
-        node["revision"] = actual + 1
+        candidate_node = _copy_node(node)
+        candidate_node["data"] = candidate
+        candidate_node["updatedAt"] = int(time.time() * 1000)
+        candidate_node["revision"] = actual + 1
+        self._validate_node_schema(candidate_node)
+        node.clear()
+        node.update(candidate_node)
         return _copy_node(node)
 
     def get_nodes(self, ids: Iterable[str]) -> list:
@@ -761,7 +875,7 @@ class PolyGraph:
         full = dict(data or {})
         if ownership is not None:
             full[_OWNERSHIP_KEY] = ownership
-        self._edges.setdefault(source, {})[key] = {
+        candidate = {
             "id": key,
             "source": source,
             "type": edge_type,
@@ -770,6 +884,8 @@ class PolyGraph:
             "createdAt": created_at if created_at is not None else 0,
             "revision": int(revision),
         }
+        self._validate_edge_schema(candidate)
+        self._edges.setdefault(source, {})[key] = candidate
         incoming = self._incoming.setdefault(target, {})
         incoming[source] = incoming.get(source, 0) + 1
         self._removed_edge_ids.discard(key)
@@ -797,11 +913,14 @@ class PolyGraph:
             actual = int(edge.get("revision", 0))
             if expected_revision is not None and actual != expected_revision:
                 raise ConflictError(f"record {id_} has revision {actual}, expected {expected_revision}")
+            candidate = dict(edge, data=dict(edge.get("data") or {}), revision=actual + 1)
             if data is not None:
-                edge["data"] = dict(data)
+                candidate["data"] = dict(data)
             if ownership is not None:
-                edge.setdefault("data", {})[_OWNERSHIP_KEY] = ownership
-            edge["revision"] = actual + 1
+                candidate.setdefault("data", {})[_OWNERSHIP_KEY] = ownership
+            self._validate_edge_schema(candidate)
+            edge.clear()
+            edge.update(candidate)
             return dict(edge, data=dict(edge.get("data") or {}))
         return None
 

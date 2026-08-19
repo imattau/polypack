@@ -8,7 +8,8 @@ pub mod store;
 pub mod wal;
 
 pub use store::{
-    Durability, InMemoryStorage, NodeQuery, OrderBy, RangeQuery, Storage, Store, StoreConfig,
+    AdapterCapabilities, Durability, InMemoryStorage, NodeQuery, OrderBy, RangeQuery, Storage, Store, StoreConfig,
+    VectorSearchCapability,
     DEFAULT_COMPACT_THRESHOLD, SNAPSHOT_FILE, WAL_FILE,
 };
 pub use wal::WalEntry;

@@ -12,6 +12,7 @@ use polypack_core::{
     aggregate as core_aggregate, execute as core_execute, ChangeBatch, Edge, GraphSnapshot, HnswConfig,
     HnswIndex, Node, PolypackError, QueryPlan, Result, Storage, Store, StoreConfig,
 };
+use polypack_core::storage::AdapterCapabilities;
 
 use crate::edge::{decode_ownership, encode_ownership, EdgeEntry, EdgeOwnership};
 use crate::embedding::{create_embedding, EmbeddingProvider, FeatureHashEmbedding};
@@ -67,6 +68,17 @@ pub struct GraphConfig {
     pub hot_cache_max: usize,
     pub hnsw: HnswConfig,
     pub embedding: Box<dyn EmbeddingProvider>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GraphStats {
+    pub loaded_node_count: usize,
+    pub persisted_node_count: usize,
+    pub edge_count: usize,
+    pub vector_count: usize,
+    pub dirty_record_count: usize,
+    pub pending_persistence: bool,
+    pub index_count: usize,
 }
 
 impl Default for GraphConfig {
@@ -209,6 +221,30 @@ impl Graph {
             pending_batch_events: Vec::new(),
             warmed: false,
             transaction_active: false,
+        })
+    }
+
+    /// Report the guarantees declared by the underlying storage adapter.
+    pub fn capabilities(&self) -> AdapterCapabilities {
+        self.store.capabilities()
+    }
+
+    /// Return operational counters without coupling the graph to a metrics
+    /// package.
+    pub fn stats(&mut self) -> Result<GraphStats> {
+        Ok(GraphStats {
+            loaded_node_count: self.nodes.len(),
+            persisted_node_count: self.store.node_count()?,
+            edge_count: self.store.edges_snapshot()?.len(),
+            vector_count: self.store.vectors_snapshot()?.len(),
+            dirty_record_count: self.dirty_nodes.len()
+                + self.dirty_edges.len()
+                + self.dirty_vectors.len()
+                + self.removed_node_ids.len()
+                + self.removed_edge_ids.len()
+                + self.removed_vector_ids.len(),
+            pending_persistence: self.has_pending_persistence(),
+            index_count: self.by_type.len(),
         })
     }
 
@@ -2412,6 +2448,29 @@ mod tests {
         let mut g = test_graph();
         let result = g.transaction(|tx| tx.transaction(|_| Ok(())));
         assert!(matches!(result, Err(PolypackError::InvalidArgument(_))));
+    }
+
+    #[test]
+    fn reports_in_memory_adapter_capabilities() {
+        let g = test_graph();
+        let capabilities = g.capabilities();
+        assert!(capabilities.atomic_batches);
+        assert!(capabilities.transactions);
+        assert_eq!(capabilities.vector_search, polypack_core::storage::VectorSearchCapability::Exact);
+        assert!(!capabilities.concurrent_writers);
+    }
+
+    #[test]
+    fn reports_graph_statistics() {
+        let mut g = test_graph();
+        g.add_node(node("a")).unwrap();
+        g.add_edge("a", "REL", "b", None, EdgeOwnership::Reference).unwrap();
+        let stats = g.stats().unwrap();
+        assert_eq!(stats.loaded_node_count, 1);
+        assert_eq!(stats.persisted_node_count, 0);
+        assert_eq!(stats.edge_count, 0);
+        assert!(stats.pending_persistence);
+        assert!(stats.dirty_record_count > 0);
     }
 
     #[test]

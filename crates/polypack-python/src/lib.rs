@@ -7,7 +7,7 @@ use polypack_core::hnsw::{HnswConfig, HnswIndex as CoreHnswIndex};
 use polypack_core::vector::{DistanceFn, ExactIndex as CoreExactIndex};
 use pyo3::exceptions::{PyException, PyNotImplementedError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyList, PyTuple};
+use pyo3::types::{PyDict, PyList, PyTuple};
 
 pyo3::create_exception!(polypack, PolypackError, PyException, "Base polypack error");
 pyo3::create_exception!(polypack, PolypackValueError, PolypackError, "Invalid argument");
@@ -358,7 +358,8 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
 // ── Storage / NativeStore ──
 
 use polypack_core::storage::{
-    Durability, NodeQuery, Store as CoreStore, StoreConfig, Storage,
+    AdapterCapabilities, Durability, NodeQuery, Store as CoreStore, StoreConfig, Storage,
+    VectorSearchCapability,
 };
 use std::sync::Mutex;
 
@@ -418,6 +419,40 @@ impl Storage for PythonStorage {
             result
                 .extract()
                 .map_err(|e| CoreError::Storage(e.to_string()))
+        })
+    }
+
+    fn capabilities(&self) -> AdapterCapabilities {
+        Python::with_gil(|py| {
+            let obj = self.0.bind(py);
+            let Ok(value) = obj.getattr("capabilities") else { return AdapterCapabilities::default() };
+            let get_bool = |key: &str| {
+                value
+                    .get_item(key)
+                    .ok()
+                    .and_then(|item| item.extract::<bool>().ok())
+                    .unwrap_or(false)
+            };
+            let vector_search = match value
+                .get_item("vectorSearch")
+                .ok()
+                .and_then(|item| item.extract::<String>().ok())
+                .as_deref()
+            {
+                Some("exact") => VectorSearchCapability::Exact,
+                Some("ann") => VectorSearchCapability::Ann,
+                _ => VectorSearchCapability::None,
+            };
+            AdapterCapabilities {
+                atomic_batches: get_bool("atomicBatches"),
+                transactions: get_bool("transactions"),
+                fsync: get_bool("fsync"),
+                secondary_indexes: get_bool("secondaryIndexes"),
+                snapshots: get_bool("snapshots"),
+                change_feed: get_bool("changeFeed"),
+                concurrent_writers: get_bool("concurrentWriters"),
+                vector_search,
+            }
         })
     }
 }
@@ -516,6 +551,25 @@ impl NativeStore {
         NativeStore {
             inner: Mutex::new(CoreStore::new(Box::new(PythonStorage(storage)), config)),
         }
+    }
+
+    fn capabilities(&self, py: Python<'_>) -> PyResult<Py<PyDict>> {
+        let caps = self.inner.lock().unwrap().capabilities();
+        let out = PyDict::new(py);
+        out.set_item("atomicBatches", caps.atomic_batches)?;
+        out.set_item("transactions", caps.transactions)?;
+        out.set_item("fsync", caps.fsync)?;
+        out.set_item("secondaryIndexes", caps.secondary_indexes)?;
+        out.set_item("snapshots", caps.snapshots)?;
+        out.set_item("changeFeed", caps.change_feed)?;
+        out.set_item("concurrentWriters", caps.concurrent_writers)?;
+        let vector_search = match caps.vector_search {
+            polypack_core::storage::VectorSearchCapability::None => "none",
+            polypack_core::storage::VectorSearchCapability::Exact => "exact",
+            polypack_core::storage::VectorSearchCapability::Ann => "ann",
+        };
+        out.set_item("vectorSearch", vector_search)?;
+        Ok(out.unbind())
     }
 
     #[pyo3(signature = (put_nodes=vec![], delete_node_ids=vec![], put_edges=vec![], delete_edge_ids=vec![], put_vectors=vec![], delete_vector_ids=vec![]))]
