@@ -439,6 +439,12 @@ impl Store {
         Ok(self.mutation_log()?.into_iter().filter(|record| record.sequence > sequence).take(limit).collect())
     }
 
+    /// Return the highest acknowledged logical mutation sequence, or zero for
+    /// a store with no durable mutations.
+    pub fn latest_mutation_sequence(&mut self) -> Result<u64> {
+        Ok(self.mutation_log()?.last().map(|record| record.sequence).unwrap_or(0))
+    }
+
     pub fn verify(&mut self) -> Result<VerificationReport> {
         self.assert_open()?;
         let mut errors = Vec::new();
@@ -749,13 +755,12 @@ impl Store {
         metadata: Option<serde_json::Value>,
     ) -> Result<()> {
         self.ensure_loaded()?;
-        if operation_id.is_some() || transaction_id.is_some() {
-            if self.mutation_log()?.iter().any(|record|
+        if (operation_id.is_some() || transaction_id.is_some())
+            && self.mutation_log()?.iter().any(|record|
                 operation_id.is_some_and(|id| record.operation_id == id)
-                    || transaction_id.is_some_and(|id| record.transaction_id == id)
-            ) {
-                return Ok(());
-            }
+                    || transaction_id.is_some_and(|id| record.transaction_id == id))
+        {
+            return Ok(());
         }
         let mut entries: Vec<WalEntry> = Vec::new();
         for id in &changes.delete_node_ids {
@@ -1294,6 +1299,7 @@ mod tests {
         let page = store.mutation_log_page(0, 1).unwrap();
         assert_eq!(page.len(), 1);
         assert_eq!(page[0].operations[0].operation_type, "putNode");
+        assert_eq!(store.latest_mutation_sequence().unwrap(), page[0].sequence);
         assert!(store.mutation_log_since(page[0].sequence).unwrap().is_empty());
 
         store.compact().unwrap();

@@ -443,6 +443,11 @@ impl Graph {
         self.store.mutation_log_page(sequence, limit)
     }
 
+    /// Return the latest acknowledged logical mutation cursor.
+    pub fn latest_mutation_sequence(&mut self) -> Result<u64> {
+        self.store.latest_mutation_sequence()
+    }
+
     pub fn register_node_type(&mut self, node_type: impl Into<String>, definition: NodeTypeDefinition) -> Result<()> {
         let node_type = node_type.into();
         let previous = self.node_type_definitions.insert(node_type.clone(), definition);

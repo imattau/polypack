@@ -617,7 +617,12 @@ impl NativeStore {
         Ok(list.unbind())
     }
 
+    fn latest_mutation_sequence(&self) -> PyResult<u64> {
+        self.inner.lock().unwrap().latest_mutation_sequence().map_err(to_pyerr)
+    }
+
     #[pyo3(signature = (put_nodes=vec![], delete_node_ids=vec![], put_edges=vec![], delete_edge_ids=vec![], put_vectors=vec![], delete_vector_ids=vec![], operation_id=None, transaction_id=None, actor=None, base_revision=None, metadata=None))]
+    #[allow(clippy::too_many_arguments)]
     fn apply(
         &self,
         put_nodes: Vec<Bound<'_, PyAny>>,

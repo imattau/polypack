@@ -183,6 +183,13 @@ def test_persist_round_trip(tmp_path):
     g2.close_store()
 
 
+def test_latest_mutation_sequence_cursor(tmp_path):
+    graph = PolyGraph.open(str(tmp_path))
+    graph.add_node({"id": "a", "type": "t", "data": {}, "insertedAt": 1, "updatedAt": 1})
+    graph.save()
+    assert graph.latest_mutation_sequence() == graph.mutation_log()[-1]["sequence"]
+
+
 def test_context_manager_saves_before_closing_the_store(tmp_path):
     # No explicit save() — closing the `with` block must not silently lose
     # mutations, mirroring Rust's Graph::close (which flushes before closing).

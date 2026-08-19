@@ -1328,6 +1328,12 @@ class PolyGraph:
             raise PolypackValueError("mutation log limit must be a non-negative integer")
         return list(self._store.mutation_log_page(sequence, limit))
 
+    def latest_mutation_sequence(self) -> int:
+        """Return the latest acknowledged durable mutation cursor."""
+        if self._store is None:
+            return 0
+        return int(self._store.latest_mutation_sequence())
+
     def patch_node(
         self,
         id_: str,
