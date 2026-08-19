@@ -59,6 +59,7 @@ migration notes.
 - **Pluggable persistence** — MemoryAdapter, BinaryStoreAdapter (MessagePack + WAL), build your own
 - **Database core** — atomic transactions, revisions, conditional writes, patches, schema hooks, and resource limits
 - **Operational durability** — checkpoint/backup/verification APIs, durable logical mutation logs, cursors, and idempotent operation IDs
+- **Schema migrations** — contiguous, validated, retry-safe application migrations with dry runs, resume cursors, and progress reporting
 - **Explainable queries** — persisted and hot-query plans with index selection, estimated cost, and operational metrics
 - **Configurable indexes** — compound and unique node-data indexes with persisted Python index metadata
 - **Persisted queries** — asynchronous filtering and similarity across the full backing store

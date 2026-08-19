@@ -34,6 +34,8 @@ export class MemorySyncOperationLog implements SyncOperationLog {
 
 /** Simple durable JSON log for a FileIO-backed sync server. */
 export class FileSyncOperationLog implements SyncOperationLog {
+  private queue: Promise<unknown> = Promise.resolve()
+
   constructor(private readonly io: FileIO, private readonly fileName = 'sync-operations.json') {}
 
   async load(): Promise<SyncLogState> {
@@ -44,17 +46,27 @@ export class FileSyncOperationLog implements SyncOperationLog {
   }
 
   async append(op: SyncOp): Promise<void> {
-    const state = await this.load()
-    state.ops.push(op)
-    await this.write(state)
+    await this.enqueue(async () => {
+      const state = await this.load()
+      state.ops.push(op)
+      await this.write(state)
+    })
   }
 
   async compact(baseCursor: number): Promise<void> {
-    const state = await this.load()
-    const remove = Math.max(0, baseCursor - state.baseCursor)
-    state.ops.splice(0, remove)
-    state.baseCursor += remove
-    await this.write(state)
+    await this.enqueue(async () => {
+      const state = await this.load()
+      const remove = Math.max(0, baseCursor - state.baseCursor)
+      state.ops.splice(0, remove)
+      state.baseCursor += remove
+      await this.write(state)
+    })
+  }
+
+  private enqueue<T>(operation: () => Promise<T>): Promise<T> {
+    const run = this.queue.then(operation)
+    this.queue = run.then(() => undefined, () => undefined)
+    return run
   }
 
   private async write(state: SyncLogState): Promise<void> {

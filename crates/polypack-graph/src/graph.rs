@@ -18,6 +18,7 @@ use crate::edge::{decode_ownership, encode_ownership, EdgeEntry, EdgeOwnership};
 use crate::embedding::{create_embedding, EmbeddingProvider, FeatureHashEmbedding};
 use crate::event::GraphChangeEvent;
 use crate::lru::LruList;
+use crate::migration::{MigrationOptions, MigrationRegistry, MigrationReport};
 use crate::persisted_query::{PersistedGraphQuery, QueryResourceLimits};
 use crate::query::GraphQuery;
 
@@ -162,6 +163,7 @@ pub struct Graph {
     current_operation_id: Option<String>,
     node_type_definitions: HashMap<String, NodeTypeDefinition>,
     edge_type_definitions: HashMap<String, EdgeTypeDefinition>,
+    migrations: MigrationRegistry,
 }
 
 struct GraphCheckpoint {
@@ -258,6 +260,7 @@ impl Graph {
             current_operation_id: None,
             node_type_definitions: HashMap::new(),
             edge_type_definitions: HashMap::new(),
+            migrations: MigrationRegistry::default(),
         })
     }
 
@@ -327,6 +330,84 @@ impl Graph {
             }
         }
         validation
+    }
+
+    /// Register an application-schema migration step.
+    pub fn register_migration(&mut self, definition: crate::migration::MigrationDefinition) -> Result<()> {
+        self.migrations.register(definition)
+    }
+
+    /// Migrate records from one application schema version to another.
+    ///
+    /// All transformed records are validated before the transaction starts.
+    /// A migration may change record data, but not node IDs/types or edge
+    /// identity/endpoints; topology migrations should use explicit graph CRUD.
+    pub fn migrate(&mut self, from: u32, to: u32, options: MigrationOptions) -> Result<MigrationReport> {
+        if options.batch_size == 0 {
+            return Err(PolypackError::InvalidArgument("migration batch_size must be positive".into()));
+        }
+        self.warm()?;
+        let mut node_ids: Vec<String> = self.nodes.keys().cloned().collect();
+        node_ids.sort();
+        if let Some(resume) = &options.resume_after_node { node_ids.retain(|id| id > resume); }
+        let mut edge_records: Vec<Edge> = self.edges.iter().flat_map(|(source, edges)| edges.values().map(move |entry| Edge {
+            id: entry.id.clone(), source: source.clone(), target: entry.target.clone(), edge_type: entry.edge_type.clone(),
+            data: encode_ownership(entry.data.clone(), entry.ownership), created_at: now_millis(), revision: entry.revision,
+        })).collect();
+        edge_records.sort_by(|a, b| a.id.cmp(&b.id));
+        if let Some(resume) = &options.resume_after_edge { edge_records.retain(|edge| edge.id > *resume); }
+
+        let mut nodes = Vec::with_capacity(node_ids.len());
+        let mut migrated_nodes = 0;
+        let mut processed_nodes_so_far = 0;
+        for batch in node_ids.chunks(options.batch_size) {
+            for id in batch {
+                let original = self.nodes.get(id).expect("node ID came from graph").clone();
+                let migrated = self.migrations.migrate_node(original.clone(), from, to)?;
+                if migrated.id != *id || migrated.node_type != self.nodes[id].node_type {
+                    return Err(PolypackError::InvalidArgument(format!("migration changed identity or type of node {id}")));
+                }
+                validate_node(&migrated)?;
+                self.validate_node_schema(&migrated)?;
+                if migrated != original { migrated_nodes += 1; nodes.push(migrated); }
+            }
+            processed_nodes_so_far += batch.len();
+            if let Some(on_progress) = &options.on_progress {
+                on_progress(crate::migration::MigrationProgress { from, to, processed_nodes: processed_nodes_so_far, processed_edges: 0, migrated_nodes, migrated_edges: 0, dry_run: options.dry_run });
+            }
+        }
+        let mut edges = Vec::with_capacity(edge_records.len());
+        let mut migrated_edges = 0;
+        let mut processed_edges_so_far = 0;
+        for batch in edge_records.chunks(options.batch_size) {
+            for edge in batch {
+                let migrated = self.migrations.migrate_edge(edge.clone(), from, to)?;
+                if migrated.id != edge.id || migrated.source != edge.source || migrated.target != edge.target || migrated.edge_type != edge.edge_type {
+                    return Err(PolypackError::InvalidArgument(format!("migration changed identity or endpoints of edge {}", edge.id)));
+                }
+                self.validate_edge_data_schema(&migrated.edge_type, migrated.data.as_ref())?;
+                if migrated != *edge { migrated_edges += 1; edges.push(migrated); }
+            }
+            processed_edges_so_far += batch.len();
+            if let Some(on_progress) = &options.on_progress {
+                on_progress(crate::migration::MigrationProgress { from, to, processed_nodes: processed_nodes_so_far, processed_edges: processed_edges_so_far, migrated_nodes, migrated_edges, dry_run: options.dry_run });
+            }
+        }
+        let processed_nodes = node_ids.len();
+        let processed_edges = self.edges.values().map(HashMap::len).sum();
+        let report = MigrationReport { from, to, processed_nodes, processed_edges, migrated_nodes, migrated_edges, dry_run: options.dry_run };
+        if options.dry_run || from == to { return Ok(report); }
+        self.transaction(|graph| {
+            for node in nodes { graph.add_node(node)?; }
+            for edge in edges {
+                let (ownership, data) = decode_ownership(edge.data.clone());
+                graph.update_edge_if_revision(&edge.id, data, Some(ownership), edge.revision)?;
+            }
+            Ok(())
+        })?;
+        // Keep the report fields explicit for callers even if future batching
+        // changes the internal processing counters.
+        Ok(report)
     }
 
     fn validate_node_schema(&self, node: &Node) -> Result<()> {
@@ -2051,6 +2132,44 @@ mod tests {
             revision: 0,
             activation: None,
         }
+    }
+
+    #[test]
+    fn migrations_are_atomic_and_report_changed_records() {
+        let mut graph = test_graph();
+        graph.add_node(node("a")).unwrap();
+        graph.register_migration(crate::migration::MigrationDefinition::new(1, 2, |mut node| {
+            node.data.insert("schemaVersion".into(), 2.into());
+            Ok(node)
+        })).unwrap();
+
+        let dry_run = graph.migrate(1, 2, MigrationOptions { dry_run: true, ..Default::default() }).unwrap();
+        assert_eq!(dry_run.migrated_nodes, 1);
+        let report = graph.migrate(1, 2, MigrationOptions::default()).unwrap();
+        assert_eq!(report.processed_nodes, 1);
+        assert_eq!(report.migrated_nodes, 1);
+        assert_eq!(graph.get_node("a").unwrap().data["schemaVersion"], 2);
+    }
+
+    #[test]
+    fn migrations_report_cumulative_progress_and_reject_empty_batches() {
+        let mut graph = test_graph();
+        graph.add_node(node("a")).unwrap();
+        graph.add_node(node("b")).unwrap();
+        graph.register_migration(crate::migration::MigrationDefinition::new(1, 2, |mut node| {
+            node.data.insert("migrated".into(), true.into());
+            Ok(node)
+        })).unwrap();
+        let progress = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let observed = progress.clone();
+        let report = graph.migrate(1, 2, MigrationOptions {
+            batch_size: 1,
+            on_progress: Some(Box::new(move |update| observed.lock().unwrap().push((update.processed_nodes, update.migrated_nodes)))),
+            ..Default::default()
+        }).unwrap();
+        assert_eq!(report.migrated_nodes, 2);
+        assert_eq!(*progress.lock().unwrap(), vec![(1, 1), (2, 2)]);
+        assert!(graph.migrate(1, 2, MigrationOptions { batch_size: 0, ..Default::default() }).is_err());
     }
 
     #[test]

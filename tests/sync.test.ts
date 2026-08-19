@@ -9,6 +9,8 @@ import { MemoryTransport } from '../src/sync/transport'
 import type { SyncMessage, SyncOp } from '../src/sync/types'
 import type { SyncTransport } from '../src/sync/transport'
 import { syncChecksum } from '../src/sync/checksum'
+import { FileSyncOperationLog } from '../src/sync/log'
+import { MemoryFileIO } from '../src/persistence/file-io'
 
 describe('OpLog', () => {
   it('appends ops with increasing sequence numbers', () => {
@@ -46,6 +48,23 @@ describe('OpLog', () => {
   it('checksums bigint payloads without throwing', () => {
     const op: SyncOp = { seq: 1, timestamp: 1, clientId: 'c1', kind: 'addNode', payload: { value: 1n } }
     expect(syncChecksum([op])).toBe(syncChecksum([op]))
+  })
+})
+
+describe('durable sync log', () => {
+  it('serializes concurrent appends without losing operations', async () => {
+    const log = new FileSyncOperationLog(new MemoryFileIO())
+    const operations = Array.from({ length: 20 }, (_, index) => ({
+      seq: index + 1,
+      timestamp: 1,
+      clientId: 'client',
+      kind: 'addNode' as const,
+      payload: { id: `node-${index}` },
+    }))
+    await Promise.all(operations.map(operation => log.append(operation)))
+    const state = await log.load()
+    expect(state.ops).toHaveLength(20)
+    expect(new Set(state.ops.map(operation => operation.payload.id)).size).toBe(20)
   })
 })
 

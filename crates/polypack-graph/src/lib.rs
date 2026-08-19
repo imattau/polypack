@@ -14,6 +14,7 @@ mod embedding;
 mod event;
 mod graph;
 mod lru;
+mod migration;
 mod persisted_query;
 mod query;
 
@@ -24,6 +25,7 @@ pub use embedding::{
 };
 pub use event::GraphChangeEvent;
 pub use graph::{EdgeTypeDefinition, Graph, GraphConfig, GraphStats, NodeTypeDefinition};
+pub use migration::{MigrationDefinition, MigrationOptions, MigrationProgress, MigrationRegistry, MigrationReport};
 pub use persisted_query::{PersistedGraphQuery, QueryExplain, QueryResourceLimits};
 pub use query::{AggregateOp, AggregateResult, GraphQuery, GroupedRow, OrderDirection};
 // `Direction` is a required parameter of `GraphQuery`/`PersistedGraphQuery`'s
