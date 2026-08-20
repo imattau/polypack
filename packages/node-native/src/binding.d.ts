@@ -66,6 +66,7 @@ export interface NativeBinding {
   NativeExactIndex: new (distance?: string) => NativeExactIndexBinding
   NativeHnswIndex: new (config?: NativeHnswConfig, levelSeed?: number) => NativeHnswIndexBinding
   NativeStore: new (directory: string, compactThreshold?: number) => NativeStoreBinding
+  restoreStore(source: string, destination: string, compactThreshold?: number): NativeStoreBinding
   engineInfo(): EngineInfo
   executeQueryPlan(nodes: unknown[], edges: unknown[], plan: Record<string, unknown>): string[]
   aggregateQueryPlan(
@@ -113,5 +114,9 @@ export interface NativeStoreBinding {
   checkpoint(): void
   verify(): Record<string, unknown>
   capabilities(): Record<string, unknown>
+  stats(): Record<string, unknown>
+  mutationLogSince(sequence: string, limit?: number): Array<Record<string, unknown>>
+  latestMutationSequence(): string
+  backup(destination: string): void
   close(): void
 }

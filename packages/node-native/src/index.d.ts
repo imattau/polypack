@@ -116,6 +116,7 @@ export interface NativeChangeBatch {
  */
 export class NativeStore {
   constructor(directory: string, compactThreshold?: number)
+  static restore(source: string, destination: string, compactThreshold?: number): NativeStore
   apply(changes: NativeChangeBatch): void
   nodeIds(): string[]
   nodeCount(): number
@@ -146,5 +147,15 @@ export class NativeStore {
     concurrentWriters: boolean
     vectorSearch: 'none' | 'exact' | 'ann'
   }
+  stats(): {
+    persistedNodeCount: number
+    edgeCount: number
+    vectorCount: number
+    mutationCount: number
+    walBytes: number
+  }
+  mutationLogSince(sequence: bigint, limit?: number): Array<Record<string, unknown>>
+  latestMutationSequence(): bigint
+  backup(destination: string): void
   close(): void
 }

@@ -397,6 +397,14 @@ export class NativeStore {
     this.inner = new native.NativeStore(directory, compactThreshold)
   }
 
+  /** Restore and validate a native store from a directory backup. */
+  static restore(source: string, destination: string, compactThreshold?: number): NativeStore {
+    assertAvailable()
+    const restored = Object.create(NativeStore.prototype) as NativeStore
+    restored.inner = callNative(() => native.restoreStore(source, destination, compactThreshold))
+    return restored
+  }
+
   apply(changes: NativeChangeBatch): void {
     callNative(() => this.inner.apply(changes))
   }
@@ -491,6 +499,38 @@ export class NativeStore {
       concurrentWriters: boolean
       vectorSearch: 'none' | 'exact' | 'ann'
     }
+  }
+
+  /** Return operational counters for the native persistence store. */
+  stats(): {
+    persistedNodeCount: number
+    edgeCount: number
+    vectorCount: number
+    mutationCount: number
+    walBytes: number
+  } {
+    return callNative(() => this.inner.stats()) as {
+      persistedNodeCount: number
+      edgeCount: number
+      vectorCount: number
+      mutationCount: number
+      walBytes: number
+    }
+  }
+
+  /** Read durable logical mutations after a sequence cursor. */
+  mutationLogSince(sequence: bigint, limit?: number): Array<Record<string, unknown>> {
+    return callNative(() => this.inner.mutationLogSince(sequence.toString(), limit))
+  }
+
+  /** Return the highest durable logical mutation sequence. */
+  latestMutationSequence(): bigint {
+    return BigInt(callNative(() => this.inner.latestMutationSequence()))
+  }
+
+  /** Create a consistent checkpointed directory backup. */
+  backup(destination: string): void {
+    callNative(() => this.inner.backup(destination))
   }
 
   close(): void {

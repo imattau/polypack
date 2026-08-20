@@ -161,16 +161,43 @@ describe('cross-language byte compatibility', () => {
     const dir = tempDir('verify')
     try {
       const store = new NativeStore(dir)
+      expect(store.stats()).toMatchObject({ persistedNodeCount: 0, edgeCount: 0, vectorCount: 0 })
       store.apply({
         putNodes: [node('n1'), node('n2')],
         putEdges: [{ id: 'n1::LINKS::n2', source: 'n1', target: 'n2', type: 'LINKS', data: null, createdAt: 1 }],
       })
+      expect(store.stats()).toMatchObject({ persistedNodeCount: 2, edgeCount: 1, vectorCount: 0, mutationCount: 1 })
+      expect(store.latestMutationSequence()).toBe(1n)
+      expect(store.mutationLogSince(0n, 1)).toHaveLength(1)
+      expect(store.mutationLogSince(1n)).toEqual([])
       expect(store.verify()).toMatchObject({ ok: true, nodeCount: 0, edgeCount: 0 })
       store.checkpoint()
       expect(store.verify()).toMatchObject({ ok: true, nodeCount: 2, edgeCount: 1 })
       store.close()
     } finally {
       rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('creates a restorable directory backup', () => {
+    if (!available) return
+    const dir = tempDir('backup-source')
+    const backup = tempDir('backup-destination')
+    const restoredDir = tempDir('backup-restored')
+    try {
+      const store = new NativeStore(dir)
+      store.apply({ putNodes: [node('backup-node')] })
+      store.backup(backup)
+      store.close()
+
+      const restored = NativeStore.restore(backup, restoredDir)
+      expect(restored.nodeIds()).toEqual(['backup-node'])
+      expect(restored.verify()).toMatchObject({ ok: true, nodeCount: 1 })
+      restored.close()
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+      rmSync(backup, { recursive: true, force: true })
+      rmSync(restoredDir, { recursive: true, force: true })
     }
   })
 })

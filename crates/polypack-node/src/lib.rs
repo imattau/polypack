@@ -10,7 +10,7 @@ use polypack_core::vector::{DistanceFn, ExactIndex};
 use polypack_core::NodeActivation as CoreNodeActivation;
 use std::cell::RefCell;
 use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[napi(object)]
@@ -339,6 +339,7 @@ impl Drop for FsStorage {
     fn drop(&mut self) {
         let Some(mut lock_file) = self.lock_file.take() else { return };
         let mut contents = String::new();
+        let _ = lock_file.seek(SeekFrom::Start(0));
         let owns_lock = lock_file.read_to_string(&mut contents).is_ok()
             && contents.contains(&format!(r#""token":"{}""#, self.lock_token));
         drop(lock_file);
@@ -616,12 +617,88 @@ impl NativeStore {
         })
     }
 
+    /// Return operational counters for the native persistence store.
+    #[napi]
+    pub fn stats(&self) -> Result<serde_json::Value> {
+        let mut inner = self.inner.borrow_mut();
+        let node_count = inner.node_count().map_err(to_napi_err)?;
+        let edge_count = inner.edges_snapshot().map_err(to_napi_err)?.len();
+        let vector_count = inner.vectors_snapshot().map_err(to_napi_err)?.len();
+        let mutation_count = inner.mutation_log().map_err(to_napi_err)?.len();
+        let wal_bytes = fs::metadata(self.lock_dir.join("wal.msgpack"))
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
+        Ok(serde_json::json!({
+            "persistedNodeCount": node_count,
+            "edgeCount": edge_count,
+            "vectorCount": vector_count,
+            "mutationCount": mutation_count,
+            "walBytes": wal_bytes,
+        }))
+    }
+
+    /// Read durable logical mutations after a sequence cursor.
+    #[napi]
+    pub fn mutation_log_since(&self, sequence: String, limit: Option<u32>) -> Result<Vec<serde_json::Value>> {
+        let sequence = sequence
+            .parse::<u64>()
+            .map_err(|error| Error::from_reason(format!("invalid_argument: sequence must be an unsigned integer: {error}")))?;
+        let records = if let Some(limit) = limit {
+            self.inner.borrow_mut().mutation_log_page(sequence, limit as usize).map_err(to_napi_err)?
+        } else {
+            self.inner.borrow_mut().mutation_log_since(sequence).map_err(to_napi_err)?
+        };
+        records
+            .into_iter()
+            .map(|record| serde_json::to_value(record).map_err(|error| Error::from_reason(error.to_string())))
+            .collect()
+    }
+
+    /// Return the highest durable logical mutation sequence.
+    #[napi]
+    pub fn latest_mutation_sequence(&self) -> Result<String> {
+        self.inner
+            .borrow_mut()
+            .latest_mutation_sequence()
+            .map(|sequence| sequence.to_string())
+            .map_err(to_napi_err)
+    }
+
+    /// Create a consistent checkpointed directory backup.
+    #[napi]
+    pub fn backup(&self, destination: String) -> Result<()> {
+        let mut destination_storage = FsStorage::new(PathBuf::from(destination)).map_err(to_napi_err)?;
+        self.inner
+            .borrow_mut()
+            .backup(&mut destination_storage)
+            .map_err(to_napi_err)
+    }
+
     #[napi]
     pub fn close(&self) -> Result<()> {
         self.inner.borrow_mut().close().map_err(to_napi_err)?;
         release_store_lock(&self.lock_dir, &self.lock_token);
         Ok(())
     }
+}
+
+/// Restore a native store from a directory backup and validate the result.
+#[napi]
+pub fn restore_store(source: String, destination: String, compact_threshold: Option<u32>) -> Result<NativeStore> {
+    let source_storage = FsStorage::new(PathBuf::from(source)).map_err(to_napi_err)?;
+    let destination_dir = PathBuf::from(destination);
+    let destination_storage = FsStorage::new(destination_dir.clone()).map_err(to_napi_err)?;
+    let lock_token = destination_storage.lock_token.clone();
+    let config = StoreConfig {
+        compact_threshold: compact_threshold.unwrap_or(10_000) as usize,
+        durability: Durability::Process,
+    };
+    let mut inner = CoreStore::restore(&source_storage, Box::new(destination_storage), config).map_err(to_napi_err)?;
+    let report = inner.verify().map_err(to_napi_err)?;
+    if !report.ok {
+        return Err(Error::from_reason(format!("storage: restored backup failed verification: {}", report.errors.join("; "))));
+    }
+    Ok(NativeStore { inner: RefCell::new(inner), lock_dir: destination_dir, lock_token })
 }
 
 // ── Query execution ──
