@@ -155,6 +155,30 @@ def test_index_metadata_rejects_duplicate_or_empty_definitions(tmp_path):
         PolyGraph.open(str(tmp_path))
 
 
+def test_schema_metadata_persists_and_reloads(tmp_path):
+    graph = PolyGraph.open(str(tmp_path))
+    graph.register_node_type("person", required_fields=["name"], data_types={"age": "integer"})
+    graph.register_edge_type("PARENT_OF", source_types=["person"], target_types=["person"], cardinality="many-to-many")
+    graph.close_store()
+
+    reopened = PolyGraph.open(str(tmp_path))
+    with pytest.raises(PolypackValueError, match="required field name"):
+        reopened.add_node({"id": "p1", "type": "person", "data": {}, "insertedAt": 1, "updatedAt": 1})
+    reopened.add_node({"id": "p1", "type": "person", "data": {"name": "A", "age": 1}, "insertedAt": 1, "updatedAt": 1})
+    with pytest.raises(PolypackValueError, match="missing endpoint"):
+        reopened.add_edge("p1", "PARENT_OF", "missing")
+    reopened.close_store()
+
+
+def test_schema_metadata_rejects_duplicate_definitions(tmp_path):
+    (tmp_path / "schemas.json").write_text(
+        '{"nodeTypes":[{"nodeType":"person","requiredFields":[],"dataTypes":{}},{"nodeType":"person","requiredFields":[],"dataTypes":{}}],"edgeTypes":[]}',
+        encoding="utf-8",
+    )
+    with pytest.raises(PolypackStorageError, match="invalid schema metadata"):
+        PolyGraph.open(str(tmp_path))
+
+
 def test_context_manager_and_change_batch():
     with PolyGraph() as graph:
         graph.add_node({"id": "a", "type": "t", "data": {}, "insertedAt": 1, "updatedAt": 1})

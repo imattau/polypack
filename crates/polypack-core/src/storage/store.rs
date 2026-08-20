@@ -715,14 +715,55 @@ impl Store {
         let Some(data) = self.storage.read(SCHEMAS_FILE)? else { return Ok(()) };
         let metadata: SchemaMetadata = serde_json::from_slice(&data)
             .map_err(|error| PolypackError::CorruptData(format!("schema metadata: {error}")))?;
-        self.node_type_definitions = metadata.node_types.into_iter().map(|definition| (definition.node_type.clone(), definition)).collect();
-        self.edge_type_definitions = metadata.edge_types.into_iter().map(|definition| (definition.edge_type.clone(), definition)).collect();
+        let mut node_types = HashMap::new();
+        for definition in metadata.node_types {
+            Self::validate_node_type_definition(&definition)?;
+            if node_types.insert(definition.node_type.clone(), definition).is_some() {
+                return Err(PolypackError::CorruptData("schema metadata: duplicate node type".into()));
+            }
+        }
+        let mut edge_types = HashMap::new();
+        for definition in metadata.edge_types {
+            Self::validate_edge_type_definition(&definition)?;
+            if edge_types.insert(definition.edge_type.clone(), definition).is_some() {
+                return Err(PolypackError::CorruptData("schema metadata: duplicate edge type".into()));
+            }
+        }
+        self.node_type_definitions = node_types;
+        self.edge_type_definitions = edge_types;
+        Ok(())
+    }
+
+    fn validate_node_type_definition(definition: &NodeTypeDefinition) -> Result<()> {
+        if definition.node_type.is_empty()
+            || definition.required_fields.iter().any(String::is_empty)
+            || definition.required_fields.iter().collect::<HashSet<_>>().len() != definition.required_fields.len()
+            || definition.data_types.keys().any(|field| field.is_empty())
+            || definition.data_types.values().any(|kind| !matches!(kind.as_str(), "string" | "number" | "integer" | "boolean" | "object" | "array"))
+        {
+            return Err(PolypackError::InvalidArgument(format!("invalid schema for node type {}", definition.node_type)));
+        }
+        Ok(())
+    }
+
+    fn validate_edge_type_definition(definition: &EdgeTypeDefinition) -> Result<()> {
+        if definition.edge_type.is_empty()
+            || definition.source_types.iter().any(String::is_empty)
+            || definition.target_types.iter().any(String::is_empty)
+            || definition.required_fields.iter().any(String::is_empty)
+            || definition.required_fields.iter().collect::<HashSet<_>>().len() != definition.required_fields.len()
+            || definition.data_types.keys().any(|field| field.is_empty())
+            || definition.data_types.values().any(|kind| !matches!(kind.as_str(), "string" | "number" | "integer" | "boolean" | "object" | "array"))
+            || definition.cardinality.as_deref().is_some_and(|cardinality| !matches!(cardinality, "one-to-one" | "one-to-many" | "many-to-one" | "many-to-many"))
+        {
+            return Err(PolypackError::InvalidArgument(format!("invalid schema for edge type {}", definition.edge_type)));
+        }
         Ok(())
     }
 
     pub fn register_node_type(&mut self, definition: NodeTypeDefinition) -> Result<()> {
         self.ensure_loaded()?;
-        if definition.node_type.is_empty() { return Err(PolypackError::InvalidArgument("node type must not be empty".into())); }
+        Self::validate_node_type_definition(&definition)?;
         let name = definition.node_type.clone();
         let previous = self.node_type_definitions.insert(name.clone(), definition);
         if let Err(error) = self.nodes.values().try_for_each(|node| self.validate_node_schema(node)) {
@@ -740,7 +781,7 @@ impl Store {
 
     pub fn register_edge_type(&mut self, definition: EdgeTypeDefinition) -> Result<()> {
         self.ensure_loaded()?;
-        if definition.edge_type.is_empty() { return Err(PolypackError::InvalidArgument("edge type must not be empty".into())); }
+        Self::validate_edge_type_definition(&definition)?;
         let name = definition.edge_type.clone();
         let previous = self.edge_type_definitions.insert(name.clone(), definition);
         let validation = self.edges.values().try_for_each(|edge| self.validate_edge_schema(edge, &self.nodes, &self.edges));
@@ -1733,6 +1774,46 @@ mod tests {
         let mut reopened = Store::new(Box::new(storage), StoreConfig::default());
         let invalid_after_reload = ChangeBatch { put_nodes: vec![Node { id: "p2".into(), node_type: "person".into(), data: serde_json::json!({"name": "B", "age": "not-an-integer"}).as_object().unwrap().clone(), ..book("p2", "person", 0.0) }], ..Default::default() };
         assert!(matches!(reopened.apply(&invalid_after_reload), Err(PolypackError::InvalidArgument(message)) if message.contains("must be integer")));
+    }
+
+    #[test]
+    fn schema_definitions_reject_invalid_metadata() {
+        let storage = shared();
+        let mut store = Store::new(Box::new(storage.clone()), StoreConfig::default());
+        assert!(matches!(store.register_node_type(NodeTypeDefinition {
+            node_type: "".into(),
+            required_fields: Vec::new(),
+            data_types: HashMap::new(),
+        }), Err(PolypackError::InvalidArgument(message)) if message.contains("invalid schema")));
+        assert!(matches!(store.register_node_type(NodeTypeDefinition {
+            node_type: "person".into(),
+            required_fields: vec!["name".into(), "name".into()],
+            data_types: HashMap::new(),
+        }), Err(PolypackError::InvalidArgument(message)) if message.contains("invalid schema")));
+        assert!(matches!(store.register_edge_type(EdgeTypeDefinition {
+            edge_type: "RELATED".into(),
+            source_types: vec!["person".into()],
+            target_types: vec!["person".into()],
+            required_fields: Vec::new(),
+            data_types: HashMap::from([(String::from("weight"), String::from("date"))]),
+            cardinality: Some("invalid".into()),
+        }), Err(PolypackError::InvalidArgument(message)) if message.contains("invalid schema")));
+        assert!(!storage.lock().unwrap().exists(SCHEMAS_FILE).unwrap());
+    }
+
+    #[test]
+    fn schema_metadata_rejects_duplicate_definitions_on_reload() {
+        let storage = shared();
+        let duplicate = serde_json::json!({
+            "nodeTypes": [
+                { "nodeType": "person", "requiredFields": [], "dataTypes": {} },
+                { "nodeType": "person", "requiredFields": [], "dataTypes": {} }
+            ],
+            "edgeTypes": []
+        });
+        storage.lock().unwrap().write(SCHEMAS_FILE, &serde_json::to_vec(&duplicate).unwrap()).unwrap();
+        let mut store = Store::new(Box::new(storage), StoreConfig::default());
+        assert!(matches!(store.node_count(), Err(PolypackError::CorruptData(message)) if message.contains("duplicate node type")));
     }
 
     #[test]

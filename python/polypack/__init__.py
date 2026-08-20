@@ -890,17 +890,26 @@ class PolyGraph:
         required_fields: Optional[Iterable[str]] = None,
         data_types: Optional[dict[str, str]] = None,
     ) -> None:
+        if self._store_read_only:
+            raise PolypackStorageError("store was opened read-only")
         _validate_id(node_type, "node type")
+        required = tuple(required_fields or ())
+        types = dict(data_types or {})
+        if len(set(required)) != len(required) or any(not isinstance(field, str) or not field for field in required):
+            raise PolypackValueError("required fields must be unique and non-empty")
+        if any(not isinstance(field, str) or not field or expected not in {"string", "number", "integer", "boolean", "object", "array"} for field, expected in types.items()):
+            raise PolypackValueError("invalid node data type definition")
         previous = self._node_type_definitions.get(node_type)
         self._node_type_definitions[node_type] = {
             "validate": validate,
-            "requiredFields": tuple(required_fields or ()),
-            "dataTypes": dict(data_types or {}),
+            "requiredFields": required,
+            "dataTypes": types,
         }
         try:
             for node in self._nodes.values():
                 if node["type"] == node_type:
                     self._validate_node_schema(node)
+            self._persist_schema_metadata()
         except Exception:
             if previous is None:
                 self._node_type_definitions.pop(node_type, None)
@@ -1078,6 +1087,74 @@ class PolyGraph:
         except (OSError, ValueError, TypeError, PolypackError) as exc:
             raise PolypackStorageError(f"invalid index metadata: {exc}") from exc
 
+    def _persist_schema_metadata(self) -> None:
+        if self._store_directory is None:
+            return
+        if self._store_read_only:
+            raise PolypackStorageError("store was opened read-only")
+        metadata = {
+            "nodeTypes": [
+                {"nodeType": name, "requiredFields": list(definition["requiredFields"]), "dataTypes": dict(definition["dataTypes"])}
+                for name, definition in self._node_type_definitions.items()
+            ],
+            "edgeTypes": [
+                {
+                    "edgeType": name,
+                    "sourceTypes": sorted(definition["sourceTypes"]),
+                    "targetTypes": sorted(definition["targetTypes"]),
+                    "cardinality": definition["cardinality"],
+                    "requiredFields": list(definition["requiredFields"]),
+                    "dataTypes": dict(definition["dataTypes"]),
+                }
+                for name, definition in self._edge_type_definitions.items()
+            ],
+        }
+        target = self._store_directory / "schemas.json"
+        temporary = self._store_directory / "schemas.json.tmp"
+        temporary.write_text(json.dumps(metadata, sort_keys=True), encoding="utf-8")
+        os.replace(temporary, target)
+
+    def _load_schema_metadata(self) -> None:
+        if self._store_directory is None:
+            return
+        source = self._store_directory / "schemas.json"
+        if not source.exists():
+            return
+        try:
+            metadata = json.loads(source.read_text(encoding="utf-8"))
+            if not isinstance(metadata, dict) or not isinstance(metadata.get("nodeTypes"), list) or not isinstance(metadata.get("edgeTypes"), list):
+                raise ValueError("schema metadata must contain nodeTypes and edgeTypes arrays")
+            valid_types = {"string", "number", "integer", "boolean", "object", "array"}
+            nodes: dict[str, dict] = {}
+            edges: dict[str, dict] = {}
+            for definition in metadata["nodeTypes"]:
+                if not isinstance(definition, dict):
+                    raise ValueError("node type definition must be an object")
+                name = definition.get("nodeType")
+                required = definition.get("requiredFields", [])
+                types = definition.get("dataTypes", {})
+                if not isinstance(name, str) or not name or name in nodes or not isinstance(required, list) or len(set(required)) != len(required) or any(not isinstance(field, str) or not field for field in required) or not isinstance(types, dict) or any(not isinstance(field, str) or not field or expected not in valid_types for field, expected in types.items()):
+                    raise ValueError("invalid node type definition")
+                nodes[name] = {"validate": None, "requiredFields": tuple(required), "dataTypes": dict(types)}
+            for definition in metadata["edgeTypes"]:
+                if not isinstance(definition, dict):
+                    raise ValueError("edge type definition must be an object")
+                name = definition.get("edgeType")
+                required = definition.get("requiredFields", [])
+                types = definition.get("dataTypes", {})
+                cardinality = definition.get("cardinality")
+                if not isinstance(name, str) or not name or name in edges or not isinstance(required, list) or len(set(required)) != len(required) or any(not isinstance(field, str) or not field for field in required) or not isinstance(types, dict) or any(not isinstance(field, str) or not field or expected not in valid_types for field, expected in types.items()) or cardinality not in (None, "one-to-one", "one-to-many", "many-to-one", "many-to-many"):
+                    raise ValueError("invalid edge type definition")
+                source_types = definition.get("sourceTypes", [])
+                target_types = definition.get("targetTypes", [])
+                if not isinstance(source_types, list) or not isinstance(target_types, list) or any(not isinstance(value, str) or not value for value in source_types + target_types):
+                    raise ValueError("invalid edge type definition")
+                edges[name] = {"sourceTypes": frozenset(source_types), "targetTypes": frozenset(target_types), "validate": None, "cardinality": cardinality, "requiredFields": tuple(required), "dataTypes": dict(types)}
+            self._node_type_definitions = nodes
+            self._edge_type_definitions = edges
+        except (OSError, ValueError, TypeError) as exc:
+            raise PolypackStorageError(f"invalid schema metadata: {exc}") from exc
+
     def register_edge_type(
         self,
         edge_type: str,
@@ -1088,23 +1165,32 @@ class PolyGraph:
         required_fields: Optional[Iterable[str]] = None,
         data_types: Optional[dict[str, str]] = None,
     ) -> None:
+        if self._store_read_only:
+            raise PolypackStorageError("store was opened read-only")
         _validate_id(edge_type, "edge type")
         if cardinality not in (None, "one-to-one", "one-to-many", "many-to-one", "many-to-many"):
             raise PolypackValueError("invalid edge cardinality")
+        required = tuple(required_fields or ())
+        types = dict(data_types or {})
+        if len(set(required)) != len(required) or any(not isinstance(field, str) or not field for field in required):
+            raise PolypackValueError("required fields must be unique and non-empty")
+        if any(not isinstance(field, str) or not field or expected not in {"string", "number", "integer", "boolean", "object", "array"} for field, expected in types.items()):
+            raise PolypackValueError("invalid edge data type definition")
         previous = self._edge_type_definitions.get(edge_type)
         self._edge_type_definitions[edge_type] = {
             "sourceTypes": frozenset(source_types or ()),
             "targetTypes": frozenset(target_types or ()),
             "validate": validate,
             "cardinality": cardinality,
-            "requiredFields": tuple(required_fields or ()),
-            "dataTypes": dict(data_types or {}),
+            "requiredFields": required,
+            "dataTypes": types,
         }
         try:
             for edges in self._edges.values():
                 for edge in edges.values():
                     if edge["type"] == edge_type:
                         self._validate_edge_schema(edge)
+            self._persist_schema_metadata()
         except Exception:
             if previous is None:
                 self._edge_type_definitions.pop(edge_type, None)
@@ -1641,7 +1727,7 @@ class PolyGraph:
         if not source_path.is_dir():
             raise PolypackStorageError(f"backup source does not exist: {source}")
         destination_path.mkdir(parents=True, exist_ok=True)
-        for name in ("snapshot.msgpack", "wal.msgpack", "mutations.jsonl", "indexes.json"):
+        for name in ("snapshot.msgpack", "wal.msgpack", "mutations.jsonl", "indexes.json", "schemas.json"):
             source_file = source_path / name
             if source_file.exists():
                 shutil.copy2(source_file, destination_path / name)
@@ -1653,6 +1739,7 @@ class PolyGraph:
         self._store_directory = Path(directory)
         self._store_read_only = read_only
         self._load_index_metadata()
+        self._load_schema_metadata()
         self._load_from_store()
         try:
             self._validate_all_indexes()
@@ -1681,7 +1768,7 @@ class PolyGraph:
         self.checkpoint()
         destination_path = Path(destination)
         destination_path.mkdir(parents=True, exist_ok=True)
-        for name in ("snapshot.msgpack", "wal.msgpack", "mutations.jsonl", "indexes.json"):
+        for name in ("snapshot.msgpack", "wal.msgpack", "mutations.jsonl", "indexes.json", "schemas.json"):
             source_file = self._store_directory / name
             if source_file.exists():
                 shutil.copy2(source_file, destination_path / name)
