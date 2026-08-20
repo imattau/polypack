@@ -206,6 +206,9 @@ describe('cross-language byte compatibility', () => {
       store.apply({ putNodes: [{ ...node('p1'), type: 'person', data: { name: 'A', age: 1 } }] })
       expect(() => store.apply({ putEdges: [{ id: 'e1', source: 'p1', target: 'missing', type: 'PARENT_OF', data: null, createdAt: 1 }] })).toThrow(/target node is missing/)
       store.close()
+      const reopened = new NativeStore(dir)
+      expect(() => reopened.apply({ putNodes: [{ ...node('p2'), type: 'person', data: { name: 'B', age: 'wrong' } }] })).toThrow(/must be integer/)
+      reopened.close()
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }

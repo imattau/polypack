@@ -14,6 +14,7 @@ pub const SNAPSHOT_FILE: &str = "snapshot.msgpack";
 pub const WAL_FILE: &str = "wal.msgpack";
 pub const MUTATION_LOG_FILE: &str = "mutations.jsonl";
 pub const INDEXES_FILE: &str = "indexes.json";
+pub const SCHEMAS_FILE: &str = "schemas.json";
 pub const DEFAULT_COMPACT_THRESHOLD: usize = 10_000;
 /// Compact once the WAL holds at least this share of the store's record count.
 const COMPACT_RATIO: usize = 4;
@@ -161,6 +162,13 @@ pub struct EdgeTypeDefinition {
     pub data_types: HashMap<String, String>,
     #[serde(default)]
     pub cardinality: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+struct SchemaMetadata {
+    node_types: Vec<NodeTypeDefinition>,
+    edge_types: Vec<EdgeTypeDefinition>,
 }
 
 fn node_field(node: &Node, field: &str) -> serde_json::Value {
@@ -507,7 +515,7 @@ impl Store {
     /// metadata are copied alongside the snapshot.
     pub fn backup(&mut self, destination: &mut dyn Storage) -> Result<()> {
         self.compact()?;
-        for name in [SNAPSHOT_FILE, WAL_FILE, MUTATION_LOG_FILE, INDEXES_FILE] {
+        for name in [SNAPSHOT_FILE, WAL_FILE, MUTATION_LOG_FILE, INDEXES_FILE, SCHEMAS_FILE] {
             if let Some(data) = self.storage.read(name)? {
                 destination.write(name, &data)?;
             } else {
@@ -521,7 +529,7 @@ impl Store {
     /// can be loaded before returning it to the caller.
     pub fn restore(source: &dyn Storage, destination: Box<dyn Storage>, config: StoreConfig) -> Result<Self> {
         let mut store = Store::new(destination, config);
-        for name in [SNAPSHOT_FILE, WAL_FILE, MUTATION_LOG_FILE, INDEXES_FILE] {
+        for name in [SNAPSHOT_FILE, WAL_FILE, MUTATION_LOG_FILE, INDEXES_FILE, SCHEMAS_FILE] {
             if let Some(data) = source.read(name)? {
                 store.storage.write(name, &data)?;
             }
@@ -689,12 +697,40 @@ impl Store {
         Ok(())
     }
 
+    fn write_schema_metadata(&mut self) -> Result<()> {
+        let metadata = SchemaMetadata {
+            node_types: self.node_type_definitions.values().cloned().collect(),
+            edge_types: self.edge_type_definitions.values().cloned().collect(),
+        };
+        let data = serde_json::to_vec(&metadata).map_err(|error| PolypackError::CorruptData(error.to_string()))?;
+        self.storage.write(SCHEMAS_FILE, &data)?;
+        if self.config.durability == Durability::Fsync {
+            self.storage.sync(SCHEMAS_FILE)?;
+            self.storage.sync_dir()?;
+        }
+        Ok(())
+    }
+
+    fn load_schema_metadata(&mut self) -> Result<()> {
+        let Some(data) = self.storage.read(SCHEMAS_FILE)? else { return Ok(()) };
+        let metadata: SchemaMetadata = serde_json::from_slice(&data)
+            .map_err(|error| PolypackError::CorruptData(format!("schema metadata: {error}")))?;
+        self.node_type_definitions = metadata.node_types.into_iter().map(|definition| (definition.node_type.clone(), definition)).collect();
+        self.edge_type_definitions = metadata.edge_types.into_iter().map(|definition| (definition.edge_type.clone(), definition)).collect();
+        Ok(())
+    }
+
     pub fn register_node_type(&mut self, definition: NodeTypeDefinition) -> Result<()> {
         self.ensure_loaded()?;
         if definition.node_type.is_empty() { return Err(PolypackError::InvalidArgument("node type must not be empty".into())); }
         let name = definition.node_type.clone();
         let previous = self.node_type_definitions.insert(name.clone(), definition);
         if let Err(error) = self.nodes.values().try_for_each(|node| self.validate_node_schema(node)) {
+            if let Some(previous) = previous.clone() { self.node_type_definitions.insert(previous.node_type.clone(), previous); }
+            else { self.node_type_definitions.remove(&name); }
+            return Err(error);
+        }
+        if let Err(error) = self.write_schema_metadata() {
             if let Some(previous) = previous { self.node_type_definitions.insert(previous.node_type.clone(), previous); }
             else { self.node_type_definitions.remove(&name); }
             return Err(error);
@@ -709,6 +745,11 @@ impl Store {
         let previous = self.edge_type_definitions.insert(name.clone(), definition);
         let validation = self.edges.values().try_for_each(|edge| self.validate_edge_schema(edge, &self.nodes, &self.edges));
         if let Err(error) = validation {
+            if let Some(previous) = previous.clone() { self.edge_type_definitions.insert(previous.edge_type.clone(), previous); }
+            else { self.edge_type_definitions.remove(&name); }
+            return Err(error);
+        }
+        if let Err(error) = self.write_schema_metadata() {
             if let Some(previous) = previous { self.edge_type_definitions.insert(previous.edge_type.clone(), previous); }
             else { self.edge_type_definitions.remove(&name); }
             return Err(error);
@@ -969,6 +1010,7 @@ impl Store {
 
     fn do_load(&mut self) -> Result<()> {
         self.load_index_metadata()?;
+        self.load_schema_metadata()?;
         if let Some(data) = self.storage.read(SNAPSHOT_FILE)? {
             let snapshot = decode_snapshot(&data)?;
             self.nodes = snapshot.nodes.into_iter().collect();
@@ -1687,6 +1729,10 @@ mod tests {
         s.apply(&valid).unwrap();
         let invalid_edge = ChangeBatch { put_edges: vec![Edge { id: "e1".into(), source: "p1".into(), target: "missing".into(), edge_type: "PARENT_OF".into(), data: None, created_at: 1, revision: 0 }], ..Default::default() };
         assert!(matches!(s.apply(&invalid_edge), Err(PolypackError::InvalidArgument(message)) if message.contains("target node is missing")));
+        s.close().unwrap();
+        let mut reopened = Store::new(Box::new(storage), StoreConfig::default());
+        let invalid_after_reload = ChangeBatch { put_nodes: vec![Node { id: "p2".into(), node_type: "person".into(), data: serde_json::json!({"name": "B", "age": "not-an-integer"}).as_object().unwrap().clone(), ..book("p2", "person", 0.0) }], ..Default::default() };
+        assert!(matches!(reopened.apply(&invalid_after_reload), Err(PolypackError::InvalidArgument(message)) if message.contains("must be integer")));
     }
 
     #[test]
