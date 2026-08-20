@@ -33,4 +33,5 @@ pub use query::{AggregateOp, AggregateResult, GraphQuery, GroupedRow, OrderDirec
 // a separate direct dependency.
 pub use polypack_core::query::Direction;
 pub use polypack_core::{merge_activation, NodeActivation};
+pub use polypack_core::query_exec::GraphSnapshot;
 pub use polypack_core::storage::VerificationReport;

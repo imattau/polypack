@@ -1956,11 +1956,11 @@ impl Graph {
         self.query_persisted_text(text, threshold, top_k)?.where_node_type(vec![node_type.to_string()]).to_array()
     }
 
-    /// Build a `query_exec::GraphSnapshot` from the current hot node/edge
-    /// working set. `created_at` on the reconstructed `Edge`s is a
-    /// placeholder — `query_exec` never reads it, only `edge_type`/
-    /// `source`/`target`/`data`.
-    fn snapshot(&self) -> GraphSnapshot {
+    /// Capture a detached query snapshot of the current hot node/edge working
+    /// set. Later graph mutations do not affect the returned snapshot.
+    /// `created_at` on reconstructed edges is a placeholder because the query
+    /// executor only reads edge identity, endpoints, type, and data.
+    pub fn snapshot(&self) -> GraphSnapshot {
         let nodes: Vec<Node> = self.nodes.values().cloned().collect();
         let mut edges = Vec::new();
         for (source, inner) in &self.edges {

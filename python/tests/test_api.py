@@ -7,6 +7,7 @@ import polypack
 from polypack import (
     ChangeBatch,
     ExactIndex,
+    GraphSnapshot,
     HnswIndex,
     PolyGraph,
     PolypackDimensionError,
@@ -161,6 +162,22 @@ def test_context_manager_and_change_batch():
     batch.validate()
     with pytest.raises(PolypackValueError):
         ChangeBatch(put_nodes=[{"id": "", "type": "t"}]).validate()
+
+
+def test_snapshot_is_detached_and_queryable():
+    graph = PolyGraph()
+    _seed_graph(graph)
+
+    snapshot = graph.snapshot()
+    assert isinstance(snapshot, GraphSnapshot)
+    assert snapshot.get_node("n1")["data"] == {"title": "Hello"}
+    assert len(snapshot.get_edges("n1", "LINKS")) == 1
+    assert [node["id"] for node in snapshot.query().where_type("doc").to_list()] == ["n1", "n2"]
+
+    graph.update_node("n1", {"title": "changed"})
+    graph.add_node({"id": "n3", "type": "doc", "data": {}, "insertedAt": 3, "updatedAt": 3})
+    assert snapshot.get_node("n1")["data"] == {"title": "Hello"}
+    assert snapshot.get_node("n3") is None
 
 
 def _seed_graph(graph):

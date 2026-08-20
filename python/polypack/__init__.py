@@ -163,6 +163,7 @@ class UniqueConstraintError(PolypackError):
 
 __all__ = [
     "PolyGraph",
+    "GraphSnapshot",
     "GraphTransaction",
     "GraphQuery",
     "ExactIndex",
@@ -1571,6 +1572,10 @@ class PolyGraph:
 
     # ── queries ──
 
+    def snapshot(self) -> "GraphSnapshot":
+        """Capture a detached, queryable view of the currently loaded graph."""
+        return GraphSnapshot(self)
+
     def query(self) -> "GraphQuery":
         """Create a mutable `GraphQuery` over the currently loaded nodes."""
         return GraphQuery(self)
@@ -1852,6 +1857,54 @@ class PolyGraph:
 
 
 # ── Query builder ──
+
+
+class GraphSnapshot:
+    """Read-only graph state captured at one point in time.
+
+    A snapshot copies nodes, edges, and index buckets so later graph writes do
+    not affect queries created from it. It intentionally exposes only reads
+    and query construction; mutations remain methods on :class:`PolyGraph`.
+    """
+
+    def __init__(self, graph: PolyGraph) -> None:
+        self._nodes = copy.deepcopy(graph._nodes)
+        self._edges = copy.deepcopy(graph._edges)
+        self._incoming = copy.deepcopy(graph._incoming)
+        self._indexes = copy.deepcopy(graph._indexes)
+        self._secondary_index_data = copy.deepcopy(graph._secondary_index_data)
+        self._resource_limits = dict(graph._resource_limits)
+
+    @property
+    def resource_limit_config(self) -> dict:
+        return dict(self._resource_limits)
+
+    def _record_query(self, duration_ms: float, scanned_records: int, index: Optional[str]) -> None:
+        # Query metrics belong to the live graph, not to this detached view.
+        return None
+
+    def query(self) -> "GraphQuery":
+        return GraphQuery(self)
+
+    def get_node(self, id_: str) -> Optional[Node]:
+        node = self._nodes.get(id_)
+        return None if node is None else _copy_node(node)
+
+    def get_nodes(self, ids: Optional[Iterable[str]] = None) -> list:
+        selected = self._nodes.keys() if ids is None else ids
+        return [self._copy_node_by_id(id_) for id_ in selected if id_ in self._nodes]
+
+    def _copy_node_by_id(self, id_: str) -> Node:
+        return _copy_node(self._nodes[id_])
+
+    def get_edges(self, source: Optional[str] = None, edge_type: Optional[str] = None) -> list:
+        maps = self._edges.items() if source is None else ((source, self._edges.get(source, {})),)
+        result = []
+        for _, edges in maps:
+            for edge in edges.values():
+                if edge_type is None or edge["type"] == edge_type:
+                    result.append(dict(edge, data=dict(edge.get("data") or {})))
+        return result
 
 
 class GraphQuery:
