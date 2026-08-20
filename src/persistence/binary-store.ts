@@ -1,5 +1,5 @@
 import type { SerializedNode, SerializedEdge, AdapterCapabilities, IndexDefinition, MutationRecord, VerificationReport } from '../types.js'
-import type { PersistenceAdapter, PersistenceChanges, PersistedNodeQuery } from './adapter.js'
+import type { PersistenceAdapter, PersistenceChanges, PersistedNodeQuery, PersistedSchemaDefinitions } from './adapter.js'
 import { applyPersistedCountPagination, applyPersistedNodeQuery, matchesPersistedNode } from './query.js'
 import type { WalEntry } from './binary-format.js'
 import { encodeWalEntries, decodeWalEntries, encodeSnapshot, decodeSnapshot, encodeMutationRecords, decodeMutationRecords } from './binary-format.js'
@@ -11,6 +11,7 @@ import { ReadOnlyStoreError } from './lock-errors.js'
 const SNAPSHOT_FILE = 'snapshot.msgpack'
 const WAL_FILE = 'wal.msgpack'
 const MUTATION_LOG_FILE = 'mutations.msgpack'
+const SCHEMAS_FILE = 'schemas.json'
 const LOCK_FILE = 'store.lock'
 const DEFAULT_STALE_LOCK_MS = 30_000
 const DEFAULT_COMPACT_THRESHOLD = 10_000
@@ -61,6 +62,7 @@ export class BinaryStoreAdapter implements PersistenceAdapter {
   private edges = new Map<string, SerializedEdge>()
   private vectors = new Map<string, number[]>()
   private indexDefinitions: IndexDefinition[] = []
+  private schemaDefinitions: PersistedSchemaDefinitions = { nodeTypes: [], edgeTypes: [] }
   private mutationRecords: MutationRecord[] = []
   private nextMutationSequence = 1n
   private byType = new Map<string, Set<string>>()
@@ -213,6 +215,16 @@ export class BinaryStoreAdapter implements PersistenceAdapter {
       this.edges = edges
       this.vectors = vectors
       this.indexDefinitions = indexes
+    }
+    const schemaData = await this.io.readFile(SCHEMAS_FILE)
+    if (schemaData) {
+      try {
+        const parsed = JSON.parse(new TextDecoder().decode(schemaData)) as PersistedSchemaDefinitions
+        if (!Array.isArray(parsed.nodeTypes) || !Array.isArray(parsed.edgeTypes)) throw new Error('schema metadata must contain nodeTypes and edgeTypes arrays')
+        this.schemaDefinitions = parsed
+      } catch (error) {
+        throw new Error(`Invalid schema metadata: ${error instanceof Error ? error.message : String(error)}`)
+      }
     }
     const walData = await this.io.readFile(WAL_FILE)
     if (walData && walData.length > 0) {
@@ -369,6 +381,22 @@ export class BinaryStoreAdapter implements PersistenceAdapter {
     return this.indexDefinitions.map(index => ({ ...index, fields: [...index.fields] }))
   }
 
+  async getSchemaDefinitions(): Promise<PersistedSchemaDefinitions> {
+    this.assertOpen()
+    await this.enqueue(() => this.ensureLoaded())
+    return structuredClone(this.schemaDefinitions)
+  }
+
+  async setSchemaDefinitions(definitions: PersistedSchemaDefinitions): Promise<void> {
+    this.assertOpen()
+    this.assertWritable()
+    await this.enqueue(async () => {
+      await this.ensureLoaded()
+      this.schemaDefinitions = structuredClone(definitions)
+      await this.io.writeFile(SCHEMAS_FILE, new TextEncoder().encode(JSON.stringify(this.schemaDefinitions)))
+    })
+  }
+
   /** Force the current state into a snapshot and compact the recovery WAL. */
   async checkpoint(): Promise<void> {
     this.assertOpen()
@@ -441,7 +469,7 @@ export class BinaryStoreAdapter implements PersistenceAdapter {
     } else {
       await this.checkpoint()
     }
-    for (const name of [SNAPSHOT_FILE, WAL_FILE, MUTATION_LOG_FILE]) {
+    for (const name of [SNAPSHOT_FILE, WAL_FILE, MUTATION_LOG_FILE, SCHEMAS_FILE]) {
       const data = await this.io.readFile(name)
       if (data) await destination.writeFile(name, data)
     }
@@ -449,7 +477,7 @@ export class BinaryStoreAdapter implements PersistenceAdapter {
 
   /** Restore all store files from one FileIO directory into another. */
   static async restore(source: FileIO, destination: FileIO): Promise<void> {
-    for (const name of [SNAPSHOT_FILE, WAL_FILE, MUTATION_LOG_FILE]) {
+    for (const name of [SNAPSHOT_FILE, WAL_FILE, MUTATION_LOG_FILE, SCHEMAS_FILE]) {
       const data = await source.readFile(name)
       if (data) await destination.writeFile(name, data)
       else await destination.deleteFile(name)

@@ -157,6 +157,29 @@ describe('database-core mutation API', () => {
     expect(reloaded.getEdges('a', 'CLAIMS').map(edge => edge.id).sort()).toEqual(['claim-1', 'claim-2'])
   })
 
+  it('persists structural schemas and reloads them without runtime callbacks', async () => {
+    const io = new MemoryFileIO()
+    const graph = new PolyGraph(new BinaryStoreAdapter({ storeDir: 'schema-test', fileIO: io }))
+    graph.registerNodeType('person', { requiredFields: ['name'], dataTypes: { age: 'integer' } })
+    await graph.flush()
+
+    const reloaded = new PolyGraph(new BinaryStoreAdapter({ storeDir: 'schema-test', fileIO: io }))
+    await reloaded.warm()
+    expect(() => reloaded.addNode({ id: 'invalid', type: 'person', data: {}, insertedAt: 1, updatedAt: 1 })).toThrow(/required field name/)
+    reloaded.addNode({ id: 'valid', type: 'person', data: { name: 'A', age: 1 }, insertedAt: 1, updatedAt: 1 })
+  })
+
+  it('loads the canonical schema metadata shape shared with Rust and Python', async () => {
+    const io = new MemoryFileIO()
+    await io.writeFile('schemas.json', new TextEncoder().encode(JSON.stringify({
+      nodeTypes: [{ nodeType: 'person', requiredFields: ['name'], dataTypes: { age: 'integer' } }],
+      edgeTypes: [],
+    })))
+    const graph = new PolyGraph(new BinaryStoreAdapter({ storeDir: 'canonical-schema-test', fileIO: io }))
+    await graph.warm()
+    expect(() => graph.addNode({ id: 'invalid', type: 'person', data: {}, insertedAt: 1, updatedAt: 1 })).toThrow(/required field name/)
+  })
+
   it('records acknowledged logical mutations with durable sequences', async () => {
     const io = new MemoryFileIO()
     const adapter = new BinaryStoreAdapter({ storeDir: 'mutation-log-test', fileIO: io })
@@ -208,8 +231,9 @@ describe('database-core mutation API', () => {
     const sourceIo = new MemoryFileIO()
     const source = new BinaryStoreAdapter({ storeDir: 'admin-source', fileIO: sourceIo })
     const graph = new PolyGraph(source)
-    graph.addNode(node('a'))
-    graph.addNode(node('b'))
+    graph.registerNodeType('record', { requiredFields: ['name'] })
+    graph.addNode({ ...node('a'), data: { name: 'A' } })
+    graph.addNode({ ...node('b'), data: { name: 'B' } })
     graph.addEdge('a', 'LINKS', 'b')
     await graph.flush()
     await source.checkpoint()
@@ -223,6 +247,9 @@ describe('database-core mutation API', () => {
     await restored.getNode('a')
     expect((await restored.verify()).edgeCount).toBe(1)
     expect((await restored.getMutationsSince!(0n)).length).toBeGreaterThan(0)
+    const restoredGraph = new PolyGraph(restored)
+    await restoredGraph.warm()
+    expect(() => restoredGraph.addNode(node('invalid'))).toThrow(/required field name/)
   })
 
   it('exposes checkpoint and verification through the graph API', async () => {

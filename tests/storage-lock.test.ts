@@ -31,6 +31,8 @@ describe('binary store process safety', () => {
       expect(await reader.allNodeIds()).toEqual(['a'])
       await expect(reader.putNode({ id: 'b', type: 'record', data: {}, vector: null, insertedAt: 1, updatedAt: 1 }))
         .rejects.toBeInstanceOf(ReadOnlyStoreError)
+      await expect(reader.setSchemaDefinitions!({ nodeTypes: [], edgeTypes: [] }))
+        .rejects.toBeInstanceOf(ReadOnlyStoreError)
       await reader.close()
       await writer.close()
     } finally {

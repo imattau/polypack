@@ -205,6 +205,14 @@ def test_snapshot_is_detached_and_queryable():
     assert snapshot.get_node("n3") is None
 
 
+def test_migrations_reject_identity_changes():
+    graph = PolyGraph()
+    graph.add_node({"id": "a", "type": "record", "data": {}, "insertedAt": 1, "updatedAt": 1})
+    graph.migrations.register({"from": 1, "to": 2, "migrateNode": lambda node: {**node, "id": "changed"}})
+    with pytest.raises(polypack.MigrationError, match="changed identity or type"):
+        graph.migrations.run(graph, 1, 2)
+
+
 def test_patch_compare_and_set_is_conditional():
     graph = PolyGraph()
     graph.add_node({"id": "a", "type": "t", "data": {"state": "ready"}, "insertedAt": 1, "updatedAt": 1})

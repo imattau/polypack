@@ -95,4 +95,14 @@ describe('schema and constraint hooks', () => {
     expect(graph.nodeTypes.get('person')?.indexes).toEqual(['name'])
     expect(graph.edgeTypes.get('KNOWS')?.sourceTypes).toEqual(['person'])
   })
+
+  it('rejects malformed schema definitions before registration mutation', () => {
+    const graph = new PolyGraph()
+    expect(() => graph.registerNodeType('person', { requiredFields: ['name', 'name'] })).toThrow(/unique and non-empty/)
+    expect(() => graph.registerNodeType('person', { dataTypes: { age: 'date' as never } })).toThrow(/Invalid node data type/)
+    expect(() => graph.registerEdgeType('RELATED', { sourceTypes: ['person', 'person'] })).toThrow(/unique and non-empty/)
+    expect(() => graph.registerEdgeType('RELATED', { cardinality: 'invalid' as never })).toThrow(/Invalid edge cardinality/)
+    expect(graph.nodeTypes.has('person')).toBe(false)
+    expect(graph.edgeTypes.has('RELATED')).toBe(false)
+  })
 })

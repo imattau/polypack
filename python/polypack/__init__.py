@@ -119,7 +119,11 @@ class MigrationRegistry:
         migrate_node = lambda node: self._apply_node(path, node)
         migrate_edge = lambda edge: self._apply_edge(path, edge)
         for start in range(0, len(nodes), batch_size):
-            batch = [migrate_node(copy.deepcopy(node)) for node in nodes[start:start + batch_size]]
+            originals = nodes[start:start + batch_size]
+            batch = [migrate_node(copy.deepcopy(node)) for node in originals]
+            for original, migrated in zip(originals, batch):
+                if migrated["id"] != original["id"] or migrated["type"] != original["type"]:
+                    raise MigrationError(f"node migration changed identity or type for {original['id']}")
             if not report["dryRun"] and path:
                 with graph.transaction() as tx:
                     for node in batch:
@@ -134,6 +138,9 @@ class MigrationRegistry:
         for start in range(0, len(edges), batch_size):
             original = edges[start:start + batch_size]
             batch = [migrate_edge(copy.deepcopy(edge)) for edge in original]
+            for before, migrated in zip(original, batch):
+                if migrated["id"] != before["id"] or migrated["source"] != before["source"] or migrated["target"] != before["target"] or migrated["type"] != before["type"]:
+                    raise MigrationError(f"edge migration changed identity or endpoints for {before['id']}")
             changed = [edge for before, edge in zip(original, batch) if edge.get("data") != before.get("data")]
             if not report["dryRun"] and changed:
                 with graph.transaction() as tx:

@@ -309,6 +309,12 @@ comparisons reject vectors with mismatched dimensions.
   `deleteFile`, `fileExists`. Implement it to plug in any backing store.
 - `PersistenceAdapter` is the contract for custom storage. It contains node,
   edge, and vector single/bulk operations plus `clearAll()` and `close()`.
+- Adapters may implement `getSchemaDefinitions()` and
+  `setSchemaDefinitions()` to persist structural node/edge schema metadata.
+  The canonical file shape is `nodeTypes[{ nodeType, ... }]` and
+  `edgeTypes[{ edgeType, ... }]`, shared with the Rust and Python bindings.
+  Runtime validator callbacks are intentionally not serialized; applications
+  must register those callbacks again after opening a store.
 - `PersistenceChanges` describes one logical node/edge/vector commit. Adapters
   may implement `applyChanges(changes)` to commit it atomically; `PolyGraph`
   prefers this hook and restores the complete dirty batch when it rejects.

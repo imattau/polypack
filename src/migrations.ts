@@ -106,7 +106,13 @@ export class MigrationRegistry {
 
     for (let offset = 0; offset < nodes.length; offset += batchSize) {
       checkAborted()
-      const batch = nodes.slice(offset, offset + batchSize).map(node => migrate(node))
+      const originals = nodes.slice(offset, offset + batchSize)
+      const batch = originals.map(node => migrate(node))
+      for (let i = 0; i < batch.length; i++) {
+        if (batch[i].id !== originals[i].id || batch[i].type !== originals[i].type) {
+          throw new MigrationError(`Node migration changed identity or type for ${originals[i].id}`)
+        }
+      }
       if (!options.dryRun && path.length > 0) {
         await graph.transaction(tx => {
           for (const node of batch) tx.addNode(node)
@@ -119,12 +125,18 @@ export class MigrationRegistry {
     }
     for (let offset = 0; offset < edges.length; offset += batchSize) {
       checkAborted()
-      const batch = edges.slice(offset, offset + batchSize).map(edge => migrateEdge({
+      const originals = edges.slice(offset, offset + batchSize)
+      const batch = originals.map(edge => migrateEdge({
         ...edge,
         data: edge.data ? structuredClone(edge.data) : undefined,
       }))
+      for (let i = 0; i < batch.length; i++) {
+        if (batch[i].id !== originals[i].id || batch[i].source !== originals[i].source || batch[i].target !== originals[i].target || batch[i].type !== originals[i].type) {
+          throw new MigrationError(`Edge migration changed identity or endpoints for ${originals[i].id}`)
+        }
+      }
       const edgeMigrations = path.some(definition => definition.migrateEdge)
-      const changed = batch.filter((edge, index) => JSON.stringify(edge.data) !== JSON.stringify(edges[offset + index].data))
+      const changed = batch.filter((edge, index) => JSON.stringify(edge.data) !== JSON.stringify(originals[index].data))
       if (!options.dryRun && edgeMigrations && changed.length > 0) {
         await graph.transaction(tx => {
           for (const edge of changed) tx.updateEdge(edge.id, edge.data ?? {})

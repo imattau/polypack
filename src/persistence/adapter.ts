@@ -1,4 +1,4 @@
-import type { SerializedNode, SerializedEdge, IndexDefinition, MutationRecord, VerificationReport, GraphStats } from '../types.js'
+import type { SerializedNode, SerializedEdge, IndexDefinition, MutationRecord, VerificationReport, GraphStats, NodeTypeDefinition, EdgeTypeDefinition } from '../types.js'
 import type { AdapterCapabilities } from '../types.js'
 import type { FileIO } from './file-io.js'
 
@@ -28,11 +28,19 @@ export interface PersistenceChanges {
   deleteVectorIds: string[]
 }
 
+/** Serializable schema metadata; runtime validator callbacks are omitted. */
+export interface PersistedSchemaDefinitions {
+  nodeTypes: Array<{ nodeType: string } & Omit<NodeTypeDefinition, 'validate'>>
+  edgeTypes: Array<{ edgeType: string } & Omit<EdgeTypeDefinition, 'validate'>>
+}
+
 /** Storage contract used by {@link PolyGraph}. Implement all writes atomically where possible. */
 export interface PersistenceAdapter {
   /** Guarantees offered by this adapter. */
   readonly capabilities?: AdapterCapabilities
   getIndexDefinitions?(): Promise<IndexDefinition[]>
+  getSchemaDefinitions?(): Promise<PersistedSchemaDefinitions>
+  setSchemaDefinitions?(definitions: PersistedSchemaDefinitions): Promise<void>
   getMutationsSince?(sequence: bigint): Promise<MutationRecord[]>
   latestMutationSequence?(): Promise<bigint>
   checkpoint?(): Promise<void>

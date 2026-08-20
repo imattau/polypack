@@ -1,9 +1,12 @@
 import type { FileIO } from '../persistence/file-io.js'
 import type { SyncOp } from './types.js'
+import { syncChecksum } from './checksum.js'
 
 export interface SyncLogState {
   baseCursor: number
   ops: SyncOp[]
+  /** Integrity marker for durable files; omitted by legacy logs. */
+  checksum?: string
 }
 
 export interface SyncOperationLog {
@@ -41,8 +44,23 @@ export class FileSyncOperationLog implements SyncOperationLog {
   async load(): Promise<SyncLogState> {
     const data = await this.io.readFile(this.fileName)
     if (!data || data.length === 0) return { baseCursor: 0, ops: [] }
-    const parsed = JSON.parse(new TextDecoder().decode(data)) as SyncLogState
-    return { baseCursor: parsed.baseCursor ?? 0, ops: parsed.ops ?? [] }
+    const parsed = JSON.parse(new TextDecoder().decode(data)) as Partial<SyncLogState>
+    if (!Number.isInteger(parsed.baseCursor) || (parsed.baseCursor ?? 0) < 0 || !Array.isArray(parsed.ops) || parsed.ops.some(op => !this.validOperation(op))) {
+      throw new Error('Invalid sync operation log state')
+    }
+    if (parsed.checksum !== undefined && parsed.checksum !== syncChecksum(parsed.ops)) {
+      throw new Error('Sync operation log checksum mismatch')
+    }
+    return { baseCursor: parsed.baseCursor as number, ops: parsed.ops, checksum: parsed.checksum }
+  }
+
+  private validOperation(op: unknown): op is SyncOp {
+    if (!op || typeof op !== 'object') return false
+    const candidate = op as Partial<SyncOp>
+    return Number.isInteger(candidate.seq) && (candidate.seq ?? -1) >= 0 &&
+      typeof candidate.timestamp === 'number' && Number.isFinite(candidate.timestamp) &&
+      typeof candidate.clientId === 'string' && candidate.clientId.length > 0 &&
+      typeof candidate.kind === 'string' && !!candidate.payload && typeof candidate.payload === 'object'
   }
 
   async append(op: SyncOp): Promise<void> {
@@ -70,6 +88,7 @@ export class FileSyncOperationLog implements SyncOperationLog {
   }
 
   private async write(state: SyncLogState): Promise<void> {
-    await this.io.writeFile(this.fileName, new TextEncoder().encode(JSON.stringify(state)))
+    const persisted = { baseCursor: state.baseCursor, ops: state.ops, checksum: syncChecksum(state.ops) }
+    await this.io.writeFile(this.fileName, new TextEncoder().encode(JSON.stringify(persisted)))
   }
 }

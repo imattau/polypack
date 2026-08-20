@@ -59,4 +59,23 @@ describe('durable sync operation logs', () => {
     expect(server.ops.map(operation => operation.clientId)).toEqual(['writer-a', 'writer-b'])
     expect(received.filter(message => message.type === 'ack')).toHaveLength(2)
   })
+
+  it('rejects a corrupted persisted operation log', async () => {
+    const io = new MemoryFileIO()
+    await io.writeFile('sync-operations.json', new TextEncoder().encode(JSON.stringify({
+      baseCursor: 0,
+      ops: [op(1)],
+      checksum: 'corrupt',
+    })))
+    await expect(new FileSyncOperationLog(io).load()).rejects.toThrow(/checksum mismatch/)
+  })
+
+  it('rejects malformed persisted operation records', async () => {
+    const io = new MemoryFileIO()
+    await io.writeFile('sync-operations.json', new TextEncoder().encode(JSON.stringify({
+      baseCursor: 0,
+      ops: [{ seq: -1, timestamp: 'invalid', clientId: '', kind: 'addNode', payload: null }],
+    })))
+    await expect(new FileSyncOperationLog(io).load()).rejects.toThrow(/Invalid sync operation log state/)
+  })
 })

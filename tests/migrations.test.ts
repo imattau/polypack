@@ -71,4 +71,22 @@ describe('application migrations', () => {
     expect(resumed.processed).toBe(1)
     expect((await graph.queryPersisted().toArray()).every(node => node.data.migrated === true)).toBe(true)
   })
+
+  it('rejects migrations that change node or edge identity', async () => {
+    const graph = new PolyGraph(new MemoryAdapter())
+    graph.addNode({ id: 'a', type: 'record', data: {}, insertedAt: 1, updatedAt: 1 })
+    graph.addNode({ id: 'b', type: 'record', data: {}, insertedAt: 1, updatedAt: 1 })
+    graph.addEdge({ id: 'edge', source: 'a', target: 'b', type: 'RELATED', createdAt: 1 })
+    await graph.flush()
+    graph.migrations.register({ from: 1, to: 2, migrateNode: node => ({ ...node, id: `migrated-${node.id}` }) })
+    await expect(graph.migrations.run(graph, 1, 2)).rejects.toThrow(/changed identity or type/)
+
+    const edgeGraph = new PolyGraph(new MemoryAdapter())
+    edgeGraph.addNode({ id: 'a', type: 'record', data: {}, insertedAt: 1, updatedAt: 1 })
+    edgeGraph.addNode({ id: 'b', type: 'record', data: {}, insertedAt: 1, updatedAt: 1 })
+    edgeGraph.addEdge({ id: 'edge', source: 'a', target: 'b', type: 'RELATED', createdAt: 1 })
+    await edgeGraph.flush()
+    edgeGraph.migrations.register({ from: 1, to: 2, migrateNode: node => node, migrateEdge: edge => ({ ...edge, target: 'a' }) })
+    await expect(edgeGraph.migrations.run(edgeGraph, 1, 2)).rejects.toThrow(/changed identity or endpoints/)
+  })
 })

@@ -21,7 +21,7 @@ import {
   reinforceActivation,
   yieldToUI,
 } from './utils.js'
-import type { PersistenceAdapter, PersistenceChanges } from './persistence/adapter.js'
+import type { PersistenceAdapter, PersistenceChanges, PersistedSchemaDefinitions } from './persistence/adapter.js'
 import type { FileIO } from './persistence/file-io.js'
 import { MemoryAdapter } from './persistence/memory.js'
 import { createEmbedding, defaultEmbedding } from './embedding.js'
@@ -119,6 +119,7 @@ export class PolyGraph {
   private secondaryIndexData = new Map<string, Map<string, Set<string>>>()
   private nodeTypeDefinitions = new Map<string, NodeTypeDefinition>()
   private edgeTypeDefinitions = new Map<string, EdgeTypeDefinition>()
+  private schemaDefinitionsDirty = false
   private queryCount = 0
   private queryDurationMs = 0
   private queryScannedRecords = 0
@@ -269,6 +270,7 @@ export class PolyGraph {
   /** Register optional validation and constraints for a node type. */
   registerNodeType(type: string, definition: NodeTypeDefinition = {}): void {
     if (!type) throw new TypeError('Node type must not be empty')
+    this.validateNodeTypeDefinition(definition)
     const previous = this.nodeTypeDefinitions.get(type)
     this.nodeTypeDefinitions.set(type, {
       ...definition,
@@ -286,11 +288,13 @@ export class PolyGraph {
     for (const field of definition.indexes ?? []) {
       this.defineIndex({ name: `${type}.${field}`, nodeType: type, fields: [field] })
     }
+    this.schemaDefinitionsDirty = true
   }
 
   /** Register optional endpoint, cardinality, and validation constraints for an edge type. */
   registerEdgeType(type: string, definition: EdgeTypeDefinition = {}): void {
     if (!type) throw new TypeError('Edge type must not be empty')
+    this.validateEdgeTypeDefinition(definition)
     const previous = this.edgeTypeDefinitions.get(type)
     const normalized = {
       ...definition,
@@ -310,6 +314,98 @@ export class PolyGraph {
       if (previous) this.edgeTypeDefinitions.set(type, previous)
       else this.edgeTypeDefinitions.delete(type)
       throw error
+    }
+    this.schemaDefinitionsDirty = true
+  }
+
+  private persistedSchemaDefinitions(): PersistedSchemaDefinitions {
+    return {
+      nodeTypes: [...this.nodeTypeDefinitions].map(([type, definition]) => ({
+        nodeType: type,
+        indexes: definition.indexes ? [...definition.indexes] : undefined,
+        requiredFields: definition.requiredFields ? [...definition.requiredFields] : undefined,
+        dataTypes: definition.dataTypes ? { ...definition.dataTypes } : undefined,
+      })),
+      edgeTypes: [...this.edgeTypeDefinitions].map(([type, definition]) => ({
+        edgeType: type,
+        sourceTypes: definition.sourceTypes ? [...definition.sourceTypes] : undefined,
+        targetTypes: definition.targetTypes ? [...definition.targetTypes] : undefined,
+        cardinality: definition.cardinality,
+        requiredFields: definition.requiredFields ? [...definition.requiredFields] : undefined,
+        dataTypes: definition.dataTypes ? { ...definition.dataTypes } : undefined,
+      })),
+    }
+  }
+
+  private loadPersistedSchemaDefinitions(definitions: PersistedSchemaDefinitions): void {
+    if (!definitions || !Array.isArray(definitions.nodeTypes) || !Array.isArray(definitions.edgeTypes)) {
+      throw new TypeError('Invalid persisted schema metadata')
+    }
+    this.nodeTypeDefinitions.clear()
+    this.edgeTypeDefinitions.clear()
+    for (const definition of definitions.nodeTypes) {
+      const { nodeType: type, ...schema } = definition
+      if (!type || this.nodeTypeDefinitions.has(type) || !schema || typeof schema !== 'object') {
+        throw new TypeError('Invalid persisted node schema definition')
+      }
+      this.validateNodeTypeDefinition(schema)
+      this.nodeTypeDefinitions.set(type, {
+        ...schema,
+        indexes: schema.indexes ? [...schema.indexes] : undefined,
+        requiredFields: schema.requiredFields ? [...schema.requiredFields] : undefined,
+        dataTypes: schema.dataTypes ? { ...schema.dataTypes } : undefined,
+      })
+    }
+    for (const definition of definitions.edgeTypes) {
+      const { edgeType: type, ...schema } = definition
+      if (!type || this.edgeTypeDefinitions.has(type) || !schema || typeof schema !== 'object') {
+        throw new TypeError('Invalid persisted edge schema definition')
+      }
+      this.validateEdgeTypeDefinition(schema)
+      this.edgeTypeDefinitions.set(type, {
+        ...schema,
+        sourceTypes: schema.sourceTypes ? [...schema.sourceTypes] : undefined,
+        targetTypes: schema.targetTypes ? [...schema.targetTypes] : undefined,
+        requiredFields: schema.requiredFields ? [...schema.requiredFields] : undefined,
+        dataTypes: schema.dataTypes ? { ...schema.dataTypes } : undefined,
+      })
+    }
+    this.schemaDefinitionsDirty = false
+  }
+
+  private validateNodeTypeDefinition(definition: NodeTypeDefinition): void {
+    const required = definition.requiredFields ?? []
+    const indexes = definition.indexes ?? []
+    const dataTypes = definition.dataTypes ?? {}
+    const validTypes = new Set(['string', 'number', 'integer', 'boolean', 'object', 'array'])
+    if (required.some(field => !field) || new Set(required).size !== required.length) {
+      throw new TypeError('Node required fields must be unique and non-empty')
+    }
+    if (indexes.some(field => !field) || new Set(indexes).size !== indexes.length) {
+      throw new TypeError('Node indexes must be unique and non-empty')
+    }
+    if (Object.entries(dataTypes).some(([field, expected]) => !field || !validTypes.has(expected))) {
+      throw new TypeError('Invalid node data type definition')
+    }
+  }
+
+  private validateEdgeTypeDefinition(definition: EdgeTypeDefinition): void {
+    const sourceTypes = definition.sourceTypes ?? []
+    const targetTypes = definition.targetTypes ?? []
+    const required = definition.requiredFields ?? []
+    const dataTypes = definition.dataTypes ?? {}
+    const validTypes = new Set(['string', 'number', 'integer', 'boolean', 'object', 'array'])
+    if (sourceTypes.some(type => !type) || new Set(sourceTypes).size !== sourceTypes.length || targetTypes.some(type => !type) || new Set(targetTypes).size !== targetTypes.length) {
+      throw new TypeError('Edge source and target types must be unique and non-empty')
+    }
+    if (required.some(field => !field) || new Set(required).size !== required.length) {
+      throw new TypeError('Edge required fields must be unique and non-empty')
+    }
+    if (Object.entries(dataTypes).some(([field, expected]) => !field || !validTypes.has(expected))) {
+      throw new TypeError('Invalid edge data type definition')
+    }
+    if (definition.cardinality !== undefined && !['one-to-one', 'one-to-many', 'many-to-one', 'many-to-many'].includes(definition.cardinality)) {
+      throw new TypeError(`Invalid edge cardinality: ${String(definition.cardinality)}`)
     }
   }
 
@@ -693,7 +789,7 @@ export class PolyGraph {
   protected hasPendingPersistence(): boolean {
     return this.dirtyNodes.size > 0 || this.dirtyEdges.size > 0 ||
       this.dirtyVectors.size > 0 || this.removedNodeIds.size > 0 ||
-      this.removedEdgeIds.size > 0 || this.removedVectorIds.size > 0 || this.indexDefinitionsDirty
+      this.removedEdgeIds.size > 0 || this.removedVectorIds.size > 0 || this.indexDefinitionsDirty || this.schemaDefinitionsDirty
   }
 
   private async flushPending(): Promise<void> {
@@ -704,6 +800,7 @@ export class PolyGraph {
     const removedEdgeIds = [...this.removedEdgeIds]
     const removedVectorIds = [...this.removedVectorIds]
     const indexDefinitionsDirty = this.indexDefinitionsDirty
+    const schemaDefinitionsDirty = this.schemaDefinitionsDirty
     const evictedSnapshots = new Map<string, SerializedNode>()
     for (const id of dirtyNodeIds) this.dirtyNodes.delete(id)
     for (const id of dirtyEdgeIds) this.dirtyEdges.delete(id)
@@ -712,6 +809,7 @@ export class PolyGraph {
     for (const id of removedEdgeIds) this.removedEdgeIds.delete(id)
     for (const id of removedVectorIds) this.removedVectorIds.delete(id)
     this.indexDefinitionsDirty = false
+    this.schemaDefinitionsDirty = false
 
     const nodesToSave: SerializedNode[] = []
     for (const id of dirtyNodeIds) {
@@ -798,6 +896,9 @@ export class PolyGraph {
         await Promise.all(removedVectorIds.map(id => this.persistence.deleteVector(id)))
         await this.persistence.bulkPutVectors(dirtyVectorEntries)
       }
+      if (schemaDefinitionsDirty && this.persistence.setSchemaDefinitions) {
+        await this.persistence.setSchemaDefinitions(this.persistedSchemaDefinitions())
+      }
     } catch (error) {
       for (const id of dirtyNodeIds) if (!this.removedNodeIds.has(id)) this.dirtyNodes.add(id)
       for (const id of dirtyEdgeIds) if (!this.removedEdgeIds.has(id)) this.dirtyEdges.add(id)
@@ -807,6 +908,7 @@ export class PolyGraph {
       for (const id of removedVectorIds) if (!this.vectors.has(id)) this.removedVectorIds.add(id)
       for (const [id, snapshot] of evictedSnapshots) this.evictedDirtyNodes.set(id, snapshot)
       if (indexDefinitionsDirty) this.indexDefinitionsDirty = true
+      if (schemaDefinitionsDirty) this.schemaDefinitionsDirty = true
       throw error
     }
   }
@@ -1686,6 +1788,9 @@ export class PolyGraph {
   async warm(): Promise<void> {
     if (this._warmed) return
     this._warmed = true
+    if (this.persistence.getSchemaDefinitions) {
+      this.loadPersistedSchemaDefinitions(await this.persistence.getSchemaDefinitions())
+    }
     if (this.persistence.getIndexDefinitions) {
       const persistedIndexes = await this.persistence.getIndexDefinitions()
       for (const index of persistedIndexes) this.defineIndex(index)

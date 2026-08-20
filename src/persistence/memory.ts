@@ -1,5 +1,5 @@
 import type { SerializedNode, SerializedEdge, IndexDefinition, MutationRecord } from '../types.js'
-import type { PersistenceAdapter, PersistenceChanges, PersistedNodeQuery } from './adapter.js'
+import type { PersistenceAdapter, PersistenceChanges, PersistedNodeQuery, PersistedSchemaDefinitions } from './adapter.js'
 import { applyPersistedCountPagination, applyPersistedNodeQuery, matchesPersistedNode } from './query.js'
 import { mutationRecordFromChanges } from './mutation-log.js'
 
@@ -23,6 +23,7 @@ export class MemoryAdapter implements PersistenceAdapter {
   private edgesByTarget = new Map<string, Set<string>>()
   private nodeOrder = new Map<string, true>()
   private indexDefinitions: IndexDefinition[] = []
+  private schemaDefinitions: PersistedSchemaDefinitions = { nodeTypes: [], edgeTypes: [] }
   private mutations: MutationRecord[] = []
   private nextMutation = 1n
   private readonly maxNodes: number | undefined
@@ -36,6 +37,14 @@ export class MemoryAdapter implements PersistenceAdapter {
    */
   constructor(maxNodes?: number) {
     this.maxNodes = maxNodes
+  }
+
+  async getSchemaDefinitions(): Promise<PersistedSchemaDefinitions> {
+    return structuredClone(this.schemaDefinitions)
+  }
+
+  async setSchemaDefinitions(definitions: PersistedSchemaDefinitions): Promise<void> {
+    this.schemaDefinitions = structuredClone(definitions)
   }
 
   private touchNode(id: string): void {
