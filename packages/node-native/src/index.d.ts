@@ -115,7 +115,7 @@ export interface NativeChangeBatch {
  * TypeScript `BinaryStoreAdapter`.
  */
 export class NativeStore {
-  constructor(directory: string, compactThreshold?: number)
+  constructor(directory: string, compactThreshold?: number, readOnly?: boolean)
   static restore(source: string, destination: string, compactThreshold?: number): NativeStore
   apply(changes: NativeChangeBatch): void
   nodeIds(): string[]

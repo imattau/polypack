@@ -73,6 +73,25 @@ describe('NativeStore', () => {
     }
   })
 
+  it('supports read-only opening without a writer lock', () => {
+    if (!available) return
+    const dir = tempDir('read-only')
+    try {
+      const writer = new NativeStore(dir)
+      writer.apply({ putNodes: [node('read-only-node')] })
+      writer.close()
+      const reader = new NativeStore(dir, undefined, true)
+      expect(reader.nodeIds()).toEqual(['read-only-node'])
+      expect(() => reader.apply({ putNodes: [node('blocked')] })).toThrow(/read-only/)
+      reader.close()
+      const reopened = new NativeStore(dir)
+      expect(reopened.nodeIds()).toEqual(['read-only-node'])
+      reopened.close()
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
   it('rejects a second writer for the same directory', () => {
     if (!available) return
     const dir = tempDir('lock')

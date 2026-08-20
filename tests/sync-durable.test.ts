@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { MemoryFileIO } from '../src/persistence/file-io'
 import { FileSyncOperationLog, SyncServer } from '../src/sync/index'
+import type { SyncMessage } from '../src/sync/types'
 
 const op = (seq: number) => ({
   seq,
@@ -41,5 +42,21 @@ describe('durable sync operation logs', () => {
     await new Promise(resolve => setTimeout(resolve, 0))
     expect(restoredMessages[0]).toMatchObject({ type: 'delta', fromSeq: 1 })
     expect(restoredMessages[0].ops.map((item: { operationId: string }) => item.operationId)).toEqual(['op-2', 'op-3'])
+  })
+
+  it('serializes concurrent durable submissions in cursor order', async () => {
+    const io = new MemoryFileIO()
+    const server = new SyncServer({ operationLog: new FileSyncOperationLog(io) })
+    const received: SyncMessage[] = []
+    const receive = server.addClient({ clientId: 'receiver', send: message => received.push(message) })
+    const op1 = { ...op(1), clientId: 'writer-a' }
+    const op2 = { ...op(1), clientId: 'writer-b', operationId: 'op-b' }
+    receive({ type: 'delta', clientId: 'writer-a', fromSeq: 0, ops: [op1] })
+    receive({ type: 'delta', clientId: 'writer-b', fromSeq: 0, ops: [op2] })
+    await new Promise(resolve => setTimeout(resolve, 0))
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(server.cursor).toBe(2)
+    expect(server.ops.map(operation => operation.clientId)).toEqual(['writer-a', 'writer-b'])
+    expect(received.filter(message => message.type === 'ack')).toHaveLength(2)
   })
 })

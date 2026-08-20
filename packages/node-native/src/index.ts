@@ -392,9 +392,9 @@ export interface NativeChangeBatch {
 export class NativeStore {
   private inner: NativeStoreBinding
 
-  constructor(directory: string, compactThreshold?: number) {
+  constructor(directory: string, compactThreshold?: number, readOnly = false) {
     assertAvailable()
-    this.inner = new native.NativeStore(directory, compactThreshold)
+    this.inner = new native.NativeStore(directory, compactThreshold, readOnly)
   }
 
   /** Restore and validate a native store from a directory backup. */

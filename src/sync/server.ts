@@ -35,6 +35,7 @@ export class SyncServer {
   private baseCursor = 0
   private readonly options: SyncServerOptions & { protocolVersion: number; maxOps: number; maxBatchOps: number }
   private readyPromise: Promise<void> | null = null
+  private durableQueue: Promise<void> = Promise.resolve()
   onOp?: (op: SyncOp) => void
 
   constructor(options: SyncServerOptions = {}) {
@@ -144,7 +145,8 @@ export class SyncServer {
 
   private processDelta(msg: SyncMessage, sender: SyncServerClient, errors: SyncError[] = []): void {
     if (this.options.operationLog) {
-      void this.processDurableDelta(msg, sender, errors)
+      const run = this.durableQueue.then(() => this.processDurableDelta(msg, sender, errors))
+      this.durableQueue = run.then(() => undefined, () => undefined)
       return
     }
     this.processInMemoryDelta(msg, sender, errors)

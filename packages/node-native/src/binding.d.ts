@@ -65,7 +65,7 @@ export interface NativeHnswIndexBinding {
 export interface NativeBinding {
   NativeExactIndex: new (distance?: string) => NativeExactIndexBinding
   NativeHnswIndex: new (config?: NativeHnswConfig, levelSeed?: number) => NativeHnswIndexBinding
-  NativeStore: new (directory: string, compactThreshold?: number) => NativeStoreBinding
+  NativeStore: new (directory: string, compactThreshold?: number, readOnly?: boolean) => NativeStoreBinding
   restoreStore(source: string, destination: string, compactThreshold?: number): NativeStoreBinding
   engineInfo(): EngineInfo
   executeQueryPlan(nodes: unknown[], edges: unknown[], plan: Record<string, unknown>): string[]

@@ -288,13 +288,17 @@ use std::path::{Path, PathBuf};
 /// Filesystem byte storage used by the native store (host adapter for Node).
 struct FsStorage {
     dir: PathBuf,
+    read_only: bool,
     lock_token: String,
     lock_file: Option<File>,
 }
 
 impl FsStorage {
-    fn new(dir: PathBuf) -> std::result::Result<Self, polypack_core::PolypackError> {
+    fn new(dir: PathBuf, read_only: bool) -> std::result::Result<Self, polypack_core::PolypackError> {
         fs::create_dir_all(&dir).map_err(|e| polypack_core::PolypackError::Storage(e.to_string()))?;
+        if read_only {
+            return Ok(Self { dir, read_only: true, lock_token: String::new(), lock_file: None });
+        }
         let lock_path = dir.join("store.lock");
         let started_at = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -313,7 +317,7 @@ impl FsStorage {
                 Ok(mut lock_file) => {
                     lock_file.write_all(metadata.as_bytes()).map_err(|e| polypack_core::PolypackError::Storage(e.to_string()))?;
                     lock_file.sync_all().map_err(|e| polypack_core::PolypackError::Storage(e.to_string()))?;
-                    return Ok(Self { dir, lock_token: token, lock_file: Some(lock_file) });
+                    return Ok(Self { dir, read_only: false, lock_token: token, lock_file: Some(lock_file) });
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists && attempt == 0 => {
                     let stale = fs::read_to_string(&lock_path)
@@ -384,6 +388,7 @@ impl Storage for FsStorage {
         name: &str,
         data: &[u8],
     ) -> std::result::Result<(), polypack_core::PolypackError> {
+        if self.read_only { return Err(polypack_core::PolypackError::Storage("store was opened read-only".into())); }
         use std::io::Write;
         std::fs::create_dir_all(&self.dir)
             .map_err(|e| polypack_core::PolypackError::Storage(e.to_string()))?;
@@ -406,6 +411,7 @@ impl Storage for FsStorage {
         name: &str,
         data: &[u8],
     ) -> std::result::Result<(), polypack_core::PolypackError> {
+        if self.read_only { return Err(polypack_core::PolypackError::Storage("store was opened read-only".into())); }
         use std::io::Write;
         std::fs::create_dir_all(&self.dir)
             .map_err(|e| polypack_core::PolypackError::Storage(e.to_string()))?;
@@ -418,6 +424,7 @@ impl Storage for FsStorage {
             .map_err(|e| polypack_core::PolypackError::Storage(e.to_string()))
     }
     fn delete(&mut self, name: &str) -> std::result::Result<(), polypack_core::PolypackError> {
+        if self.read_only { return Err(polypack_core::PolypackError::Storage("store was opened read-only".into())); }
         let _ = std::fs::remove_file(self.dir.join(name));
         Ok(())
     }
@@ -459,13 +466,13 @@ pub struct NativeStore {
 #[napi]
 impl NativeStore {
     #[napi(constructor)]
-    pub fn new(dir: String, compact_threshold: Option<u32>) -> Result<Self> {
+    pub fn new(dir: String, compact_threshold: Option<u32>, read_only: Option<bool>) -> Result<Self> {
         let config = StoreConfig {
             compact_threshold: compact_threshold.unwrap_or(10_000) as usize,
             durability: Durability::Process,
         };
         let lock_dir = PathBuf::from(dir);
-        let storage = FsStorage::new(lock_dir.clone()).map_err(to_napi_err)?;
+        let storage = FsStorage::new(lock_dir.clone(), read_only.unwrap_or(false)).map_err(to_napi_err)?;
         let lock_token = storage.lock_token.clone();
         Ok(NativeStore { inner: RefCell::new(CoreStore::new(Box::new(storage), config)), lock_dir, lock_token })
     }
@@ -710,7 +717,7 @@ impl NativeStore {
     /// Create a consistent checkpointed directory backup.
     #[napi]
     pub fn backup(&self, destination: String) -> Result<()> {
-        let mut destination_storage = FsStorage::new(PathBuf::from(destination)).map_err(to_napi_err)?;
+        let mut destination_storage = FsStorage::new(PathBuf::from(destination), false).map_err(to_napi_err)?;
         self.inner
             .borrow_mut()
             .backup(&mut destination_storage)
@@ -728,9 +735,9 @@ impl NativeStore {
 /// Restore a native store from a directory backup and validate the result.
 #[napi]
 pub fn restore_store(source: String, destination: String, compact_threshold: Option<u32>) -> Result<NativeStore> {
-    let source_storage = FsStorage::new(PathBuf::from(source)).map_err(to_napi_err)?;
+    let source_storage = FsStorage::new(PathBuf::from(source), true).map_err(to_napi_err)?;
     let destination_dir = PathBuf::from(destination);
-    let destination_storage = FsStorage::new(destination_dir.clone()).map_err(to_napi_err)?;
+    let destination_storage = FsStorage::new(destination_dir.clone(), false).map_err(to_napi_err)?;
     let lock_token = destination_storage.lock_token.clone();
     let config = StoreConfig {
         compact_threshold: compact_threshold.unwrap_or(10_000) as usize,
