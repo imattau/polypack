@@ -40,6 +40,7 @@ describe('NativeStore', () => {
         concurrentWriters: false,
         vectorSearch: 'exact',
       })
+      store.defineIndex({ name: 'title', fields: ['title'], nodeType: 'doc', unique: true })
       store.apply({
         putNodes: [
           { ...node('n1'), vector: [0.1, 0.2, 0.3] },
@@ -50,6 +51,7 @@ describe('NativeStore', () => {
       store.close()
 
       const reopened = new NativeStore(dir)
+      expect(reopened.indexDefinitions()).toHaveLength(1)
       expect(reopened.nodeIds().sort()).toEqual(['n1', 'n2'])
       expect(reopened.getNode('n1')).toMatchObject({ vector: [0.1, 0.2, 0.3] })
       expect(reopened.allEdges()).toHaveLength(1)

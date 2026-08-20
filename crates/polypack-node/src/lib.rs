@@ -366,6 +366,7 @@ impl Storage for FsStorage {
             fsync: true,
             snapshots: true,
             change_feed: true,
+            secondary_indexes: true,
             vector_search: VectorSearchCapability::Exact,
             ..Default::default()
         }
@@ -499,6 +500,32 @@ impl NativeStore {
         nodes
             .into_iter()
             .map(|n| serde_json::to_value(n).map_err(|e| Error::from_reason(e.to_string())))
+            .collect()
+    }
+
+    /// Define or replace a persisted node-data index.
+    #[napi]
+    pub fn define_index(&self, definition: serde_json::Value) -> Result<()> {
+        let definition: polypack_core::storage::SecondaryIndexDefinition = serde_json::from_value(definition)
+            .map_err(|error| Error::from_reason(format!("invalid_argument: {error}")))?;
+        self.inner.borrow_mut().define_index(definition).map_err(to_napi_err)
+    }
+
+    /// Drop a persisted node-data index.
+    #[napi]
+    pub fn drop_index(&self, name: String) -> Result<bool> {
+        self.inner.borrow_mut().drop_index(&name).map_err(to_napi_err)
+    }
+
+    /// Return persisted index definitions.
+    #[napi]
+    pub fn index_definitions(&self) -> Result<Vec<serde_json::Value>> {
+        self.inner
+            .borrow_mut()
+            .index_definitions()
+            .map_err(to_napi_err)?
+            .into_iter()
+            .map(|definition| serde_json::to_value(definition).map_err(|error| Error::from_reason(error.to_string())))
             .collect()
     }
 

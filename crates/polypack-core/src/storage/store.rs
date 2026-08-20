@@ -4,7 +4,7 @@
 //! tolerance, and version checking. Hosts own byte I/O via the `Storage` trait.
 
 use crate::error::{PolypackError, Result};
-use crate::model::{ChangeBatch, Edge, Node};
+use crate::model::{validate_batch, ChangeBatch, Edge, Node};
 use crate::storage::format::{decode_snapshot, decode_wal, encode_snapshot, encode_wal};
 use crate::storage::wal::WalEntry;
 use serde::{Deserialize, Serialize};
@@ -116,11 +116,54 @@ pub struct NodeQuery {
     pub limit: Option<usize>,
 }
 
+/// A persisted index over node data fields. Compound fields are encoded in
+/// declaration order and may be scoped to one node type.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SecondaryIndexDefinition {
+    pub name: String,
+    pub fields: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_type: Option<String>,
+    #[serde(default)]
+    pub unique: bool,
+    #[serde(default)]
+    pub sparse: bool,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct NodeTypeDefinition {
+    pub node_type: String,
+    #[serde(default)]
+    pub required_fields: Vec<String>,
+    #[serde(default)]
+    pub data_types: HashMap<String, String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct EdgeTypeDefinition {
+    pub edge_type: String,
+    #[serde(default)]
+    pub source_types: Vec<String>,
+    #[serde(default)]
+    pub target_types: Vec<String>,
+    #[serde(default)]
+    pub required_fields: Vec<String>,
+    #[serde(default)]
+    pub data_types: HashMap<String, String>,
+    #[serde(default)]
+    pub cardinality: Option<String>,
+}
+
 fn node_field(node: &Node, field: &str) -> serde_json::Value {
     if field == "type" {
         serde_json::Value::String(node.node_type.clone())
     } else {
-        node.data.get(field).cloned().unwrap_or(serde_json::Value::Null)
+        field.split('.').try_fold(serde_json::Value::Object(node.data.clone()), |value, part| {
+            value.get(part).cloned()
+        }).unwrap_or(serde_json::Value::Null)
     }
 }
 
@@ -367,6 +410,10 @@ pub struct Store {
     edges: HashMap<String, Edge>,
     vectors: HashMap<String, Vec<f64>>,
     by_type: HashMap<String, HashSet<String>>,
+    index_definitions: HashMap<String, SecondaryIndexDefinition>,
+    secondary_indexes: HashMap<String, HashMap<String, HashSet<String>>>,
+    node_type_definitions: HashMap<String, NodeTypeDefinition>,
+    edge_type_definitions: HashMap<String, EdgeTypeDefinition>,
     edges_by_source: HashMap<String, HashSet<String>>,
     edges_by_target: HashMap<String, HashSet<String>>,
     wal_entry_count: usize,
@@ -384,6 +431,10 @@ impl Store {
             edges: HashMap::new(),
             vectors: HashMap::new(),
             by_type: HashMap::new(),
+            index_definitions: HashMap::new(),
+            secondary_indexes: HashMap::new(),
+            node_type_definitions: HashMap::new(),
+            edge_type_definitions: HashMap::new(),
             edges_by_source: HashMap::new(),
             edges_by_target: HashMap::new(),
             wal_entry_count: 0,
@@ -546,6 +597,259 @@ impl Store {
 
     // ── secondary indexes ──
 
+    fn data_value(data: Option<&serde_json::Map<String, serde_json::Value>>, field: &str) -> Option<serde_json::Value> {
+        let mut value = serde_json::Value::Object(data.cloned().unwrap_or_default());
+        for part in field.split('.') {
+            value = value.get(part)?.clone();
+        }
+        Some(value)
+    }
+
+    fn matches_data_type(value: &serde_json::Value, expected: &str) -> bool {
+        match expected {
+            "string" => value.is_string(),
+            "number" => value.as_f64().is_some(),
+            "integer" => value.as_i64().is_some() || value.as_u64().is_some(),
+            "boolean" => value.is_boolean(),
+            "object" => value.is_object(),
+            "array" => value.is_array(),
+            _ => false,
+        }
+    }
+
+    fn validate_node_schema(&self, node: &Node) -> Result<()> {
+        let Some(definition) = self.node_type_definitions.get(&node.node_type) else { return Ok(()) };
+        for field in &definition.required_fields {
+            if Self::data_value(Some(&node.data), field).is_none() {
+                return Err(PolypackError::InvalidArgument(format!("required field {field} is missing for node type {}", node.node_type)));
+            }
+        }
+        for (field, expected) in &definition.data_types {
+            if let Some(value) = Self::data_value(Some(&node.data), field) {
+                if !Self::matches_data_type(&value, expected) {
+                    return Err(PolypackError::InvalidArgument(format!("node field {field} must be {expected}")));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_edge_schema(&self, edge: &Edge, nodes: &HashMap<String, Node>, edges: &HashMap<String, Edge>) -> Result<()> {
+        let Some(definition) = self.edge_type_definitions.get(&edge.edge_type) else { return Ok(()) };
+        let source = nodes.get(&edge.source).ok_or_else(|| PolypackError::InvalidArgument(format!("edge {} source node is missing", edge.id)))?;
+        let target = nodes.get(&edge.target).ok_or_else(|| PolypackError::InvalidArgument(format!("edge {} target node is missing", edge.id)))?;
+        if !definition.source_types.is_empty() && !definition.source_types.iter().any(|kind| kind == &source.node_type) {
+            return Err(PolypackError::InvalidArgument(format!("edge type {} does not permit source type {}", edge.edge_type, source.node_type)));
+        }
+        if !definition.target_types.is_empty() && !definition.target_types.iter().any(|kind| kind == &target.node_type) {
+            return Err(PolypackError::InvalidArgument(format!("edge type {} does not permit target type {}", edge.edge_type, target.node_type)));
+        }
+        for field in &definition.required_fields {
+            if Self::data_value(edge.data.as_ref(), field).is_none() {
+                return Err(PolypackError::InvalidArgument(format!("required field {field} is missing for edge type {}", edge.edge_type)));
+            }
+        }
+        for (field, expected) in &definition.data_types {
+            if let Some(value) = Self::data_value(edge.data.as_ref(), field) {
+                if !Self::matches_data_type(&value, expected) {
+                    return Err(PolypackError::InvalidArgument(format!("edge field {field} must be {expected}")));
+                }
+            }
+        }
+        if let Some(cardinality) = &definition.cardinality {
+            let outgoing = edges.values().filter(|candidate| candidate.id != edge.id && candidate.edge_type == edge.edge_type && candidate.source == edge.source).count();
+            let incoming = edges.values().filter(|candidate| candidate.id != edge.id && candidate.edge_type == edge.edge_type && candidate.target == edge.target).count();
+            let violates = match cardinality.as_str() {
+                "one-to-one" => outgoing > 0 || incoming > 0,
+                "one-to-many" => incoming > 0,
+                "many-to-one" => outgoing > 0,
+                "many-to-many" => false,
+                _ => return Err(PolypackError::InvalidArgument(format!("unsupported cardinality {cardinality}"))),
+            };
+            if violates { return Err(PolypackError::InvalidArgument(format!("edge cardinality {cardinality} would be exceeded"))); }
+        }
+        Ok(())
+    }
+
+    fn validate_pending_schema(&self, changes: &ChangeBatch) -> Result<()> {
+        let mut nodes = self.nodes.clone();
+        let mut edges = self.edges.clone();
+        for id in &changes.delete_edge_ids { edges.remove(id); }
+        for id in &changes.delete_node_ids { nodes.remove(id); }
+        for node in &changes.put_nodes { nodes.insert(node.id.clone(), node.clone()); }
+        for edge in &changes.put_edges { edges.insert(edge.id.clone(), edge.clone()); }
+        for node in nodes.values() { self.validate_node_schema(node)?; }
+        for edge in &changes.put_edges { self.validate_edge_schema(edge, &nodes, &edges)?; }
+        Ok(())
+    }
+
+    pub fn register_node_type(&mut self, definition: NodeTypeDefinition) -> Result<()> {
+        self.ensure_loaded()?;
+        if definition.node_type.is_empty() { return Err(PolypackError::InvalidArgument("node type must not be empty".into())); }
+        let name = definition.node_type.clone();
+        let previous = self.node_type_definitions.insert(name.clone(), definition);
+        if let Err(error) = self.nodes.values().try_for_each(|node| self.validate_node_schema(node)) {
+            if let Some(previous) = previous { self.node_type_definitions.insert(previous.node_type.clone(), previous); }
+            else { self.node_type_definitions.remove(&name); }
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    pub fn register_edge_type(&mut self, definition: EdgeTypeDefinition) -> Result<()> {
+        self.ensure_loaded()?;
+        if definition.edge_type.is_empty() { return Err(PolypackError::InvalidArgument("edge type must not be empty".into())); }
+        let name = definition.edge_type.clone();
+        let previous = self.edge_type_definitions.insert(name.clone(), definition);
+        let validation = self.edges.values().try_for_each(|edge| self.validate_edge_schema(edge, &self.nodes, &self.edges));
+        if let Err(error) = validation {
+            if let Some(previous) = previous { self.edge_type_definitions.insert(previous.edge_type.clone(), previous); }
+            else { self.edge_type_definitions.remove(&name); }
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    fn secondary_key(node: &Node, definition: &SecondaryIndexDefinition) -> Option<String> {
+        if definition.node_type.as_ref().is_some_and(|node_type| node_type != &node.node_type) {
+            return None;
+        }
+        let values: Vec<serde_json::Value> = definition
+            .fields
+            .iter()
+            .map(|field| node_field(node, field))
+            .collect();
+        if definition.sparse && values.iter().any(serde_json::Value::is_null) {
+            return None;
+        }
+        serde_json::to_string(&values).ok()
+    }
+
+    fn validate_index_definitions(definitions: &HashMap<String, SecondaryIndexDefinition>) -> Result<()> {
+        for (name, definition) in definitions {
+            if name.is_empty() || definition.name != *name || definition.fields.is_empty() {
+                return Err(PolypackError::InvalidArgument(format!("invalid secondary index {name}")));
+            }
+            if definition.fields.iter().any(String::is_empty)
+                || definition.fields.iter().collect::<HashSet<_>>().len() != definition.fields.len()
+            {
+                return Err(PolypackError::InvalidArgument(format!("secondary index {name} fields must be unique and non-empty")));
+            }
+        }
+        Ok(())
+    }
+
+    fn rebuild_secondary_indexes(&mut self) -> Result<()> {
+        let mut rebuilt: HashMap<String, HashMap<String, HashSet<String>>> = self
+            .index_definitions
+            .keys()
+            .map(|name| (name.clone(), HashMap::new()))
+            .collect();
+        for node in self.nodes.values() {
+            for (name, definition) in &self.index_definitions {
+                let Some(key) = Self::secondary_key(node, definition) else { continue };
+                rebuilt.entry(name.clone()).or_default().entry(key).or_default().insert(node.id.clone());
+            }
+        }
+        for (name, definition) in &self.index_definitions {
+            if definition.unique {
+                if let Some(buckets) = rebuilt.get(name) {
+                    if let Some((key, _ids)) = buckets.iter().find(|(_, ids)| ids.len() > 1) {
+                        return Err(PolypackError::InvalidArgument(format!("unique index {name} conflicts for key {key}")));
+                    }
+                }
+            }
+        }
+        self.secondary_indexes = rebuilt;
+        Ok(())
+    }
+
+    fn write_index_metadata(&mut self) -> Result<()> {
+        let definitions: Vec<&SecondaryIndexDefinition> = self.index_definitions.values().collect();
+        let data = serde_json::to_vec(&definitions).map_err(|error| PolypackError::CorruptData(error.to_string()))?;
+        self.storage.write(INDEXES_FILE, &data)?;
+        if self.config.durability == Durability::Fsync {
+            self.storage.sync(INDEXES_FILE)?;
+            self.storage.sync_dir()?;
+        }
+        Ok(())
+    }
+
+    fn load_index_metadata(&mut self) -> Result<()> {
+        let Some(data) = self.storage.read(INDEXES_FILE)? else { return Ok(()) };
+        let definitions: Vec<SecondaryIndexDefinition> = serde_json::from_slice(&data)
+            .map_err(|error| PolypackError::CorruptData(format!("index metadata: {error}")))?;
+        let mut parsed = HashMap::new();
+        for definition in definitions {
+            parsed.insert(definition.name.clone(), definition);
+        }
+        Self::validate_index_definitions(&parsed)?;
+        self.index_definitions = parsed;
+        Ok(())
+    }
+
+    /// Define or replace a persisted node-data index.
+    pub fn define_index(&mut self, definition: SecondaryIndexDefinition) -> Result<()> {
+        self.ensure_loaded()?;
+        let name = definition.name.clone();
+        let previous = self.index_definitions.insert(name.clone(), definition);
+        if let Err(error) = Self::validate_index_definitions(&self.index_definitions).and_then(|_| self.rebuild_secondary_indexes()) {
+            if let Some(previous) = previous { self.index_definitions.insert(name, previous); }
+            else { self.index_definitions.remove(&name); }
+            self.rebuild_secondary_indexes()?;
+            return Err(error);
+        }
+        self.write_index_metadata()
+    }
+
+    /// Drop a persisted node-data index.
+    pub fn drop_index(&mut self, name: &str) -> Result<bool> {
+        self.ensure_loaded()?;
+        let Some(previous) = self.index_definitions.remove(name) else { return Ok(false) };
+        self.rebuild_secondary_indexes()?;
+        if let Err(error) = self.write_index_metadata() {
+            self.index_definitions.insert(name.to_string(), previous);
+            self.rebuild_secondary_indexes()?;
+            return Err(error);
+        }
+        Ok(true)
+    }
+
+    pub fn index_definitions(&mut self) -> Result<Vec<SecondaryIndexDefinition>> {
+        self.ensure_loaded()?;
+        Ok(self.index_definitions.values().cloned().collect())
+    }
+
+    fn indexed_ids(&self, query: &NodeQuery) -> Option<HashSet<String>> {
+        let attributes = query.attributes.as_ref()?;
+        self.index_definitions.iter().find_map(|(name, definition)| {
+            if definition.fields.iter().all(|field| attributes.contains_key(field)) {
+                let values: Vec<serde_json::Value> = definition.fields.iter().map(|field| attributes.get(field).cloned().unwrap_or(serde_json::Value::Null)).collect();
+                let key = serde_json::to_string(&values).ok()?;
+                self.secondary_indexes.get(name)?.get(&key).cloned()
+            } else { None }
+        })
+    }
+
+    fn validate_pending_indexes(&self, changes: &ChangeBatch) -> Result<()> {
+        let mut nodes = self.nodes.clone();
+        for id in &changes.delete_node_ids { nodes.remove(id); }
+        for node in &changes.put_nodes { nodes.insert(node.id.clone(), node.clone()); }
+        for (name, definition) in &self.index_definitions {
+            if !definition.unique { continue; }
+            let mut seen: HashMap<String, String> = HashMap::new();
+            for node in nodes.values() {
+                let Some(key) = Self::secondary_key(node, definition) else { continue };
+                if let Some(previous) = seen.insert(key, node.id.clone()) {
+                    if previous != node.id {
+                        return Err(PolypackError::InvalidArgument(format!("unique index {name} conflicts with node {previous}")));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn index_node(&mut self, node: &Node) {
         if let Some(existing) = self.nodes.get(&node.id) {
             if existing.node_type != node.node_type {
@@ -556,10 +860,25 @@ impl Store {
             .entry(node.node_type.clone())
             .or_default()
             .insert(node.id.clone());
+        for (name, definition) in &self.index_definitions {
+            if let Some(key) = Self::secondary_key(node, definition) {
+                self.secondary_indexes.entry(name.clone()).or_default().entry(key).or_default().insert(node.id.clone());
+            }
+        }
     }
 
     fn unindex_node(&mut self, id: &str) {
         let type_key = self.nodes.get(id).map(|n| n.node_type.clone());
+        if let Some(node) = self.nodes.get(id) {
+            for (name, definition) in &self.index_definitions {
+                if let Some(key) = Self::secondary_key(node, definition) {
+                    if let Some(bucket) = self.secondary_indexes.get_mut(name).and_then(|indexes| indexes.get_mut(&key)) {
+                        bucket.remove(id);
+                        if bucket.is_empty() { self.secondary_indexes.get_mut(name).unwrap().remove(&key); }
+                    }
+                }
+            }
+        }
         if let Some(t) = type_key {
             if let Some(ids) = self.by_type.get_mut(&t) {
                 ids.remove(id);
@@ -600,6 +919,7 @@ impl Store {
 
     fn rebuild_indexes(&mut self) {
         self.by_type.clear();
+        self.secondary_indexes = self.index_definitions.keys().map(|name| (name.clone(), HashMap::new())).collect();
         self.edges_by_source.clear();
         self.edges_by_target.clear();
         let nodes: Vec<Node> = self.nodes.values().cloned().collect();
@@ -642,6 +962,7 @@ impl Store {
     }
 
     fn do_load(&mut self) -> Result<()> {
+        self.load_index_metadata()?;
         if let Some(data) = self.storage.read(SNAPSHOT_FILE)? {
             let snapshot = decode_snapshot(&data)?;
             self.nodes = snapshot.nodes.into_iter().collect();
@@ -783,6 +1104,9 @@ impl Store {
         metadata: Option<serde_json::Value>,
     ) -> Result<()> {
         self.ensure_loaded()?;
+        validate_batch(changes)?;
+        self.validate_pending_schema(changes)?;
+        self.validate_pending_indexes(changes)?;
         if (operation_id.is_some() || transaction_id.is_some())
             && self.mutation_log()?.iter().any(|record|
                 operation_id.is_some_and(|id| record.operation_id == id)
@@ -874,6 +1198,7 @@ impl Store {
         self.edges.clear();
         self.vectors.clear();
         self.by_type.clear();
+        self.secondary_indexes.clear();
         self.edges_by_source.clear();
         self.edges_by_target.clear();
         self.wal_entry_count = 0;
@@ -913,7 +1238,7 @@ impl Store {
         self.ensure_loaded()?;
         let candidate_ids: Vec<String> = match &query.candidate_ids {
             Some(ids) => ids.clone(),
-            None => match self.type_only_ids(query) {
+            None => match self.indexed_ids(query).or_else(|| self.type_only_ids(query)) {
             Some(ids) => ids.into_iter().collect(),
             None => self.nodes.keys().cloned().collect(),
             },
@@ -1266,6 +1591,63 @@ mod tests {
         let mut s2 = Store::new(Box::new(storage.clone()), StoreConfig::default());
         assert_eq!(s2.count_nodes(&NodeQuery { node_types: Some(vec!["book".into()]), ..Default::default() }).unwrap(), 3);
         assert_eq!(s2.count_nodes(&NodeQuery { node_types: Some(vec!["user".into()]), ..Default::default() }).unwrap(), 1);
+    }
+
+    #[test]
+    fn configurable_indexes_filter_and_enforce_uniqueness() {
+        let storage = shared();
+        let mut s = Store::new(Box::new(storage.clone()), StoreConfig::default());
+        s.define_index(SecondaryIndexDefinition {
+            name: "book-isbn".into(),
+            fields: vec!["isbn".into()],
+            node_type: Some("book".into()),
+            unique: true,
+            sparse: false,
+        }).unwrap();
+        s.apply(&ChangeBatch { put_nodes: vec![
+            Node { data: serde_json::json!({"isbn": "111"}).as_object().unwrap().clone(), ..book("a", "fiction", 1.0) },
+            Node { data: serde_json::json!({"isbn": "222"}).as_object().unwrap().clone(), ..book("b", "history", 2.0) },
+        ], ..Default::default() }).unwrap();
+        let query = NodeQuery {
+            node_types: Some(vec!["book".into()]),
+            attributes: Some(serde_json::json!({"isbn": "222"}).as_object().unwrap().clone()),
+            ..Default::default()
+        };
+        assert_eq!(s.query_nodes(&query).unwrap().iter().map(|node| node.id.as_str()).collect::<Vec<_>>(), vec!["b"]);
+        let duplicate = ChangeBatch { put_nodes: vec![Node { data: serde_json::json!({"isbn": "111"}).as_object().unwrap().clone(), ..book("c", "science", 3.0) }], ..Default::default() };
+        assert!(matches!(s.apply(&duplicate), Err(PolypackError::InvalidArgument(message)) if message.contains("unique index")));
+        assert_eq!(s.node_count().unwrap(), 2);
+
+        s.close().unwrap();
+        let mut reopened = Store::new(Box::new(storage), StoreConfig::default());
+        assert_eq!(reopened.index_definitions().unwrap().len(), 1);
+        assert_eq!(reopened.query_nodes(&query).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn schema_hooks_validate_nodes_edges_before_wal_write() {
+        let storage = shared();
+        let mut s = Store::new(Box::new(storage.clone()), StoreConfig::default());
+        s.register_node_type(NodeTypeDefinition {
+            node_type: "person".into(),
+            required_fields: vec!["name".into()],
+            data_types: HashMap::from([(String::from("age"), String::from("integer"))]),
+        }).unwrap();
+        s.register_edge_type(EdgeTypeDefinition {
+            edge_type: "PARENT_OF".into(),
+            source_types: vec!["person".into()],
+            target_types: vec!["person".into()],
+            required_fields: Vec::new(),
+            data_types: HashMap::new(),
+            cardinality: Some("many-to-many".into()),
+        }).unwrap();
+        let invalid = ChangeBatch { put_nodes: vec![Node { id: "p1".into(), node_type: "person".into(), data: serde_json::json!({"age": 1}).as_object().unwrap().clone(), ..book("p1", "person", 0.0) }], ..Default::default() };
+        assert!(matches!(s.apply(&invalid), Err(PolypackError::InvalidArgument(message)) if message.contains("required field name")));
+        assert!(storage.lock().unwrap().read(WAL_FILE).unwrap().is_none());
+        let valid = ChangeBatch { put_nodes: vec![Node { id: "p1".into(), node_type: "person".into(), data: serde_json::json!({"name": "A", "age": 1}).as_object().unwrap().clone(), ..book("p1", "person", 0.0) }], ..Default::default() };
+        s.apply(&valid).unwrap();
+        let invalid_edge = ChangeBatch { put_edges: vec![Edge { id: "e1".into(), source: "p1".into(), target: "missing".into(), edge_type: "PARENT_OF".into(), data: None, created_at: 1, revision: 0 }], ..Default::default() };
+        assert!(matches!(s.apply(&invalid_edge), Err(PolypackError::InvalidArgument(message)) if message.contains("target node is missing")));
     }
 
     #[test]

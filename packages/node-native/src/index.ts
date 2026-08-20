@@ -423,6 +423,21 @@ export class NativeStore {
     return callNative(() => this.inner.queryNodes(query))
   }
 
+  /** Define or replace a persisted node-data index. */
+  defineIndex(definition: Record<string, unknown>): void {
+    callNative(() => this.inner.defineIndex(definition))
+  }
+
+  /** Drop a persisted node-data index. */
+  dropIndex(name: string): boolean {
+    return callNative(() => this.inner.dropIndex(name))
+  }
+
+  /** Return persisted index definitions. */
+  indexDefinitions(): Array<Record<string, unknown>> {
+    return callNative(() => this.inner.indexDefinitions())
+  }
+
   /** Count persisted nodes matching a `PersistedNodeQuery`-shaped object. */
   countNodes(query: Record<string, unknown>): number {
     return callNative(() => this.inner.countNodes(query))
