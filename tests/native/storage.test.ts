@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll } from 'vitest'
-import { mkdtempSync, rmSync, readdirSync } from 'node:fs'
+import { mkdtempSync, rmSync, readdirSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { NativeStore, isNativeAvailable } from '../../packages/node-native/src/index'
@@ -33,6 +33,13 @@ describe('NativeStore', () => {
     const dir = tempDir('roundtrip')
     try {
       const store = new NativeStore(dir)
+      expect(store.capabilities()).toMatchObject({
+        atomicBatches: true,
+        fsync: true,
+        snapshots: true,
+        concurrentWriters: false,
+        vectorSearch: 'exact',
+      })
       store.apply({
         putNodes: [
           { ...node('n1'), vector: [0.1, 0.2, 0.3] },
@@ -59,6 +66,37 @@ describe('NativeStore', () => {
       const store = new NativeStore(dir)
       store.close()
       expect(() => store.nodeIds()).toThrow(/closed/)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('rejects a second writer for the same directory', () => {
+    if (!available) return
+    const dir = tempDir('lock')
+    try {
+      const first = new NativeStore(dir)
+      expect(() => new NativeStore(dir)).toThrow(/already locked/)
+      first.close()
+      const reopened = new NativeStore(dir)
+      reopened.close()
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('recovers an abandoned stale lock', () => {
+    if (!available) return
+    const dir = tempDir('stale-lock')
+    try {
+      writeFileSync(join(dir, 'store.lock'), JSON.stringify({
+        pid: 999999,
+        startedAt: Date.now() - 25 * 60 * 60 * 1000,
+        token: 'abandoned',
+      }))
+      const store = new NativeStore(dir)
+      expect(store.nodeIds()).toEqual([])
+      store.close()
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }
@@ -113,6 +151,24 @@ describe('cross-language byte compatibility', () => {
       native.close()
       const files = readdirSync(dir)
       expect(files).toContain('snapshot.msgpack')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('checkpoints and verifies durable state', () => {
+    if (!available) return
+    const dir = tempDir('verify')
+    try {
+      const store = new NativeStore(dir)
+      store.apply({
+        putNodes: [node('n1'), node('n2')],
+        putEdges: [{ id: 'n1::LINKS::n2', source: 'n1', target: 'n2', type: 'LINKS', data: null, createdAt: 1 }],
+      })
+      expect(store.verify()).toMatchObject({ ok: true, nodeCount: 0, edgeCount: 0 })
+      store.checkpoint()
+      expect(store.verify()).toMatchObject({ ok: true, nodeCount: 2, edgeCount: 1 })
+      store.close()
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }

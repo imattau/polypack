@@ -110,5 +110,8 @@ export interface NativeStoreBinding {
   allEdges(): Array<Record<string, unknown>>
   allVectors(): Array<[string, number[]]>
   compact(): void
+  checkpoint(): void
+  verify(): Record<string, unknown>
+  capabilities(): Record<string, unknown>
   close(): void
 }

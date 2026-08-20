@@ -446,6 +446,53 @@ export class NativeStore {
     callNative(() => this.inner.compact())
   }
 
+  /** Force a durable checkpoint and compact the recovery WAL. */
+  checkpoint(): void {
+    callNative(() => this.inner.checkpoint())
+  }
+
+  /** Validate persisted framing, records, references, vectors, and indexes. */
+  verify(): {
+    ok: boolean
+    errors: string[]
+    nodeCount: number
+    edgeCount: number
+    vectorCount: number
+    mutationCount: number
+  } {
+    return callNative(() => this.inner.verify()) as {
+      ok: boolean
+      errors: string[]
+      nodeCount: number
+      edgeCount: number
+      vectorCount: number
+      mutationCount: number
+    }
+  }
+
+  /** Report the guarantees provided by the native filesystem adapter. */
+  capabilities(): {
+    atomicBatches: boolean
+    transactions: boolean
+    fsync: boolean
+    secondaryIndexes: boolean
+    snapshots: boolean
+    changeFeed: boolean
+    concurrentWriters: boolean
+    vectorSearch: 'none' | 'exact' | 'ann'
+  } {
+    return callNative(() => this.inner.capabilities()) as {
+      atomicBatches: boolean
+      transactions: boolean
+      fsync: boolean
+      secondaryIndexes: boolean
+      snapshots: boolean
+      changeFeed: boolean
+      concurrentWriters: boolean
+      vectorSearch: 'none' | 'exact' | 'ann'
+    }
+  }
+
   close(): void {
     callNative(() => this.inner.close())
   }

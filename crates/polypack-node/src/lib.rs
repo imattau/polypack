@@ -9,6 +9,9 @@ use polypack_core::hnsw::{HnswConfig, HnswIndex};
 use polypack_core::vector::{DistanceFn, ExactIndex};
 use polypack_core::NodeActivation as CoreNodeActivation;
 use std::cell::RefCell;
+use std::fs::{self, File, OpenOptions};
+use std::io::{Read, Write};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[napi(object)]
 pub struct EngineInfo {
@@ -279,15 +282,94 @@ impl NativeHnswIndex {
 // ── Storage / NativeStore ──
 
 use polypack_core::model::ChangeBatch as CoreChangeBatch;
-use polypack_core::storage::{Durability, NodeQuery, Store as CoreStore, StoreConfig, Storage};
-use std::path::PathBuf;
+use polypack_core::storage::{AdapterCapabilities, Durability, NodeQuery, Store as CoreStore, StoreConfig, Storage, VectorSearchCapability};
+use std::path::{Path, PathBuf};
 
 /// Filesystem byte storage used by the native store (host adapter for Node).
 struct FsStorage {
     dir: PathBuf,
+    lock_token: String,
+    lock_file: Option<File>,
+}
+
+impl FsStorage {
+    fn new(dir: PathBuf) -> std::result::Result<Self, polypack_core::PolypackError> {
+        fs::create_dir_all(&dir).map_err(|e| polypack_core::PolypackError::Storage(e.to_string()))?;
+        let lock_path = dir.join("store.lock");
+        let started_at = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|e| polypack_core::PolypackError::Storage(e.to_string()))?
+            .as_millis() as u64;
+        let token = format!("{}-{started_at}", std::process::id());
+        let metadata = format!(r#"{{"pid":{},"startedAt":{},"token":"{}"}}"#, std::process::id(), started_at, token);
+
+        for attempt in 0..2 {
+            match OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create_new(true)
+                .open(&lock_path)
+            {
+                Ok(mut lock_file) => {
+                    lock_file.write_all(metadata.as_bytes()).map_err(|e| polypack_core::PolypackError::Storage(e.to_string()))?;
+                    lock_file.sync_all().map_err(|e| polypack_core::PolypackError::Storage(e.to_string()))?;
+                    return Ok(Self { dir, lock_token: token, lock_file: Some(lock_file) });
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists && attempt == 0 => {
+                    let stale = fs::read_to_string(&lock_path)
+                        .ok()
+                        .and_then(|contents| serde_json::from_str::<serde_json::Value>(&contents).ok())
+                        .and_then(|value| value.get("startedAt").and_then(serde_json::Value::as_u64))
+                        .map(|old| started_at.saturating_sub(old) > 24 * 60 * 60 * 1000)
+                        .unwrap_or(false);
+                    if stale {
+                        let _ = fs::remove_file(&lock_path);
+                        continue;
+                    }
+                    return Err(polypack_core::PolypackError::Storage(format!("store is already locked: {}", lock_path.display())));
+                }
+                Err(error) => return Err(polypack_core::PolypackError::Storage(error.to_string())),
+            }
+        }
+        Err(polypack_core::PolypackError::Storage(format!("store is already locked: {}", lock_path.display())))
+    }
+}
+
+impl Drop for FsStorage {
+    fn drop(&mut self) {
+        let Some(mut lock_file) = self.lock_file.take() else { return };
+        let mut contents = String::new();
+        let owns_lock = lock_file.read_to_string(&mut contents).is_ok()
+            && contents.contains(&format!(r#""token":"{}""#, self.lock_token));
+        drop(lock_file);
+        if owns_lock {
+            let _ = fs::remove_file(self.dir.join("store.lock"));
+        }
+    }
+}
+
+fn release_store_lock(dir: &Path, token: &str) {
+    let lock_path = dir.join("store.lock");
+    let owns_lock = fs::read_to_string(&lock_path)
+        .map(|contents| contents.contains(&format!(r#""token":"{}""#, token)))
+        .unwrap_or(false);
+    if owns_lock {
+        let _ = fs::remove_file(lock_path);
+    }
 }
 
 impl Storage for FsStorage {
+    fn capabilities(&self) -> AdapterCapabilities {
+        AdapterCapabilities {
+            atomic_batches: true,
+            fsync: true,
+            snapshots: true,
+            change_feed: true,
+            vector_search: VectorSearchCapability::Exact,
+            ..Default::default()
+        }
+    }
+
     fn read(&self, name: &str) -> std::result::Result<Option<Vec<u8>>, polypack_core::PolypackError> {
         match std::fs::read(self.dir.join(name)) {
             Ok(bytes) => Ok(Some(bytes)),
@@ -368,22 +450,22 @@ fn to_napi_err(e: polypack_core::PolypackError) -> Error {
 #[napi]
 pub struct NativeStore {
     inner: RefCell<CoreStore>,
+    lock_dir: PathBuf,
+    lock_token: String,
 }
 
 #[napi]
 impl NativeStore {
     #[napi(constructor)]
-    pub fn new(dir: String, compact_threshold: Option<u32>) -> Self {
+    pub fn new(dir: String, compact_threshold: Option<u32>) -> Result<Self> {
         let config = StoreConfig {
             compact_threshold: compact_threshold.unwrap_or(10_000) as usize,
             durability: Durability::Process,
         };
-        NativeStore {
-            inner: RefCell::new(CoreStore::new(
-                Box::new(FsStorage { dir: PathBuf::from(dir) }),
-                config,
-            )),
-        }
+        let lock_dir = PathBuf::from(dir);
+        let storage = FsStorage::new(lock_dir.clone()).map_err(to_napi_err)?;
+        let lock_token = storage.lock_token.clone();
+        Ok(NativeStore { inner: RefCell::new(CoreStore::new(Box::new(storage), config)), lock_dir, lock_token })
     }
 
     /// Apply a change batch: `{ putNodes, deleteNodeIds, putEdges,
@@ -494,9 +576,51 @@ impl NativeStore {
         self.inner.borrow_mut().compact().map_err(to_napi_err)
     }
 
+    /// Force a durable checkpoint and compact the recovery WAL.
+    #[napi]
+    pub fn checkpoint(&self) -> Result<()> {
+        self.inner.borrow_mut().compact().map_err(to_napi_err)
+    }
+
+    /// Validate persisted framing, records, references, vectors, and indexes.
+    #[napi]
+    pub fn verify(&self) -> Result<serde_json::Value> {
+        let report = self.inner.borrow_mut().verify().map_err(to_napi_err)?;
+        Ok(serde_json::json!({
+            "ok": report.ok,
+            "errors": report.errors,
+            "nodeCount": report.node_count,
+            "edgeCount": report.edge_count,
+            "vectorCount": report.vector_count,
+            "mutationCount": report.mutation_count,
+        }))
+    }
+
+    /// Report the guarantees provided by the native filesystem adapter.
+    #[napi]
+    pub fn capabilities(&self) -> serde_json::Value {
+        let capabilities = self.inner.borrow().capabilities();
+        serde_json::json!({
+            "atomicBatches": capabilities.atomic_batches,
+            "transactions": capabilities.transactions,
+            "fsync": capabilities.fsync,
+            "secondaryIndexes": capabilities.secondary_indexes,
+            "snapshots": capabilities.snapshots,
+            "changeFeed": capabilities.change_feed,
+            "concurrentWriters": capabilities.concurrent_writers,
+            "vectorSearch": match capabilities.vector_search {
+                VectorSearchCapability::None => "none",
+                VectorSearchCapability::Exact => "exact",
+                VectorSearchCapability::Ann => "ann",
+            },
+        })
+    }
+
     #[napi]
     pub fn close(&self) -> Result<()> {
-        self.inner.borrow_mut().close().map_err(to_napi_err)
+        self.inner.borrow_mut().close().map_err(to_napi_err)?;
+        release_store_lock(&self.lock_dir, &self.lock_token);
+        Ok(())
     }
 }
 

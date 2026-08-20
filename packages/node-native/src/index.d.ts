@@ -127,5 +127,24 @@ export class NativeStore {
   allEdges(): Array<Record<string, unknown>>
   allVectors(): Array<[string, number[]]>
   compact(): void
+  checkpoint(): void
+  verify(): {
+    ok: boolean
+    errors: string[]
+    nodeCount: number
+    edgeCount: number
+    vectorCount: number
+    mutationCount: number
+  }
+  capabilities(): {
+    atomicBatches: boolean
+    transactions: boolean
+    fsync: boolean
+    secondaryIndexes: boolean
+    snapshots: boolean
+    changeFeed: boolean
+    concurrentWriters: boolean
+    vectorSearch: 'none' | 'exact' | 'ann'
+  }
   close(): void
 }
