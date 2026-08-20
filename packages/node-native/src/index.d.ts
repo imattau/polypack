@@ -125,6 +125,8 @@ export class NativeStore {
   defineIndex(definition: Record<string, unknown>): void
   dropIndex(name: string): boolean
   indexDefinitions(): Array<Record<string, unknown>>
+  registerNodeType(definition: Record<string, unknown>): void
+  registerEdgeType(definition: Record<string, unknown>): void
   getEdgesBySources(sources: string[], edgeType?: string): Array<Record<string, unknown>>
   getEdgesByTargets(targets: string[], edgeType?: string): Array<Record<string, unknown>>
   getNode(id: string): Record<string, unknown> | undefined

@@ -181,6 +181,36 @@ describe('cross-language byte compatibility', () => {
     }
   })
 
+  it('enforces persisted-query resource limits', () => {
+    if (!available) return
+    const dir = tempDir('query-limits')
+    try {
+      const store = new NativeStore(dir)
+      store.apply({ putNodes: [node('a'), node('b')] })
+      expect(() => store.queryNodes({ maxNodesVisited: 1 })).toThrow(/resource_limit/)
+      expect(() => store.queryNodes({ maxResultSize: 1 })).toThrow(/resource_limit/)
+      store.close()
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('enforces native schema hooks before persistence', () => {
+    if (!available) return
+    const dir = tempDir('schema')
+    try {
+      const store = new NativeStore(dir)
+      store.registerNodeType({ nodeType: 'person', requiredFields: ['name'], dataTypes: { age: 'integer' } })
+      store.registerEdgeType({ edgeType: 'PARENT_OF', sourceTypes: ['person'], targetTypes: ['person'], cardinality: 'many-to-many' })
+      expect(() => store.apply({ putNodes: [{ ...node('p1'), type: 'person', data: { age: 1 } }] })).toThrow(/required field name/)
+      store.apply({ putNodes: [{ ...node('p1'), type: 'person', data: { name: 'A', age: 1 } }] })
+      expect(() => store.apply({ putEdges: [{ id: 'e1', source: 'p1', target: 'missing', type: 'PARENT_OF', data: null, createdAt: 1 }] })).toThrow(/target node is missing/)
+      store.close()
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
   it('creates a restorable directory backup', () => {
     if (!available) return
     const dir = tempDir('backup-source')

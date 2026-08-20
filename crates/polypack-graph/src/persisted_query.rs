@@ -273,6 +273,8 @@ impl<'a> PersistedGraphQuery<'a> {
             }),
             offset: if include_pagination { self.result_offset } else { None },
             limit: if include_pagination { self.result_limit } else { None },
+            max_nodes_visited: self.limits.max_nodes_visited,
+            max_result_size: self.limits.max_results,
         }
     }
 

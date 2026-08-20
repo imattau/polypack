@@ -114,6 +114,12 @@ pub struct NodeQuery {
     pub offset: Option<usize>,
     #[serde(default)]
     pub limit: Option<usize>,
+    /// Maximum candidate records examined by this query.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_nodes_visited: Option<usize>,
+    /// Maximum records returned before pagination is applied.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_result_size: Option<usize>,
 }
 
 /// A persisted index over node data fields. Compound fields are encoded in
@@ -1243,12 +1249,22 @@ impl Store {
             None => self.nodes.keys().cloned().collect(),
             },
         };
+        if let Some(limit) = query.max_nodes_visited {
+            if candidate_ids.len() > limit {
+                return Err(PolypackError::ResourceLimit { name: "maxNodesVisited".into(), limit });
+            }
+        }
         let mut results: Vec<Node> = candidate_ids
             .iter()
             .filter_map(|id| self.nodes.get(id))
             .filter(|n| matches_node(n, query))
             .cloned()
             .collect();
+        if let Some(limit) = query.max_result_size {
+            if results.len() > limit {
+                return Err(PolypackError::ResourceLimit { name: "maxResultSize".into(), limit });
+            }
+        }
         if let Some(order) = &query.order_by {
             results.sort_by(|a, b| {
                 let av = numeric_field(a, &order.field);
@@ -1276,6 +1292,12 @@ impl Store {
         self.ensure_loaded()?;
         let no_filters =
             query.node_types.is_none() && query.attributes.is_none() && query.attribute_ranges.is_none();
+        let candidate_count = query.candidate_ids.as_ref().map_or(self.nodes.len(), Vec::len);
+        if let Some(limit) = query.max_nodes_visited {
+            if candidate_count > limit {
+                return Err(PolypackError::ResourceLimit { name: "maxNodesVisited".into(), limit });
+            }
+        }
         let count = if let Some(ids) = &query.candidate_ids {
             ids.iter().filter_map(|id| self.nodes.get(id)).filter(|n| matches_node(n, query)).count()
         } else if no_filters {
@@ -1285,6 +1307,11 @@ impl Store {
         } else {
             self.nodes.values().filter(|n| matches_node(n, query)).count()
         };
+        if let Some(limit) = query.max_result_size {
+            if count > limit {
+                return Err(PolypackError::ResourceLimit { name: "maxResultSize".into(), limit });
+            }
+        }
         let after_offset = match query.offset {
             None => count,
             Some(offset) => count.saturating_sub(offset),
@@ -1591,6 +1618,18 @@ mod tests {
         let mut s2 = Store::new(Box::new(storage.clone()), StoreConfig::default());
         assert_eq!(s2.count_nodes(&NodeQuery { node_types: Some(vec!["book".into()]), ..Default::default() }).unwrap(), 3);
         assert_eq!(s2.count_nodes(&NodeQuery { node_types: Some(vec!["user".into()]), ..Default::default() }).unwrap(), 1);
+    }
+
+    #[test]
+    fn query_resource_limits_reject_expensive_results() {
+        let storage = shared();
+        let mut s = Store::new(Box::new(storage), StoreConfig::default());
+        s.apply(&batch(&[node("a"), node("b")])).unwrap();
+        let visited = NodeQuery { max_nodes_visited: Some(1), ..Default::default() };
+        assert!(matches!(s.query_nodes(&visited), Err(PolypackError::ResourceLimit { name, limit }) if name == "maxNodesVisited" && limit == 1));
+        let results = NodeQuery { max_result_size: Some(1), ..Default::default() };
+        assert!(matches!(s.query_nodes(&results), Err(PolypackError::ResourceLimit { name, limit }) if name == "maxResultSize" && limit == 1));
+        assert!(matches!(s.count_nodes(&results), Err(PolypackError::ResourceLimit { name, .. }) if name == "maxResultSize"));
     }
 
     #[test]

@@ -529,6 +529,22 @@ impl NativeStore {
             .collect()
     }
 
+    /// Register or replace a node-type schema definition.
+    #[napi]
+    pub fn register_node_type(&self, definition: serde_json::Value) -> Result<()> {
+        let definition: polypack_core::storage::NodeTypeDefinition = serde_json::from_value(definition)
+            .map_err(|error| Error::from_reason(format!("invalid_argument: {error}")))?;
+        self.inner.borrow_mut().register_node_type(definition).map_err(to_napi_err)
+    }
+
+    /// Register or replace an edge-type schema definition.
+    #[napi]
+    pub fn register_edge_type(&self, definition: serde_json::Value) -> Result<()> {
+        let definition: polypack_core::storage::EdgeTypeDefinition = serde_json::from_value(definition)
+            .map_err(|error| Error::from_reason(format!("invalid_argument: {error}")))?;
+        self.inner.borrow_mut().register_edge_type(definition).map_err(to_napi_err)
+    }
+
     /// Count nodes matching a storage-level query object.
     #[napi]
     pub fn count_nodes(&self, query: serde_json::Value) -> Result<u32> {

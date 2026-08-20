@@ -438,6 +438,16 @@ export class NativeStore {
     return callNative(() => this.inner.indexDefinitions())
   }
 
+  /** Register or replace a node-type schema definition. */
+  registerNodeType(definition: Record<string, unknown>): void {
+    callNative(() => this.inner.registerNodeType(definition))
+  }
+
+  /** Register or replace an edge-type schema definition. */
+  registerEdgeType(definition: Record<string, unknown>): void {
+    callNative(() => this.inner.registerEdgeType(definition))
+  }
+
   /** Count persisted nodes matching a `PersistedNodeQuery`-shaped object. */
   countNodes(query: Record<string, unknown>): number {
     return callNative(() => this.inner.countNodes(query))
