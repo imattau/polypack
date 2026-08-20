@@ -6,6 +6,7 @@ import pytest
 import polypack
 from polypack import (
     ChangeBatch,
+    AdapterCapabilityError,
     ExactIndex,
     GraphSnapshot,
     HnswIndex,
@@ -141,7 +142,7 @@ def test_validation_errors():
 def test_adapter_capability_requirements():
     graph = PolyGraph()
     graph.require_adapter_capabilities({"transactions": True, "vectorSearch": "exact"})
-    with pytest.raises(PolypackValueError, match="fsync"):
+    with pytest.raises(AdapterCapabilityError, match="fsync"):
         graph.require_adapter_capabilities(fsync=True)
 
 
@@ -178,6 +179,16 @@ def test_snapshot_is_detached_and_queryable():
     graph.add_node({"id": "n3", "type": "doc", "data": {}, "insertedAt": 3, "updatedAt": 3})
     assert snapshot.get_node("n1")["data"] == {"title": "Hello"}
     assert snapshot.get_node("n3") is None
+
+
+def test_patch_compare_and_set_is_conditional():
+    graph = PolyGraph()
+    graph.add_node({"id": "a", "type": "t", "data": {"state": "ready"}, "insertedAt": 1, "updatedAt": 1})
+
+    updated = graph.patch_node("a", compare_and_set={"data.state": {"expected": "ready", "value": "done"}})
+    assert updated["data"]["state"] == "done"
+    with pytest.raises(polypack.ConflictError):
+        graph.patch_node("a", compare_and_set={"data.state": {"expected": "ready", "value": "stale"}})
 
 
 def _seed_graph(graph):

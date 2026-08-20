@@ -49,6 +49,14 @@ class ConflictError(PolypackError):
     pass
 
 
+class AdapterCapabilityError(PolypackError):
+    """Raised when an operation requires an adapter guarantee it does not have."""
+
+    def __init__(self, capability: str) -> None:
+        super().__init__(f"Persistence adapter does not support capability: {capability}")
+        self.capability = capability
+
+
 class ResourceLimitError(PolypackError):
     """Raised when a configured graph or query resource limit is exceeded."""
 
@@ -182,6 +190,7 @@ __all__ = [
     "PolypackCorruptDataError",
     "PolypackStorageError",
     "ConflictError",
+    "AdapterCapabilityError",
     "ResourceLimitError",
     "MigrationError",
     "MigrationRegistry",
@@ -232,7 +241,12 @@ def _validate_timestamp(ts: Any) -> None:
 def _patch_parts(path: str) -> list[str]:
     if not isinstance(path, str) or not path or any(not part for part in path.split(".")):
         raise PolypackValueError("patch paths must not be empty")
-    return path.split(".")
+    parts = path.split(".")
+    if parts[0] == "data":
+        parts = parts[1:]
+    if not parts or any(not part for part in parts):
+        raise PolypackValueError("patch paths must target node data")
+    return parts
 
 
 def _patch_set(root: dict, path: str, value: Any) -> None:
@@ -263,6 +277,15 @@ def _patch_get(root: dict, path: str) -> Any:
             return None
         current = current[part]
     return current
+
+
+def _patch_has(root: dict, path: str) -> bool:
+    current: Any = root
+    for part in _patch_parts(path):
+        if not isinstance(current, dict) or part not in current:
+            return False
+        current = current[part]
+    return True
 
 
 def _cosine(a: Sequence[float], b: Sequence[float]) -> float:
@@ -841,7 +864,7 @@ class PolyGraph:
         capabilities = self.capabilities
         for name, expected in expectations.items():
             if capabilities.get(name) != expected:
-                raise PolypackValueError(f"persistence adapter does not support capability: {name}")
+                raise AdapterCapabilityError(name)
 
     def set_resource_limits(self, limits: Optional[dict] = None, **kwargs: int) -> None:
         """Configure positive integer limits for writes and graph queries."""
@@ -1371,8 +1394,9 @@ class PolyGraph:
         unset: Optional[Iterable[str]] = None,
         increment: Optional[dict] = None,
         expected_revision: Optional[int] = None,
+        compare_and_set: Optional[dict] = None,
     ) -> Optional[Node]:
-        """Apply dotted-path set/unset/increment operations atomically to a node."""
+        """Apply dotted-path patch operations atomically to a node."""
         node = self._nodes.get(id_)
         if node is None:
             return None
@@ -1381,6 +1405,14 @@ class PolyGraph:
             raise ConflictError(f"record {id_} has revision {actual}, expected {expected_revision}")
 
         candidate = copy.deepcopy(node.get("data") or {})
+        for path, operation in (compare_and_set or {}).items():
+            if not isinstance(operation, dict) or "expected" not in operation or "value" not in operation:
+                raise PolypackValueError("compare_and_set entries require expected and value")
+            present = _patch_has(candidate, path)
+            current = _patch_get(candidate, path)
+            if (not present and operation["expected"] is not None) or (present and current != operation["expected"]):
+                raise ConflictError(f"compare-and-set failed for record {id_} at {path}")
+            _patch_set(candidate, path, operation["value"])
         for path, value in (set or {}).items():
             _patch_set(candidate, path, value)
         for path in unset or ():

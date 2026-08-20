@@ -58,6 +58,17 @@ fn get_data_path<'a>(root: &'a serde_json::Value, path: &[&str]) -> Option<&'a s
     get_data_path(object.get(path[0])?, &path[1..])
 }
 
+fn patch_parts(path: &str) -> Result<Vec<&str>> {
+    let mut parts: Vec<&str> = path.split('.').collect();
+    if parts.first() == Some(&"data") {
+        parts.remove(0);
+    }
+    if parts.is_empty() || parts.iter().any(|part| part.is_empty()) {
+        return Err(PolypackError::InvalidArgument("patch paths must target node data".into()));
+    }
+    Ok(parts)
+}
+
 pub(crate) fn indexed_value_key(node: &Node, index: &IndexDefinition) -> Option<String> {
     if index.node_type.as_deref().is_some_and(|node_type| node_type != node.node_type) {
         return None;
@@ -1259,6 +1270,7 @@ impl Graph {
         set: serde_json::Map<String, serde_json::Value>,
         unset: Vec<String>,
         increment: serde_json::Map<String, serde_json::Value>,
+        compare_and_set: serde_json::Map<String, serde_json::Value>,
         expected_revision: Option<u64>,
     ) -> Result<Option<&Node>> {
         let Some(existing) = self.nodes.get(id) else { return Ok(None) };
@@ -1273,25 +1285,30 @@ impl Graph {
         }
 
         let mut candidate = serde_json::Value::Object(existing.data.clone());
-        for (path, value) in set {
-            let parts: Vec<&str> = path.split('.').collect();
-            if parts.iter().any(|part| part.is_empty()) {
-                return Err(PolypackError::InvalidArgument("patch paths must not be empty".into()));
+        for (path, operation) in compare_and_set {
+            let operation = operation.as_object().ok_or_else(|| PolypackError::InvalidArgument("compare-and-set entries must be objects".into()))?;
+            let expected = operation.get("expected").ok_or_else(|| PolypackError::InvalidArgument("compare-and-set entries require expected".into()))?;
+            let value = operation.get("value").ok_or_else(|| PolypackError::InvalidArgument("compare-and-set entries require value".into()))?;
+            let parts = patch_parts(&path)?;
+            if get_data_path(&candidate, &parts) != Some(expected) {
+                return Err(PolypackError::Conflict {
+                    id: id.to_string(),
+                    expected: expected_revision.unwrap_or(existing.revision),
+                    actual: existing.revision,
+                });
             }
+            set_data_path(&mut candidate, &parts, value.clone())?;
+        }
+        for (path, value) in set {
+            let parts = patch_parts(&path)?;
             set_data_path(&mut candidate, &parts, value)?;
         }
         for path in unset {
-            let parts: Vec<&str> = path.split('.').collect();
-            if parts.iter().any(|part| part.is_empty()) {
-                return Err(PolypackError::InvalidArgument("patch paths must not be empty".into()));
-            }
+            let parts = patch_parts(&path)?;
             unset_data_path(&mut candidate, &parts);
         }
         for (path, delta) in increment {
-            let parts: Vec<&str> = path.split('.').collect();
-            if parts.iter().any(|part| part.is_empty()) {
-                return Err(PolypackError::InvalidArgument("patch paths must not be empty".into()));
-            }
+            let parts = patch_parts(&path)?;
             let delta = delta
                 .as_f64()
                 .ok_or_else(|| PolypackError::InvalidArgument("increment values must be numeric".into()))?;
@@ -2987,12 +3004,21 @@ mod tests {
         set.insert("profile.name".into(), serde_json::json!("new"));
         let mut increment = serde_json::Map::new();
         increment.insert("profile.views".into(), serde_json::json!(3));
-        let updated = g.patch_node("a", set, vec!["temporary".into()], increment, Some(0)).unwrap().unwrap();
+        let updated = g.patch_node("a", set, vec!["temporary".into()], increment, serde_json::Map::new(), Some(0)).unwrap().unwrap();
 
         assert_eq!(updated.revision, 1);
         assert_eq!(updated.data["profile"]["name"], serde_json::json!("new"));
         assert_eq!(updated.data["profile"]["views"], serde_json::json!(5.0));
         assert!(!updated.data.contains_key("temporary"));
+
+        let mut compare_and_set = serde_json::Map::new();
+        compare_and_set.insert("data.profile.name".into(), serde_json::json!({"expected": "new", "value": "final"}));
+        let updated = g.patch_node("a", serde_json::Map::new(), Vec::new(), serde_json::Map::new(), compare_and_set, Some(1)).unwrap().unwrap();
+        assert_eq!(updated.data["profile"]["name"], serde_json::json!("final"));
+
+        let mut stale_compare = serde_json::Map::new();
+        stale_compare.insert("data.profile.name".into(), serde_json::json!({"expected": "new", "value": "stale"}));
+        assert!(matches!(g.patch_node("a", serde_json::Map::new(), Vec::new(), serde_json::Map::new(), stale_compare, Some(2)), Err(PolypackError::Conflict { .. })));
     }
 
     #[test]
@@ -3025,6 +3051,22 @@ mod tests {
         let log = g.mutation_log().unwrap();
         assert_eq!(log.last().map(|record| record.transaction_id.as_str()), committed_transaction_id.as_deref());
         assert_eq!(log.last().map(|record| record.operation_id.as_str()), committed_operation_id.as_deref());
+    }
+
+    #[test]
+    fn query_snapshot_is_detached_from_later_mutations() {
+        let mut g = test_graph();
+        g.add_node(node("stable")).unwrap();
+        let snapshot = g.snapshot();
+
+        let mut patch = serde_json::Map::new();
+        patch.insert("value".into(), serde_json::json!(2));
+        g.update_node("stable", patch, None, None).unwrap();
+        g.add_node(node("later")).unwrap();
+
+        assert_eq!(snapshot.nodes.len(), 1);
+        assert_eq!(snapshot.nodes[0].id, "stable");
+        assert!(snapshot.nodes[0].data.get("value").is_none());
     }
 
     #[test]
@@ -3087,7 +3129,7 @@ mod tests {
         duplicate.data.insert("provider".into(), "acme".into());
         duplicate.data.insert("externalId".into(), "1".into());
         assert!(graph.add_node(duplicate).is_err());
-        assert!(graph.patch_node("a", serde_json::Map::from_iter([(String::from("externalId"), "2".into())]), Vec::new(), serde_json::Map::new(), None).is_ok());
+        assert!(graph.patch_node("a", serde_json::Map::from_iter([(String::from("externalId"), "2".into())]), Vec::new(), serde_json::Map::new(), serde_json::Map::new(), None).is_ok());
         assert!(graph.update_node("a", serde_json::Map::from_iter([(String::from("externalId"), "1".into())]), None, None).is_ok());
         assert_eq!(graph.indexes()[0].name, "external-id");
         let query = graph.query().where_field("provider", "acme".into()).where_field("externalId", "1".into());

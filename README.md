@@ -63,6 +63,7 @@ migration notes.
 - **Schema migrations** — contiguous, validated, retry-safe application migrations with dry runs, resume cursors, and progress reporting
 - **Explainable queries** — persisted and hot-query plans with index selection, estimated cost, and operational metrics
 - **Configurable indexes** — compound and unique node-data indexes with persisted Python index metadata
+- **Cross-language contract** — shared conformance fixtures and compatibility levels for TypeScript, Rust, and Python
 - **Persisted queries** — asynchronous filtering and similarity across the full backing store
 - **Adaptive memory** — activation model: durable, decayed relevance (`score`/`importance`) per node, spreading activation over edges, semantic pulses, and a live working-memory set — synced additively
 - **Real-time sync** — acknowledgements, retry, deduplication, reconnect recovery, and echo suppression
