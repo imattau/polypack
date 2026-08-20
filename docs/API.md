@@ -499,10 +499,16 @@ payloads** — activation is accumulated knowledge, not last-write-wins data.
 
 - `OpLog(clientId, existing?)` appends sequenced `SyncOp` values and exposes
   `since(seq)`, `all`, `latestSeq`, and `size`.
+- `MemorySyncClientStateStore` and `FileSyncClientStateStore` persist pending
+  operations plus the acknowledged client and server cursors. Use
+  `await SyncClient.restore({ graph, transport, stateStore, clientId? })` to
+  resume a client after restart. `await client.persist()` waits for the latest
+  local state to be durable; the file store includes a checksum and rejects
+  corrupted state.
 - `SyncAdapter(inner, clientId)` wraps persistence and records successful node
   and edge writes in its `oplog`; set `onOp` to observe them.
 - `SyncClient({ graph, transport, clientId?, autoFlush?, retryMs?,
-  activationSyncThreshold? })` captures graph events, retains operations until
+  activationSyncThreshold?, stateStore? })` captures graph events, retains operations until
   acknowledged, retries unacknowledged deltas, detects server-cursor gaps, and
   applies remote operations with echo suppression. `retryMs` defaults
   to 1,000 ms and `0` disables automatic retry. `activationSyncThreshold`
@@ -512,7 +518,9 @@ payloads** — activation is accumulated knowledge, not last-write-wins data.
   `syncCursor`, call `reconnect(transport)` to replace a transport, resend pending
   work, and request missing server operations, and use `disconnect()` to flush
   any pending operations and close.
-- `SyncServer` is an in-memory relay. `addClient(handle)` returns that client's
+- `SyncServer` is an in-memory relay by default. Pass a `SyncOperationLog` as
+  `operationLog` and await `ready()` before accepting clients to restore and
+  durably append the server history. `addClient(handle)` returns that client's
   incoming-message handler, `removeClient(handle)` unregisters it, and `ops`
   exposes the received log. The server deduplicates operations by client and
   sequence, acknowledges both first-time and repeated delivery, and serves full
@@ -520,8 +528,9 @@ payloads** — activation is accumulated knowledge, not last-write-wins data.
 - `SyncTransport` requires `send`, `onMessage`, and `close`.
 - `MemoryTransport.pair()` creates linked asynchronous in-process transports.
 
-The bundled sync layer is intentionally transport-agnostic and in-memory. It
-does not provide authentication, durable server storage, compact state snapshots,
-or conflict resolution. Applications must detect transport failure and supply a
-replacement transport to `reconnect()`; production deployments must also
-supply the remaining durability and security guarantees.
+The bundled sync layer is intentionally transport-agnostic. It provides optional
+durable server and client logs, authentication and conflict hooks, bounded
+batches, checksums, cursor recovery, and filtered subscriptions; it does not
+provide identity management, application permissions, or a domain-specific
+conflict resolver. Applications must detect transport failure and supply a
+replacement transport to `reconnect()`.

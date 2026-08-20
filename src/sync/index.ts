@@ -1,4 +1,6 @@
 export { OpLog } from './oplog.js'
+export { FileSyncClientStateStore, MemorySyncClientStateStore } from './log.js'
+export type { SyncClientState, SyncClientStateStore } from './log.js'
 export { FileSyncOperationLog, MemorySyncOperationLog } from './log.js'
 export { syncChecksum } from './checksum.js'
 export { SyncAdapter } from './adapter.js'

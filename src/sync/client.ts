@@ -8,6 +8,7 @@ import { SYNC_PROTOCOL_VERSION } from './types.js'
 import { edgeId } from '../utils.js'
 import { OpLog } from './oplog.js'
 import { syncChecksum } from './checksum.js'
+import type { SyncClientState, SyncClientStateStore } from './log.js'
 
 /** Configuration for a graph synchronization client. */
 export interface SyncClientOptions {
@@ -29,6 +30,10 @@ export interface SyncClientOptions {
   maxOpsPerMessage?: number
   /** Maximum locally retained operations, including acknowledged history. Defaults to Infinity. */
   maxRetainedOps?: number
+  /** Optional durable store for pending operations and sync cursors. */
+  stateStore?: SyncClientStateStore
+  /** State loaded by {@link SyncClient.restore}; normally not set by callers. */
+  initialState?: SyncClientState
 }
 
 const NODE_OPS: Record<string, SyncOp['kind']> = {
@@ -70,11 +75,30 @@ export class SyncClient {
   private maxRetainedOps: number
   private scheduledTransactionFlushes = new Set<string>()
   private disconnected = false
+  private stateStore?: SyncClientStateStore
+  private stateQueue: Promise<void> = Promise.resolve()
+
+  /** Open a client from its durable local state before subscribing to graph changes. */
+  static async restore(options: SyncClientOptions & { stateStore: SyncClientStateStore }): Promise<SyncClient> {
+    const state = await options.stateStore.load()
+    if (state && options.clientId && state.clientId !== options.clientId) {
+      throw new Error(`Persisted sync client id ${state.clientId} does not match ${options.clientId}`)
+    }
+    const client = new SyncClient({ ...options, clientId: options.clientId ?? state?.clientId, initialState: state ?? undefined })
+    client.flush()
+    client.requestSync()
+    return client
+  }
 
   constructor(options: SyncClientOptions) {
     this.graph = options.graph
     this.transport = options.transport
-    this.oplog = new OpLog(options.clientId ?? `client-${Date.now()}`)
+    const initialState = options.initialState
+    this.oplog = new OpLog(options.clientId ?? initialState?.clientId ?? `client-${Date.now()}`, initialState?.ops)
+    this.lastAckedSeq = initialState?.lastAckedSeq ?? 0
+    this.serverCursor = initialState?.serverCursor ?? 0
+    this.stateStore = options.stateStore
+    this.oplog.onChange = () => this.persistState()
     this.autoFlush = options.autoFlush ?? true
     this.retryMs = options.retryMs ?? 1000
     this.activationSyncThreshold = options.activationSyncThreshold ?? DEFAULT_ACTIVATION_SYNC_THRESHOLD
@@ -95,6 +119,23 @@ export class SyncClient {
   private bindTransport(transport: SyncTransport): void {
     this.transport = transport
     this.transport.onMessage = (msg) => this.handleMessage(msg)
+  }
+
+  private persistState(): void {
+    if (!this.stateStore) return
+    const state: SyncClientState = {
+      clientId: this.oplog.clientId,
+      lastAckedSeq: this.lastAckedSeq,
+      serverCursor: this.serverCursor,
+      ops: [...this.oplog.all],
+    }
+    this.stateQueue = this.stateQueue.then(() => this.stateStore!.save(state), () => this.stateStore!.save(state))
+  }
+
+  /** Wait until the latest local pending state has been durably saved. */
+  async persist(): Promise<void> {
+    this.persistState()
+    await this.stateQueue
   }
 
   private handleLocalChange(event: GraphChangeEvent): void {
@@ -319,6 +360,7 @@ export class SyncClient {
       while (this.oplog.size > this.maxRetainedOps && this.oplog.all[0]?.seq <= this.lastAckedSeq) {
         this.oplog.dropThrough(this.oplog.all[0].seq)
       }
+      this.persistState()
       this.scheduleRetry()
       return
     }
@@ -330,6 +372,7 @@ export class SyncClient {
       }
       this.applyRemote(msg.ops)
       this.serverCursor = msg.cursor ?? msg.fromSeq + msg.ops.length
+      this.persistState()
       if (msg.more) this.requestSync()
       return
     }
@@ -347,6 +390,7 @@ export class SyncClient {
       const unseen = msg.ops.slice(alreadyApplied)
       this.applyRemote(unseen)
       this.serverCursor = Math.max(this.serverCursor, msg.cursor ?? msg.fromSeq + msg.ops.length)
+      this.persistState()
       if (msg.more) this.requestSync()
       return
     }

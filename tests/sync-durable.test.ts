@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import { MemoryFileIO } from '../src/persistence/file-io'
-import { FileSyncOperationLog, SyncServer } from '../src/sync/index'
+import { FileSyncClientStateStore, FileSyncOperationLog, MemorySyncClientStateStore, SyncServer } from '../src/sync/index'
+import { PolyGraph } from '../src/graph'
+import { SyncClient } from '../src/sync/client'
 import type { SyncMessage } from '../src/sync/types'
 
 const op = (seq: number) => ({
@@ -77,5 +79,40 @@ describe('durable sync operation logs', () => {
       ops: [{ seq: -1, timestamp: 'invalid', clientId: '', kind: 'addNode', payload: null }],
     })))
     await expect(new FileSyncOperationLog(io).load()).rejects.toThrow(/Invalid sync operation log state/)
+  })
+})
+
+describe('durable sync client state', () => {
+  it('restores pending operations and cursors without replaying acknowledged work', async () => {
+    const store = new MemorySyncClientStateStore()
+    const state = { clientId: 'client', lastAckedSeq: 1, serverCursor: 9, ops: [op(1), op(2)] }
+    await store.save(state)
+    const restored = await store.load()
+    expect(restored).toEqual(state)
+  })
+
+  it('persists and validates file-backed client state', async () => {
+    const io = new MemoryFileIO()
+    const store = new FileSyncClientStateStore(io)
+    await store.save({ clientId: 'client', lastAckedSeq: 2, serverCursor: 4, ops: [op(2)] })
+    expect(await store.load()).toMatchObject({ clientId: 'client', lastAckedSeq: 2, serverCursor: 4 })
+    await io.writeFile('sync-client-state.json', new TextEncoder().encode(JSON.stringify({ clientId: 'client', lastAckedSeq: 0, serverCursor: 0, ops: [op(1)], checksum: 'bad' })))
+    await expect(store.load()).rejects.toThrow(/checksum mismatch/)
+  })
+
+  it('restores a client and resends pending work from its durable cursor', async () => {
+    const store = new MemorySyncClientStateStore()
+    await store.save({ clientId: 'offline', lastAckedSeq: 0, serverCursor: 7, ops: [op(1)] })
+    const sent: SyncMessage[] = []
+    const client = await SyncClient.restore({
+      graph: new PolyGraph(),
+      clientId: 'offline',
+      stateStore: store,
+      retryMs: 0,
+      transport: { send: message => sent.push(message), close: () => undefined, onMessage: null },
+    })
+    expect(sent[0]).toMatchObject({ type: 'delta', fromSeq: 0, ops: [{ operationId: 'op-1' }] })
+    expect(sent[1]).toMatchObject({ type: 'request-snapshot', fromSeq: 7 })
+    client.disconnect()
   })
 })

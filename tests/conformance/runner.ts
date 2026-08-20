@@ -21,12 +21,13 @@
 import { readFileSync, readdirSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { PolyGraph, HNSWIndex, cosineSimilarity } from '../../src/index'
+import { PolyGraph, HNSWIndex, cosineSimilarity, ConflictError } from '../../src/index'
 import type { EdgeOwnership, PolyNode, SerializedNode, VectorIndexLike } from '../../src/index'
 import type { QueryPlan } from './query-plan'
 
 export type ErrorCode =
   | 'invalid_argument'
+  | 'conflict'
   | 'dimension_mismatch'
   | 'range_out_of_bounds'
   | 'closed'
@@ -50,11 +51,13 @@ interface NodeInput {
   vector?: number[] | null
   insertedAt: number
   updatedAt: number
+  revision?: number
 }
 
 export type Operation =
   | { op: 'addNode'; node: NodeInput; expectError?: ErrorCode }
-  | { op: 'updateNode'; id: string; data: Record<string, unknown>; vector?: number[]; expectError?: ErrorCode }
+  | { op: 'updateNode'; id: string; data: Record<string, unknown>; vector?: number[]; expectedRevision?: number; expectError?: ErrorCode }
+  | { op: 'patchNode'; id: string; patch: { set?: Record<string, unknown>; unset?: string[]; increment?: Record<string, number>; compareAndSet?: Record<string, { expected: unknown; value: unknown }> }; expectedRevision?: number; expectError?: ErrorCode }
   | { op: 'addEdge'; source: string; type: string; target: string; data?: Record<string, unknown>; ownership?: EdgeOwnership; expectError?: ErrorCode }
   | { op: 'removeNode'; id: string }
   | { op: 'removeEdges'; source: string; type?: string; target?: string }
@@ -70,6 +73,7 @@ export interface Expectations {
   loadedSize?: number
   nodeData?: Record<string, Record<string, unknown>>
   nodeVector?: Record<string, number[]>
+  nodeRevision?: Record<string, number>
   edgeTargets?: Array<{ source: string; type: string; targets: string[] }>
   orphanEvents?: string[]
   queries?: Array<{ plan: QueryPlan; resultIds: string[] }>
@@ -110,6 +114,7 @@ export class OrphanAwareGraph extends PolyGraph {
 export class ConformanceError extends Error {}
 
 function mapError(err: unknown): ErrorCode {
+  if (err instanceof ConflictError) return 'conflict'
   if (err instanceof TypeError) return 'invalid_argument'
   if (err instanceof RangeError) {
     return /dimension/i.test(String((err as Error).message)) ? 'dimension_mismatch' : 'range_out_of_bounds'
@@ -140,6 +145,7 @@ function toGraphNode(n: NodeInput): PolyNode {
     data: n.data,
     insertedAt: n.insertedAt,
     updatedAt: n.updatedAt,
+    revision: n.revision,
   }
   if (n.vector) node.vector = new Float64Array(n.vector)
   return node
@@ -160,7 +166,17 @@ function runOperation(graph: PolyGraph, hnsw: HNSWIndex | null, op: Operation): 
     case 'updateNode': {
       let err: unknown
       try {
-        graph.updateNode(op.id, op.data, op.vector ? new Float64Array(op.vector) : undefined)
+        graph.updateNode(op.id, op.data, op.vector ? new Float64Array(op.vector) : undefined, undefined, { expectedRevision: op.expectedRevision })
+      } catch (e) {
+        err = e
+      }
+      assertError(err, op.expectError)
+      break
+    }
+    case 'patchNode': {
+      let err: unknown
+      try {
+        graph.patchNode(op.id, op.patch, { expectedRevision: op.expectedRevision })
       } catch (e) {
         err = e
       }
@@ -268,6 +284,13 @@ function assertExpectations(graph: PolyGraph, orphanGraph: OrphanAwareGraph | nu
       if ([...node.vector].join(',') !== vector.join(',')) {
         throw new ConformanceError(`nodeVector[${id}] mismatch`)
       }
+    }
+  }
+  if (expect.nodeRevision) {
+    for (const [id, revision] of Object.entries(expect.nodeRevision)) {
+      const node = graph.getNode(id)
+      if (!node) throw new ConformanceError(`nodeRevision: node ${id} missing`)
+      if (node.revision !== revision) throw new ConformanceError(`nodeRevision[${id}] ${node.revision} !== ${revision}`)
     }
   }
   if (expect.edgeTargets) {

@@ -1,0 +1,59 @@
+{
+  "schemaVersion": 1,
+  "name": "revisions-and-patches",
+  "group": "database-core",
+  "setup": {
+    "nodes": [
+      {
+        "id": "person-1",
+        "type": "person",
+        "data": {
+          "profile": { "displayName": "Mary" },
+          "viewCount": 2,
+          "temporary": true
+        },
+        "insertedAt": 1,
+        "updatedAt": 1,
+        "revision": 0
+      }
+    ]
+  },
+  "operations": [
+    {
+      "op": "patchNode",
+      "id": "person-1",
+      "patch": {
+        "set": { "data.profile.displayName": "Mary Smith" },
+        "unset": ["data.temporary"],
+        "increment": { "data.viewCount": 1 }
+      },
+      "expectedRevision": 0
+    },
+    {
+      "op": "patchNode",
+      "id": "person-1",
+      "patch": {
+        "compareAndSet": {
+          "data.profile.displayName": { "expected": "Mary Smith", "value": "M. Smith" }
+        }
+      },
+      "expectedRevision": 1
+    },
+    {
+      "op": "updateNode",
+      "id": "person-1",
+      "data": { "stale": true },
+      "expectedRevision": 1,
+      "expectError": "conflict"
+    }
+  ],
+  "expect": {
+    "presentNodeIds": ["person-1"],
+    "nodeRevision": { "person-1": 2 },
+    "nodeData": {
+      "person-1": {
+        "viewCount": 3
+      }
+    }
+  }
+}
