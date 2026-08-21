@@ -10,6 +10,8 @@
 //! every path always uses the `Store` method.
 
 use std::collections::{HashMap, HashSet};
+use std::cell::RefCell;
+use std::time::Instant;
 
 use polypack_core::activation::{activation_score_of, DEFAULT_ACTIVATION};
 use polypack_core::query::Direction;
@@ -17,7 +19,7 @@ use polypack_core::storage::{NodeQuery, OrderBy, RangeQuery};
 use polypack_core::vector::cosine;
 use polypack_core::{Node, Result, Store};
 
-use crate::graph::{now_millis, IndexDefinition};
+use crate::graph::{now_millis, IndexDefinition, QueryMetrics};
 use crate::query::OrderDirection;
 
 /// A `join`/`join`-predicate closure: `Some` to filter by the connected
@@ -63,6 +65,7 @@ pub struct PersistedGraphQuery<'a> {
     store: &'a mut Store,
     indexes: &'a HashMap<String, IndexDefinition>,
     secondary_indexes: &'a HashMap<String, HashMap<String, HashSet<String>>>,
+    metrics: &'a RefCell<QueryMetrics>,
 
     node_types: Option<Vec<String>>,
     attributes: HashMap<String, serde_json::Value>,
@@ -87,11 +90,13 @@ impl<'a> PersistedGraphQuery<'a> {
         store: &'a mut Store,
         indexes: &'a HashMap<String, IndexDefinition>,
         secondary_indexes: &'a HashMap<String, HashMap<String, HashSet<String>>>,
+        metrics: &'a RefCell<QueryMetrics>,
     ) -> Self {
         Self {
             store,
             indexes,
             secondary_indexes,
+            metrics,
             node_types: None,
             attributes: HashMap::new(),
             attribute_ranges: HashMap::new(),
@@ -415,6 +420,7 @@ impl<'a> PersistedGraphQuery<'a> {
 
     /// Materialize matched nodes. Mirrors `PersistedGraphQuery.toArray`.
     pub fn to_array(&mut self) -> Result<Vec<Node>> {
+        let started = Instant::now();
         let has_traversal = !self.traversals.is_empty();
         let adapter_can_paginate =
             self.similarity.is_none() && self.edge_type.is_none() && self.edge_source.is_none() && self.joins.is_empty() && !has_traversal
@@ -422,6 +428,7 @@ impl<'a> PersistedGraphQuery<'a> {
 
         let query = self.base_query(!has_traversal, adapter_can_paginate);
         let mut nodes = self.store.query_nodes(&query)?;
+        let scanned_records = nodes.len();
 
         nodes = self.apply_edge_filters(nodes)?;
         nodes = self.apply_joins(nodes)?;
@@ -489,7 +496,19 @@ impl<'a> PersistedGraphQuery<'a> {
                 return Err(polypack_core::PolypackError::ResourceLimit { name: "maxResults".into(), limit: max_results });
             }
         }
+        self.record_metrics(started, scanned_records);
         Ok(nodes)
+    }
+
+    fn record_metrics(&self, started: Instant, scanned_records: usize) {
+        let selected = self.selected_indexes();
+        let mut metrics = self.metrics.borrow_mut();
+        metrics.count += 1;
+        metrics.duration_ms += started.elapsed().as_secs_f64() * 1000.0;
+        metrics.scanned_records += scanned_records;
+        for index in selected {
+            *metrics.index_usage.entry(index.name.clone()).or_default() += 1;
+        }
     }
 
     pub fn first(&mut self) -> Result<Option<Node>> {

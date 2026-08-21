@@ -1,5 +1,6 @@
 //! [`Graph`]: the Rust counterpart to `PolyGraph` (`src/graph.ts`).
 
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -106,9 +107,19 @@ pub struct GraphConfig {
     pub hot_cache_max: usize,
     pub hnsw: HnswConfig,
     pub embedding: Box<dyn EmbeddingProvider>,
+    pub resource_limits: GraphResourceLimits,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// Write-side safety limits for the hot graph. Query limits live on
+/// [`QueryResourceLimits`] because they are scoped to individual queries.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct GraphResourceLimits {
+    pub max_vector_dimensions: Option<usize>,
+    pub max_node_payload_bytes: Option<usize>,
+    pub max_batch_size: Option<usize>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct GraphStats {
     pub loaded_node_count: usize,
     pub persisted_node_count: usize,
@@ -117,6 +128,18 @@ pub struct GraphStats {
     pub dirty_record_count: usize,
     pub pending_persistence: bool,
     pub index_count: usize,
+    pub query_count: usize,
+    pub query_duration_ms: f64,
+    pub query_scanned_records: usize,
+    pub query_index_usage: HashMap<String, usize>,
+}
+
+#[derive(Default)]
+pub(crate) struct QueryMetrics {
+    pub count: usize,
+    pub duration_ms: f64,
+    pub scanned_records: usize,
+    pub index_usage: HashMap<String, usize>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -145,7 +168,7 @@ pub struct IndexDefinition {
 
 impl Default for GraphConfig {
     fn default() -> Self {
-        Self { hot_cache_max: 50_000, hnsw: HnswConfig::default(), embedding: Box::new(FeatureHashEmbedding::default()) }
+        Self { hot_cache_max: 50_000, hnsw: HnswConfig::default(), embedding: Box::new(FeatureHashEmbedding::default()), resource_limits: GraphResourceLimits::default() }
     }
 }
 
@@ -200,6 +223,7 @@ pub struct Graph {
     indexes: HashMap<String, IndexDefinition>,
     secondary_indexes: HashMap<String, HashMap<String, HashSet<String>>>,
     migrations: MigrationRegistry,
+    pub(crate) query_metrics: RefCell<QueryMetrics>,
 }
 
 struct GraphCheckpoint {
@@ -302,6 +326,7 @@ impl Graph {
             indexes: HashMap::new(),
             secondary_indexes: HashMap::new(),
             migrations: MigrationRegistry::default(),
+            query_metrics: RefCell::new(QueryMetrics::default()),
         };
         graph.load_index_metadata()?;
         Ok(graph)
@@ -590,6 +615,21 @@ impl Graph {
         Ok(())
     }
 
+    fn validate_node_resource_limits(&self, node: &Node) -> Result<()> {
+        if let Some(limit) = self.config.resource_limits.max_vector_dimensions {
+            if node.vector.as_ref().is_some_and(|vector| vector.len() > limit) {
+                return Err(PolypackError::ResourceLimit { name: "maxVectorDimensions".into(), limit });
+            }
+        }
+        if let Some(limit) = self.config.resource_limits.max_node_payload_bytes {
+            let payload = serde_json::to_vec(&node.data).map_err(|error| PolypackError::InvalidArgument(format!("node payload is not serializable: {error}")))?;
+            if payload.len() > limit {
+                return Err(PolypackError::ResourceLimit { name: "maxNodePayloadBytes".into(), limit });
+            }
+        }
+        Ok(())
+    }
+
     fn validate_node_indexes(&self, node: &Node, exclude_id: Option<&str>) -> Result<()> {
         for index in self.indexes.values().filter(|index| index.unique && index.node_type.as_deref().is_none_or(|node_type| node_type == node.node_type)) {
             let values: Vec<_> = index.fields.iter().map(|field| get_data_path(&serde_json::Value::Object(node.data.clone()), &field.split('.').collect::<Vec<_>>()).cloned()).collect();
@@ -681,6 +721,10 @@ impl Graph {
                 + self.removed_vector_ids.len(),
             pending_persistence: self.has_pending_persistence(),
             index_count: self.indexes.len(),
+            query_count: self.query_metrics.borrow().count,
+            query_duration_ms: self.query_metrics.borrow().duration_ms,
+            query_scanned_records: self.query_metrics.borrow().scanned_records,
+            query_index_usage: self.query_metrics.borrow().index_usage.clone(),
         })
     }
 
@@ -1095,6 +1139,7 @@ impl Graph {
     /// `prepareNode`'s checks (`validate_node` covers id/type/timestamp/
     /// vector-finiteness).
     pub fn add_node(&mut self, node: Node) -> Result<()> {
+        self.validate_node_resource_limits(&node)?;
         validate_node(&node)?;
         self.validate_node_schema(&node)?;
         self.validate_node_indexes(&node, Some(&node.id))?;
@@ -1107,7 +1152,13 @@ impl Graph {
     /// notifications for the whole batch are coalesced via
     /// `start_batch`/`end_batch`. Matches `PolyGraph.addNodes`.
     pub fn add_nodes(&mut self, nodes: Vec<Node>) -> Result<()> {
+        if let Some(limit) = self.config.resource_limits.max_batch_size {
+            if nodes.len() > limit {
+                return Err(PolypackError::ResourceLimit { name: "maxBatchSize".into(), limit });
+            }
+        }
         for n in &nodes {
+            self.validate_node_resource_limits(n)?;
             validate_node(n)?;
             self.validate_node_schema(n)?;
         }
@@ -1211,6 +1262,7 @@ impl Graph {
             }
             candidate.updated_at = now_millis();
             candidate.revision = candidate.revision.saturating_add(1);
+            self.validate_node_resource_limits(&candidate)?;
             self.validate_node_schema(&candidate)?;
             self.validate_node_indexes(&candidate, Some(id))?;
             self.unindex_node(id);
@@ -1929,18 +1981,18 @@ impl Graph {
     /// Start a fluent query over the current hot working set. Mirrors
     /// `PolyGraph.query`.
     pub fn query(&self) -> GraphQuery<'_> {
-        GraphQuery::new(&self.nodes, &self.edges, &self.node_to_edge, &self.indexes, &self.secondary_indexes)
+        GraphQuery::new(&self.nodes, &self.edges, &self.node_to_edge, &self.indexes, &self.secondary_indexes, &self.query_metrics)
     }
 
     /// Start a fluent query over every persisted node, without loading
     /// results into the hot working set. Mirrors `PolyGraph.queryPersisted`.
     pub fn query_persisted(&mut self) -> PersistedGraphQuery<'_> {
-        PersistedGraphQuery::new(&mut self.store, &self.indexes, &self.secondary_indexes)
+        PersistedGraphQuery::new(&mut self.store, &self.indexes, &self.secondary_indexes, &self.query_metrics)
     }
 
     /// Create a persisted query with explicit traversal and result limits.
     pub fn query_persisted_with_limits(&mut self, limits: QueryResourceLimits) -> PersistedGraphQuery<'_> {
-        PersistedGraphQuery::new(&mut self.store, &self.indexes, &self.secondary_indexes).with_resource_limits(limits)
+        PersistedGraphQuery::new(&mut self.store, &self.indexes, &self.secondary_indexes, &self.query_metrics).with_resource_limits(limits)
     }
 
     /// Start an in-memory similarity query from text, embedded with the
@@ -2471,6 +2523,34 @@ mod tests {
 
         assert!(g.hnsw.has("a"));
         assert!(g.dirty_nodes.contains("a"));
+    }
+
+    #[test]
+    fn write_resource_limits_reject_before_mutation() {
+        let mut g = Graph::open(
+            Box::new(InMemoryStorage::new()),
+            StoreConfig::default(),
+            GraphConfig {
+                resource_limits: GraphResourceLimits { max_vector_dimensions: Some(2), max_node_payload_bytes: Some(20), max_batch_size: Some(1) },
+                ..GraphConfig::default()
+            },
+        ).unwrap();
+        let mut wide = node("wide");
+        wide.vector = Some(vec![1.0, 2.0, 3.0]);
+        assert!(matches!(g.add_node(wide), Err(PolypackError::ResourceLimit { name, .. }) if name == "maxVectorDimensions"));
+        let mut large = node("large");
+        large.data.insert("value".into(), "payload exceeds limit".into());
+        assert!(matches!(g.add_node(large), Err(PolypackError::ResourceLimit { name, .. }) if name == "maxNodePayloadBytes"));
+        assert_eq!(g.size(), 0);
+        assert!(matches!(g.add_nodes(vec![node("a"), node("b")]), Err(PolypackError::ResourceLimit { name, .. }) if name == "maxBatchSize"));
+        assert_eq!(g.size(), 0);
+        let mut existing = node("existing");
+        existing.data.insert("value".into(), "ok".into());
+        g.add_node(existing).unwrap();
+        let mut oversized_update = serde_json::Map::new();
+        oversized_update.insert("value".into(), "updated payload exceeds limit".into());
+        assert!(matches!(g.update_node("existing", oversized_update, None, None), Err(PolypackError::ResourceLimit { name, .. }) if name == "maxNodePayloadBytes"));
+        assert_eq!(g.get_node("existing").unwrap().data["value"], "ok");
     }
 
     #[test]
@@ -3230,14 +3310,21 @@ mod tests {
     #[test]
     fn reports_graph_statistics() {
         let mut g = test_graph();
-        g.add_node(node("a")).unwrap();
+        g.define_index(IndexDefinition { name: "lookup".into(), fields: vec!["key".into()], ..Default::default() }).unwrap();
+        let mut record = node("a");
+        record.data.insert("key".into(), "value".into());
+        g.add_node(record).unwrap();
         g.add_edge("a", "REL", "b", None, EdgeOwnership::Reference).unwrap();
+        assert_eq!(g.query().where_field("key", "value".into()).ids(), vec!["a"]);
         let stats = g.stats().unwrap();
         assert_eq!(stats.loaded_node_count, 1);
         assert_eq!(stats.persisted_node_count, 0);
         assert_eq!(stats.edge_count, 0);
         assert!(stats.pending_persistence);
         assert!(stats.dirty_record_count > 0);
+        assert_eq!(stats.query_count, 1);
+        assert_eq!(stats.query_scanned_records, 1);
+        assert_eq!(stats.query_index_usage.get("lookup"), Some(&1));
     }
 
     #[test]

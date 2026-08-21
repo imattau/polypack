@@ -8,7 +8,9 @@
 //! `GraphQuery` directly ports TS's reference algorithm (there is nothing to
 //! bridge to or fall back from).
 
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+use std::time::Instant;
 
 use polypack_core::activation::{activation_score_of, DEFAULT_ACTIVATION};
 use polypack_core::query::Direction;
@@ -16,7 +18,7 @@ use polypack_core::vector::cosine;
 use polypack_core::{Node, PolypackError, Result};
 
 use crate::edge::EdgeEntry;
-use crate::graph::{now_millis, IndexDefinition};
+use crate::graph::{now_millis, IndexDefinition, QueryMetrics};
 use crate::persisted_query::QueryExplain;
 
 fn query_field_value(attributes: &HashMap<String, serde_json::Value>, field: &str) -> serde_json::Value {
@@ -109,6 +111,7 @@ pub struct GraphQuery<'a> {
     node_to_edge: &'a HashMap<String, HashSet<String>>,
     indexes: &'a HashMap<String, IndexDefinition>,
     secondary_indexes: &'a HashMap<String, HashMap<String, HashSet<String>>>,
+    metrics: &'a RefCell<QueryMetrics>,
 
     node_types: Option<Vec<String>>,
     attributes: HashMap<String, serde_json::Value>,
@@ -133,6 +136,7 @@ impl<'a> GraphQuery<'a> {
         node_to_edge: &'a HashMap<String, HashSet<String>>,
         indexes: &'a HashMap<String, IndexDefinition>,
         secondary_indexes: &'a HashMap<String, HashMap<String, HashSet<String>>>,
+        metrics: &'a RefCell<QueryMetrics>,
     ) -> Self {
         Self {
             nodes,
@@ -140,6 +144,7 @@ impl<'a> GraphQuery<'a> {
             node_to_edge,
             indexes,
             secondary_indexes,
+            metrics,
             node_types: None,
             attributes: HashMap::new(),
             attribute_ranges: HashMap::new(),
@@ -537,8 +542,12 @@ impl<'a> GraphQuery<'a> {
     /// Materialize matched nodes as detached snapshots (cloned out of the
     /// graph's hot working set). Mirrors `GraphQuery.toArray`.
     pub fn to_array(&self) -> Vec<Node> {
-        let mut results: Vec<&Node> = self.source_nodes().into_iter().filter(|n| self.matches(n)).collect();
+        let started = Instant::now();
+        let source = self.source_nodes();
+        let scanned_records = source.len();
+        let mut results: Vec<&Node> = source.into_iter().filter(|n| self.matches(n)).collect();
         if results.is_empty() {
+            self.record_metrics(started, scanned_records);
             return Vec::new();
         }
 
@@ -598,7 +607,20 @@ impl<'a> GraphQuery<'a> {
             results.truncate(limit);
         }
 
-        results.into_iter().cloned().collect()
+        let output = results.into_iter().cloned().collect();
+        self.record_metrics(started, scanned_records);
+        output
+    }
+
+    fn record_metrics(&self, started: Instant, scanned_records: usize) {
+        let selected = self.selected_indexes();
+        let mut metrics = self.metrics.borrow_mut();
+        metrics.count += 1;
+        metrics.duration_ms += started.elapsed().as_secs_f64() * 1000.0;
+        metrics.scanned_records += scanned_records;
+        for index in selected {
+            *metrics.index_usage.entry(index.name.clone()).or_default() += 1;
+        }
     }
 
     pub fn first(&self) -> Option<Node> {
@@ -809,11 +831,12 @@ mod tests {
         node_to_edge: HashMap<String, HashSet<String>>,
         indexes: HashMap<String, IndexDefinition>,
         secondary_indexes: HashMap<String, HashMap<String, HashSet<String>>>,
+        metrics: RefCell<QueryMetrics>,
     }
 
     impl Fixture {
         fn new() -> Self {
-            Self { nodes: HashMap::new(), edges: HashMap::new(), node_to_edge: HashMap::new(), indexes: HashMap::new(), secondary_indexes: HashMap::new() }
+            Self { nodes: HashMap::new(), edges: HashMap::new(), node_to_edge: HashMap::new(), indexes: HashMap::new(), secondary_indexes: HashMap::new(), metrics: RefCell::new(QueryMetrics::default()) }
         }
 
         fn add(&mut self, node: Node) -> &mut Self {
@@ -839,7 +862,7 @@ mod tests {
         }
 
         fn query(&self) -> GraphQuery<'_> {
-            GraphQuery::new(&self.nodes, &self.edges, &self.node_to_edge, &self.indexes, &self.secondary_indexes)
+            GraphQuery::new(&self.nodes, &self.edges, &self.node_to_edge, &self.indexes, &self.secondary_indexes, &self.metrics)
         }
     }
 
