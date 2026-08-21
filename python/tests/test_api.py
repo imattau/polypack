@@ -584,3 +584,21 @@ def test_shared_sync_protocol_fixture():
     assert polypack.sync_identity_checksum(fixture["operationIds"], fixture["transactionIds"]) == fixture["identityChecksum"]
     with pytest.raises(ValueError):
         polypack.validate_sync_operation({**fixture["operations"][0], "seq": 0})
+
+
+def test_sync_server_supports_durable_recovery_idempotence_and_filters(tmp_path):
+    fixture = json.loads((Path(__file__).resolve().parents[2] / "fixtures" / "sync" / "protocol.json").read_text())
+    server = polypack.SyncServer(operation_log=polypack.FileSyncOperationLog(tmp_path / "sync.json"), max_ops=2, max_batch_ops=4)
+    sender: list[dict] = []
+    receiver: list[dict] = []
+    receive = server.add_client("writer-a", sender.append)
+    server.add_client("reader", receiver.append, filter=lambda operation, _context: operation["kind"] == "updateNode")
+    receive({"type": "delta", "clientId": "writer-a", "fromSeq": 0, "ops": fixture["operations"]})
+    assert sender[0]["type"] == "ack"
+    assert len(receiver) == 1 and receiver[0]["ops"][0]["kind"] == "updateNode"
+    receive({"type": "delta", "clientId": "writer-a", "fromSeq": 0, "ops": fixture["operations"]})
+    assert server.cursor == 2
+    recovered = server.recover(0, 4, "reader")
+    assert recovered["cursor"] == 2 and recovered["ops"][0]["kind"] == "updateNode"
+    restored = polypack.SyncServer(operation_log=polypack.FileSyncOperationLog(tmp_path / "sync.json"), max_ops=2)
+    assert restored.cursor == 2

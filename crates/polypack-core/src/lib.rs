@@ -30,4 +30,5 @@ pub use model::{ChangeBatch, Edge, Node, NodeActivation, VectorEntry};
 pub use query::{QueryPlan, QueryResult};
 pub use query_exec::{aggregate, execute, GraphSnapshot};
 pub use storage::{Durability, InMemoryStorage, Storage, Store, StoreConfig, WalEntry};
+pub use sync::SyncServer;
 pub use vector::{ExactIndex, DistanceFn};

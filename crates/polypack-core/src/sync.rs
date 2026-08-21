@@ -6,6 +6,7 @@
 
 use crate::error::{PolypackError, Result};
 use serde_json::{Map, Value};
+use std::collections::HashSet;
 
 /// Compute the TypeScript-compatible FNV-1a checksum for an ordered batch.
 pub fn sync_checksum(operations: &[Value]) -> String {
@@ -59,4 +60,64 @@ pub fn validate_sync_operation(operation: &Value) -> Result<()> {
 pub fn validate_sync_batch(operations: &[Value]) -> Result<String> {
     for operation in operations { validate_sync_operation(operation)?; }
     Ok(sync_checksum(operations))
+}
+
+/// Synchronous, transport-neutral server state machine for native Rust hosts.
+/// Durable storage and authorization are supplied by the host around this
+/// state machine; the TypeScript and Python servers expose the same semantics.
+pub struct SyncServer {
+    protocol_version: u64,
+    max_ops: Option<usize>,
+    max_batch_ops: Option<usize>,
+    base_cursor: u64,
+    ops: Vec<Value>,
+    operation_ids: HashSet<String>,
+    transaction_ids: HashSet<String>,
+}
+
+impl SyncServer {
+    pub fn new(protocol_version: u64, max_ops: Option<usize>, max_batch_ops: Option<usize>) -> Result<Self> {
+        if protocol_version == 0 || max_ops == Some(0) || max_batch_ops == Some(0) { return Err(PolypackError::InvalidArgument("invalid sync server limits".into())); }
+        Ok(Self { protocol_version, max_ops, max_batch_ops, base_cursor: 0, ops: Vec::new(), operation_ids: HashSet::new(), transaction_ids: HashSet::new() })
+    }
+
+    pub fn cursor(&self) -> u64 { self.base_cursor + self.ops.len() as u64 }
+    pub fn operations(&self) -> &[Value] { &self.ops }
+
+    pub fn submit(&mut self, operations: &[Value]) -> Result<Vec<Value>> {
+        if self.max_batch_ops.is_some_and(|limit| operations.len() > limit) { return Err(PolypackError::ResourceLimit { name: "maxBatchOps".into(), limit: self.max_batch_ops.unwrap() }); }
+        validate_sync_batch(operations)?;
+        let mut accepted = Vec::new();
+        let mut accepted_transactions = HashSet::new();
+        for operation in operations {
+            let object = operation.as_object().unwrap();
+            let operation_key = object.get("operationId").and_then(Value::as_str).map(|id| format!("{}:{id}", object["clientId"].as_str().unwrap()));
+            let transaction_key = object.get("transactionId").and_then(Value::as_str).map(|id| format!("{}:{id}", object["clientId"].as_str().unwrap()));
+            if operation_key.as_ref().is_some_and(|key| self.operation_ids.contains(key)) || transaction_key.as_ref().is_some_and(|key| self.transaction_ids.contains(key) && !accepted_transactions.contains(key)) { continue; }
+            if let Some(key) = &operation_key { self.operation_ids.insert(key.clone()); }
+            if let Some(key) = &transaction_key { self.transaction_ids.insert(key.clone()); accepted_transactions.insert(key.clone()); }
+            accepted.push(operation.clone());
+        }
+        self.ops.extend(accepted.iter().cloned());
+        if let Some(limit) = self.max_ops {
+            if self.ops.len() > limit {
+                let removed = self.ops.len() - limit;
+                self.ops.drain(..removed);
+                self.base_cursor += removed as u64;
+            }
+        }
+        Ok(accepted)
+    }
+
+    pub fn recover(&self, from_cursor: u64, limit: usize) -> Result<Value> {
+        let valid = from_cursor >= self.base_cursor && from_cursor <= self.cursor();
+        let requested = if valid { from_cursor } else { 0 };
+        let offset = if requested == 0 { 0 } else { (requested - self.base_cursor) as usize };
+        let page: Vec<Value> = self.ops.iter().skip(offset).take(limit).cloned().collect();
+        let cursor = (if requested == 0 { self.base_cursor } else { requested }) + page.len() as u64;
+        let checksum = sync_checksum(&page);
+        let mut response = serde_json::json!({ "type": if requested == 0 { "snapshot" } else { "delta" }, "clientId": "server", "fromSeq": requested, "cursor": cursor, "more": offset + page.len() < self.ops.len(), "ops": page, "protocolVersion": self.protocol_version, "checksum": checksum });
+        if !valid { response["errors"] = serde_json::json!([{ "code": "cursor_expired", "message": "requested cursor is no longer available" }]); }
+        Ok(response)
+    }
 }

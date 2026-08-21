@@ -1,11 +1,16 @@
 # Cross-language compatibility
 
-Version: 1
+Version: 2
 
 Polypack has three maintained implementations: TypeScript, Rust, and Python.
 The shared fixtures under `fixtures/conformance` are the behavioural source of
 truth for portable graph, edge, ownership, traversal, pagination, aggregation,
 and vector-index semantics.
+
+Version 2 is the current stable cross-language baseline. It incorporates the
+stable data model, database-core error taxonomy, sync protocol primitives,
+filesystem single-writer contract, physical migration hooks, and ANN/vector
+fixture gates documented below.
 
 The data-model contract is stable at version 2. Its field, validation,
 ownership, detached-read, query, and vector-search rules are gated by the
@@ -34,6 +39,7 @@ resource-limit failures.
 | 2 | Transactions, revisions, patches, schemas, indexes, capabilities, and durable mutations | CI | CI | CI |
 | 3 | Query snapshots, persistence verification, backup/restore, migrations, and resource limits | CI | CI | CI |
 | 4 | ANN/HNSW behavior | CI | CI | CI |
+| 5 | Sync operation validation and deterministic checksums | CI | CI | CI |
 
 Level 1 and Level 4 comparisons use the tolerances defined by the individual
 fixtures. ANN results are compared by minimum overlap rather than exact order.
@@ -49,7 +55,8 @@ ordering and implementation-specific diagnostic text.
 - Rust runs `polypack-core/tests/query_conformance.rs` and the graph crate's
   unit and persistence tests, including
   `polypack-core/tests/recovery_conformance.rs` and the database-core error
-  taxonomy test.
+  taxonomy test. `polypack-core/tests/vector_conformance.rs` covers exact and
+  ANN vector fixtures; `sync_conformance.rs` covers sync protocol primitives.
 - Python runs `python/tests/test_conformance.py` against the same fixture
   directory, plus its complete API and persistence suite, where
   `test_shared_recovery_fixtures` and `test_error_taxonomy_fixture` cover the

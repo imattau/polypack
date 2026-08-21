@@ -7,7 +7,9 @@ conflict hooks to the server.
 The portable protocol surface is shared by TypeScript, Rust, and Python:
 operation envelopes use the same required fields and validation rules, and
 ordered batches use the same deterministic checksum. The implementations do
-not need to share a transport or server runtime.
+not need to share a transport or server runtime. TypeScript provides the
+callback-driven transport server; Rust and Python provide synchronous server
+state machines suitable for embedding behind any transport.
 
 Server operation history has a global cursor. Clients resume with that cursor;
 when history has been compacted past the requested cursor, the server returns
@@ -54,3 +56,9 @@ perform their own atomic/conflict handling at the receiving boundary.
 Durable logs retain operation and transaction identity tombstones across
 compaction and expose cursor, retained-operation, and identity counts for
 administrative monitoring.
+
+Native servers expose the same minimum server guarantees: protocol-version
+validation, batch limits, global cursors, snapshot/delta recovery, bounded
+retention, operation and transaction idempotence, and deterministic checksums.
+Authorization, conflict callbacks, subscription predicates, and transport
+delivery remain host-language integration points.

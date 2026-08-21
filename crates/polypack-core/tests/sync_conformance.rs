@@ -1,4 +1,4 @@
-use polypack_core::sync::{sync_checksum, sync_identity_checksum, validate_sync_batch};
+use polypack_core::sync::{sync_checksum, sync_identity_checksum, validate_sync_batch, SyncServer};
 use serde_json::Value;
 use std::path::PathBuf;
 
@@ -12,4 +12,17 @@ fn shared_sync_protocol_fixture_passes() {
     let operation_ids = fixture["operationIds"].as_array().unwrap().iter().map(|value| value.as_str().unwrap().to_string()).collect::<Vec<_>>();
     let transaction_ids = fixture["transactionIds"].as_array().unwrap().iter().map(|value| value.as_str().unwrap().to_string()).collect::<Vec<_>>();
     assert_eq!(sync_identity_checksum(&operation_ids, &transaction_ids), fixture["identityChecksum"].as_str().unwrap());
+}
+
+#[test]
+fn sync_server_is_idempotent_and_resumes_after_compaction() {
+    let fixture: Value = serde_json::from_str(&std::fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/sync/protocol.json")).unwrap()).unwrap();
+    let mut server = SyncServer::new(1, Some(2), Some(4)).unwrap();
+    let operations = fixture["operations"].as_array().unwrap();
+    assert_eq!(server.submit(operations).unwrap().len(), 2);
+    assert!(server.submit(operations).unwrap().is_empty());
+    assert_eq!(server.cursor(), 2);
+    let recovery = server.recover(0, 4).unwrap();
+    assert_eq!(recovery["cursor"].as_u64().unwrap(), 2);
+    assert_eq!(recovery["ops"].as_array().unwrap().len(), 2);
 }

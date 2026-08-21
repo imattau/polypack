@@ -5,7 +5,8 @@ Language-neutral JSON fixtures consumed by the TypeScript conformance runner
 fixtures. Fixture files are the cross-language contract; they do not reference
 TypeScript implementation details.
 
-The current behavioural specification is version 2. Existing schema-version 1
+The current behavioural specification is version 2. The compatibility contract
+is version 2. Existing schema-version 1
 fixtures remain valid for compatibility; new fixtures should not rely on
 separator-derived edge IDs.
 
@@ -123,4 +124,5 @@ The sync fixture defines a canonical ordered operation batch and checksums for
 the batch and retained operation identities. TypeScript, Rust, and Python
 validate it independently. It is intentionally transport-neutral; server
 storage, authorization, and conflict resolution are not part of the shared
-wire primitive.
+wire primitive. The native server implementations additionally test global
+cursor recovery, retention, and idempotent retries against this protocol.
