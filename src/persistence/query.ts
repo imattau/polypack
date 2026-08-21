@@ -1,5 +1,10 @@
 import type { IndexDefinition, SerializedNode } from '../types.js'
 import type { PersistedNodeQuery } from './adapter.js'
+import { QueryAbortedError } from '../query-errors.js'
+
+export function assertQueryActive(signal?: AbortSignal): void {
+  if (signal?.aborted) throw new QueryAbortedError()
+}
 
 function fieldValue(node: SerializedNode, field: string): unknown {
   if (field === 'type') return node.type
@@ -66,6 +71,24 @@ export class SecondaryIndexBuckets {
     for (const node of nodes) this.add(node)
   }
 
+  verify(nodes: Iterable<SerializedNode>): string[] {
+    const expected = new SecondaryIndexBuckets()
+    expected.setDefinitions(this.definitions)
+    expected.rebuild(nodes)
+    const errors: string[] = []
+    for (const definition of this.definitions) {
+      const actualBuckets = this.buckets.get(definition.name) ?? new Map()
+      const expectedBuckets = expected.buckets.get(definition.name) ?? new Map()
+      for (const [key, ids] of expectedBuckets) {
+        if (definition.unique && ids.size > 1) errors.push(`unique index violation: ${definition.name}/${key}`)
+        const actual = actualBuckets.get(key)
+        if (!actual || actual.size !== ids.size || [...ids].some(id => !actual.has(id))) errors.push(`secondary index mismatch: ${definition.name}/${key}`)
+      }
+      for (const key of actualBuckets.keys()) if (!expectedBuckets.has(key)) errors.push(`stale secondary index entry: ${definition.name}/${key}`)
+    }
+    return errors
+  }
+
   /** Return the intersection of all usable index candidates, or null for a scan. */
   candidates(query: PersistedNodeQuery): { ids: Set<string> | null; names: string[] } {
     if (query.nodeTypes && query.nodeTypes.length > 1) return { ids: null, names: [] }
@@ -126,7 +149,11 @@ export function applyPersistedNodeQuery(
   nodes: SerializedNode[],
   query: PersistedNodeQuery,
 ): SerializedNode[] {
-  let results = nodes.filter(node => matchesPersistedNode(node, query))
+  let results: SerializedNode[] = []
+  for (const node of nodes) {
+    assertQueryActive(query.signal)
+    if (matchesPersistedNode(node, query)) results.push(node)
+  }
   if (query.orderBy) {
     const { field, direction } = query.orderBy
     results = [...results].sort((a, b) => {

@@ -530,8 +530,11 @@ payloads** — activation is accumulated knowledge, not last-write-wins data.
   far to reach the operation log. `addClient(handle)` returns that client's
   incoming-message handler, `removeClient(handle)` unregisters it, and `ops`
   exposes the received log. The server deduplicates operations by client and
-  sequence, acknowledges both first-time and repeated delivery, and serves full
-  operation snapshots or cursor-based deltas for late and reconnecting clients.
+  sequence, operation, and transaction identity, acknowledges both first-time
+  and repeated delivery, and serves full operation snapshots or cursor-based
+  deltas for late and reconnecting clients. Authorization and conflict hooks
+  validate transaction groups atomically: if one operation is rejected, none of
+  that transaction is committed or broadcast.
 - `SyncTransport` requires `send`, `onMessage`, and `close`.
 - `MemoryTransport.pair()` creates linked asynchronous in-process transports.
 

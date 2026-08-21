@@ -32,6 +32,7 @@ export class SyncServer {
   private opLog: SyncOp[] = []
   private seenOps = new Set<string>()
   private seenOperationIds = new Set<string>()
+  private seenTransactionIds = new Set<string>()
   private clients: SyncServerClient[] = []
   private clientFilters = new Map<SyncServerClient, SyncSubscriptionOptions['filter']>()
   private baseCursor = 0
@@ -57,7 +58,12 @@ export class SyncServer {
         this.opLog = state.ops.slice(-this.options.maxOps)
         this.baseCursor += state.ops.length - this.opLog.length
         this.seenOps = new Set(this.opLog.map(op => `${op.clientId}:${op.seq}`))
-        this.seenOperationIds = new Set(this.opLog.flatMap(op => op.operationId ? [`${op.clientId}:${op.operationId}`] : []))
+        this.seenOperationIds = new Set(state.operationIds ?? [])
+        this.seenTransactionIds = new Set(state.transactionIds ?? [])
+        for (const op of this.opLog) {
+          if (op.operationId) this.seenOperationIds.add(`${op.clientId}:${op.operationId}`)
+          if (op.transactionId) this.seenTransactionIds.add(`${op.clientId}:${op.transactionId}`)
+        }
       })
     }
     await this.readyPromise
@@ -110,13 +116,16 @@ export class SyncServer {
     const requestedCursor = cursorIsValid ? msg.fromSeq : 0
     const offset = requestedCursor === 0 ? 0 : requestedCursor - this.baseCursor
     const available = this.opLog.slice(offset)
-    const ops = available.slice(0, this.options.maxBatchOps)
+    const page = available.slice(0, this.options.maxBatchOps)
+    const filter = this.clientFilters.get(sender)
+    const context: SyncContext = { clientId: sender.clientId ?? msg.clientId, protocolVersion: this.options.protocolVersion }
+    const ops = filter ? page.filter(op => filter(op, context)) : page
     sender.send({
       type: requestedCursor === 0 ? 'snapshot' : 'delta',
       clientId: 'server',
       fromSeq: requestedCursor,
-      cursor: requestedCursor + ops.length,
-      more: ops.length < available.length,
+      cursor: requestedCursor + page.length,
+      more: page.length < available.length,
       ops,
       checksum: syncChecksum(ops),
       protocolVersion: this.options.protocolVersion,
@@ -128,21 +137,31 @@ export class SyncServer {
     const accepted: SyncOp[] = []
     const errors: SyncError[] = []
     const context: SyncContext = { clientId: msg.clientId, protocolVersion: msg.protocolVersion ?? this.options.protocolVersion, metadata: this.options.clientMetadata?.(sender) }
-    for (const op of msg.ops) {
-      if (this.options.authorize && !(await this.options.authorize(op, context))) {
-        errors.push({ code: 'unauthorized', message: `Operation ${op.operationId ?? `${op.clientId}:${op.seq}`} was not authorized`, operationId: op.operationId })
-        continue
-      }
-      if (this.options.conflict) {
-        const result = await this.options.conflict(op, context)
-        const rejected = result === false || (typeof result === 'object' && !result.ok)
-        if (rejected) {
-          const message = typeof result === 'object' && result.message ? result.message : `Operation ${op.operationId ?? `${op.clientId}:${op.seq}`} conflicts with current state`
-          errors.push({ code: 'conflict', message, operationId: op.operationId })
+    const groups = new Map<string, SyncOp[]>()
+    msg.ops.forEach((op, index) => {
+      const key = op.transactionId ? `tx:${op.clientId}:${op.transactionId}` : `op:${index}`
+      const group = groups.get(key) ?? []
+      group.push(op)
+      groups.set(key, group)
+    })
+    for (const group of groups.values()) {
+      const groupErrors: SyncError[] = []
+      for (const op of group) {
+        if (this.options.authorize && !(await this.options.authorize(op, context))) {
+          groupErrors.push({ code: 'unauthorized', message: `Operation ${op.operationId ?? `${op.clientId}:${op.seq}`} was not authorized`, operationId: op.operationId })
           continue
         }
+        if (this.options.conflict) {
+          const result = await this.options.conflict(op, context)
+          const rejected = result === false || (typeof result === 'object' && !result.ok)
+          if (rejected) {
+            const message = typeof result === 'object' && result.message ? result.message : `Operation ${op.operationId ?? `${op.clientId}:${op.seq}`} conflicts with current state`
+            groupErrors.push({ code: 'conflict', message, operationId: op.operationId })
+          }
+        }
       }
-      accepted.push(op)
+      if (groupErrors.length > 0) errors.push(...groupErrors)
+      else accepted.push(...group)
     }
     this.processDelta({ ...msg, ops: accepted }, sender, errors)
   }
@@ -170,12 +189,15 @@ export class SyncServer {
   private processInMemoryDelta(msg: SyncMessage, sender: SyncServerClient, errors: SyncError[] = []): void {
       const broadcastCursor = this.cursor
       const accepted: SyncOp[] = []
+      const acceptedTransactions = new Set<string>()
       for (const op of msg.ops) {
         const key = `${op.clientId}:${op.seq}`
         const operationKey = op.operationId ? `${op.clientId}:${op.operationId}` : undefined
-        if (this.seenOps.has(key) || (operationKey && this.seenOperationIds.has(operationKey))) continue
+        const transactionKey = op.transactionId ? `${op.clientId}:${op.transactionId}` : undefined
+        if (this.seenOps.has(key) || (operationKey && this.seenOperationIds.has(operationKey)) || (transactionKey && this.seenTransactionIds.has(transactionKey) && !acceptedTransactions.has(transactionKey))) continue
         this.seenOps.add(key)
         if (operationKey) this.seenOperationIds.add(operationKey)
+        if (transactionKey) { this.seenTransactionIds.add(transactionKey); acceptedTransactions.add(transactionKey) }
         this.opLog.push(op)
         accepted.push(op)
         this.onOp?.(op)
@@ -216,11 +238,14 @@ export class SyncServer {
     await this.ready()
     const broadcastCursor = this.cursor
     const accepted: SyncOp[] = []
+    const acceptedTransactions = new Set<string>()
     for (const op of msg.ops) {
       const key = `${op.clientId}:${op.seq}`
       const operationKey = op.operationId ? `${op.clientId}:${op.operationId}` : undefined
-      if (this.seenOps.has(key) || (operationKey && this.seenOperationIds.has(operationKey))) continue
+      const transactionKey = op.transactionId ? `${op.clientId}:${op.transactionId}` : undefined
+      if (this.seenOps.has(key) || (operationKey && this.seenOperationIds.has(operationKey)) || (transactionKey && this.seenTransactionIds.has(transactionKey) && !acceptedTransactions.has(transactionKey))) continue
       accepted.push(op)
+      if (transactionKey) acceptedTransactions.add(transactionKey)
     }
     const log = this.options.operationLog!
     if (accepted.length > 0) {
@@ -230,8 +255,10 @@ export class SyncServer {
     for (const op of accepted) {
       const key = `${op.clientId}:${op.seq}`
       const operationKey = op.operationId ? `${op.clientId}:${op.operationId}` : undefined
+      const transactionKey = op.transactionId ? `${op.clientId}:${op.transactionId}` : undefined
       this.seenOps.add(key)
       if (operationKey) this.seenOperationIds.add(operationKey)
+      if (transactionKey) this.seenTransactionIds.add(transactionKey)
       this.opLog.push(op)
       this.onOp?.(op)
       while (this.opLog.length > this.options.maxOps) {

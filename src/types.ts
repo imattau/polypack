@@ -199,6 +199,7 @@ export interface QueryMetrics {
   durationMs: number
   scannedRecords: number
   index?: string
+  indexes?: string[]
 }
 
 export interface QueryResourceLimits {

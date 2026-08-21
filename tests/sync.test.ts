@@ -694,6 +694,21 @@ describe('SyncServer + SyncClient', () => {
     expect(responses[0].errors?.[0].code).toBe('unauthorized')
   })
 
+  it('rejects an entire transaction when one operation is unauthorized', async () => {
+    const responses: SyncMessage[] = []
+    const server = new SyncServer({ authorize: op => op.payload.allowed === true })
+    const receive = server.addClient({ clientId: 'transaction-client', send: message => responses.push(message) })
+    receive({
+      type: 'delta', clientId: 'transaction-client', fromSeq: 0, ops: [
+        { seq: 1, timestamp: 1, clientId: 'transaction-client', transactionId: 'tx-1', kind: 'addNode', payload: { id: 'a', allowed: true } },
+        { seq: 2, timestamp: 1, clientId: 'transaction-client', transactionId: 'tx-1', kind: 'addNode', payload: { id: 'b' } },
+      ],
+    })
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(server.ops).toHaveLength(0)
+    expect(responses[0].errors).toMatchObject([{ code: 'unauthorized' }])
+  })
+
   it('reports base-revision conflicts through the server hook', async () => {
     const responses: SyncMessage[] = []
     const errors: string[] = []
@@ -735,6 +750,22 @@ describe('SyncServer + SyncClient', () => {
     const recovery: SyncMessage[] = []
     server.addClient({ clientId: 'recovery', send: message => recovery.push(message) })({ type: 'request-snapshot', clientId: 'recovery', fromSeq: 0, ops: [] })
     expect(recovery[0].errors?.[0].code).toBe('cursor_expired')
+  })
+
+  it('applies subscription filters to recovery snapshots while advancing the global cursor', () => {
+    const server = new SyncServer()
+    const send = server.addClient({ clientId: 'sender', send: () => undefined })
+    const recovery: SyncMessage[] = []
+    const request = server.addClient({ clientId: 'filtered', send: message => recovery.push(message) }, { filter: op => op.kind === 'addNode' })
+    send({ type: 'delta', clientId: 'sender', fromSeq: 0, ops: [
+      { seq: 1, timestamp: 1, clientId: 'sender', kind: 'addNode', payload: { id: 'visible' } },
+      { seq: 2, timestamp: 1, clientId: 'sender', kind: 'removeNode', payload: { id: 'hidden' } },
+    ] })
+    request({ type: 'request-snapshot', clientId: 'filtered', fromSeq: 0, ops: [] })
+
+    expect(recovery[0].ops.map(item => item.kind)).toEqual(['addNode'])
+    expect(recovery[0].cursor).toBe(2)
+    expect(recovery[0].checksum).toBeDefined()
   })
 
   it('advances filtered clients using the global server cursor', () => {

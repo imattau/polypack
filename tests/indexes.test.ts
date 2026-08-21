@@ -84,6 +84,16 @@ describe('secondary indexes', () => {
     expect(stats.queryScannedRecords).toBe(1)
   })
 
+  it('records every persisted index used by an intersection', async () => {
+    const graph = new PolyGraph()
+    graph.defineIndex({ name: 'surname', fields: ['surname'] })
+    graph.defineIndex({ name: 'birth-year', fields: ['birthYear'] })
+    graph.addNode({ id: 'a', type: 'person', data: { surname: 'Smith', birthYear: 1980 }, insertedAt: 1, updatedAt: 1 })
+    await graph.flush()
+    await graph.queryPersisted().where('surname', 'Smith').where('birthYear', 1980).toArray()
+    expect((await graph.stats()).queryIndexUsage).toEqual({ surname: 1, 'birth-year': 1 })
+  })
+
   it('uses a numeric secondary index for range candidates', () => {
     const graph = new PolyGraph()
     graph.defineIndex({ name: 'birth-year', nodeType: 'person', fields: ['birthYear'], sparse: true })

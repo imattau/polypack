@@ -1694,7 +1694,9 @@ export class PolyGraph {
     this.queryCount++
     this.queryDurationMs += metrics.durationMs
     this.queryScannedRecords += metrics.scannedRecords
-    if (metrics.index) this.queryIndexUsage.set(metrics.index, (this.queryIndexUsage.get(metrics.index) ?? 0) + 1)
+    for (const index of metrics.indexes ?? (metrics.index ? [metrics.index] : [])) {
+      this.queryIndexUsage.set(index, (this.queryIndexUsage.get(index) ?? 0) + 1)
+    }
   }
 
   // ── Hot Cache ──

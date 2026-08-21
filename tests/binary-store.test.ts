@@ -157,6 +157,17 @@ describe('BinaryStoreAdapter', () => {
         edgeTypes: [],
       })
     })
+
+    it('verifies maintained secondary indexes', async () => {
+      await adapter.applyChanges!({
+        indexDefinitions: [{ name: 'email', fields: ['email'], unique: true }],
+        putNodes: [{ id: 'a', type: 'person', data: { email: 'a@example.test' }, vector: null, insertedAt: 1, updatedAt: 1 }],
+        deleteNodeIds: [], putEdges: [], deleteEdgeIds: [], putVectors: [], deleteVectorIds: [],
+      })
+      const report = await adapter.verify()
+      expect(report.ok).toBe(true)
+      expect(report.errors).toEqual([])
+    })
   })
 
   describe('edges', () => {

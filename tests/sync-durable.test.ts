@@ -100,6 +100,30 @@ describe('durable sync operation logs', () => {
     expect(state.ops.map(item => item.operationId)).toEqual(['op-1', 'op-2'])
   })
 
+  it('retains operation and transaction idempotency after compaction and restart', async () => {
+    const io = new MemoryFileIO()
+    const server = new SyncServer({ operationLog: new FileSyncOperationLog(io), maxOps: 1 })
+    const sent: SyncMessage[] = []
+    const handle = server.addClient({ send: message => sent.push(message) })
+    const first = { ...op(1), transactionId: 'tx-1' }
+    const second = { ...op(2), transactionId: 'tx-2' }
+    handle(message([first]))
+    handle(message([second]))
+    await server.flush()
+    expect(server.cursor).toBe(2)
+    handle(message([first]))
+    await server.flush()
+    expect(server.cursor).toBe(2)
+
+    const restored = new SyncServer({ operationLog: new FileSyncOperationLog(io), maxOps: 1 })
+    await restored.ready()
+    const restoredHandle = restored.addClient({ send: () => undefined })
+    restoredHandle(message([first]))
+    await restored.flush()
+    expect(restored.cursor).toBe(2)
+    expect(sent).toHaveLength(3)
+  })
+
   it('rejects durable submissions when the pending queue is full', async () => {
     let release!: () => void
     const gate = new Promise<void>(resolve => { release = resolve })

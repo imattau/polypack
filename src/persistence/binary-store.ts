@@ -1,7 +1,7 @@
 import type { SerializedNode, SerializedEdge, AdapterCapabilities, IndexDefinition, MutationRecord, VerificationReport } from '../types.js'
 import type { PersistenceAdapter, PersistenceChanges, PersistedNodeQuery } from './adapter.js'
 import type { PersistedSchemaDefinitions } from '../types.js'
-import { applyPersistedCountPagination, applyPersistedNodeQuery, matchesPersistedNode, SecondaryIndexBuckets } from './query.js'
+import { applyPersistedCountPagination, applyPersistedNodeQuery, assertQueryActive, matchesPersistedNode, SecondaryIndexBuckets } from './query.js'
 import type { WalEntry } from './binary-format.js'
 import { encodeWalEntries, decodeWalEntries, encodeSnapshot, decodeSnapshot, encodeMutationRecords, decodeMutationRecords } from './binary-format.js'
 import type { FileIO } from './file-io.js'
@@ -466,6 +466,7 @@ export class BinaryStoreAdapter implements PersistenceAdapter {
     for (const [id, edgeIds] of this.edgesByTarget) {
       for (const edgeId of edgeIds) if (this.edges.get(edgeId)?.target !== id) errors.push(`stale target edge index entry: ${id}/${edgeId}`)
     }
+    errors.push(...this.secondaryIndexes.verify(this.nodes.values()))
     for (let i = 1; i < this.mutationRecords.length; i++) {
       if (this.mutationRecords[i].sequence <= this.mutationRecords[i - 1].sequence) errors.push(`non-monotonic mutation sequence at index ${i}`)
     }
@@ -568,6 +569,7 @@ export class BinaryStoreAdapter implements PersistenceAdapter {
     this.assertOpen()
     return this.enqueue(async () => {
       await this.ensureLoaded()
+      assertQueryActive(query.signal)
       const indexed = this.secondaryIndexes.candidates(query)
       const candidates = indexed.ids ? [...indexed.ids] : this.typeCandidateIds(query)
       const nodes = candidates
@@ -583,7 +585,8 @@ export class BinaryStoreAdapter implements PersistenceAdapter {
       await this.ensureLoaded()
       const isTypeOnly = !!query.nodeTypes && query.nodeTypes.length > 0 &&
         !query.attributes && !query.attributeRanges
-      let count: number
+    assertQueryActive(query.signal)
+    let count: number
       if (!query.nodeTypes && !query.attributes && !query.attributeRanges) {
         count = this.nodes.size
       } else if (isTypeOnly) {
@@ -596,13 +599,15 @@ export class BinaryStoreAdapter implements PersistenceAdapter {
       if (indexed.ids) {
         count = 0
         for (const id of indexed.ids) {
+          assertQueryActive(query.signal)
           const node = this.nodes.get(id)
           if (node && matchesPersistedNode(node, query)) count++
         }
         return applyPersistedCountPagination(count, query)
       }
       count = 0
-        for (const node of this.nodes.values()) {
+      for (const node of this.nodes.values()) {
+        assertQueryActive(query.signal)
           if (matchesPersistedNode(node, query)) count++
         }
       }

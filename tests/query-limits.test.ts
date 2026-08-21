@@ -50,4 +50,12 @@ describe('persisted query resource limits', () => {
       .rejects.toBeInstanceOf(QueryAbortedError)
     await expect(graph.queryPersisted().whereNodeType('record').ids()).resolves.toEqual(['a', 'b'])
   })
+
+  it('propagates cancellation into direct persistence adapter scans', async () => {
+    const adapter = new MemoryAdapter()
+    await adapter.putNode(node('a', 1))
+    const controller = new AbortController()
+    controller.abort()
+    await expect(adapter.queryNodes!({ signal: controller.signal })).rejects.toBeInstanceOf(QueryAbortedError)
+  })
 })

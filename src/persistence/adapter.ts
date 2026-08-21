@@ -7,6 +7,7 @@ export type { PersistedSchemaDefinitions } from '../types.js'
 
 /** Storage-level node predicates used by persisted queries. */
 export interface PersistedNodeQuery {
+  signal?: AbortSignal
   nodeTypes?: string[]
   attributes?: Record<string, unknown>
   attributeRanges?: Record<string, { above?: number; below?: number }>

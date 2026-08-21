@@ -191,6 +191,7 @@ export class PersistedGraphQuery {
     this.checkLimits()
     const query: PersistedNodeQuery = {
       ...this.query,
+      signal: this.limits.signal,
       orderBy: includeOrder ? this.query.orderBy : undefined,
       offset: includePagination ? this.resultOffset : undefined,
       limit: includePagination ? this.resultLimit : undefined,
@@ -362,8 +363,11 @@ export class PersistedGraphQuery {
       const indexes = await this.adapter.getIndexDefinitions?.() ?? []
       const fields = new Set([...Object.keys(this.query.attributes ?? {}), ...Object.keys(this.query.attributeRanges ?? {})])
       const nodeType = this.query.nodeTypes?.length === 1 ? this.query.nodeTypes[0] : undefined
-      const index = indexes.find(candidate => (!candidate.nodeType || candidate.nodeType === nodeType) && candidate.fields.every(field => fields.has(field) || fields.has(field.replace(/^data\./, ''))))
-      this.onMetrics({ durationMs: Date.now() - startedAt, scannedRecords: serialized.length, index: index?.name })
+      const selectedIndexes = indexes.filter(candidate =>
+        (!candidate.nodeType || candidate.nodeType === nodeType) &&
+        candidate.fields.every(field => fields.has(field) || fields.has(field.replace(/^data\./, ''))),
+      )
+      this.onMetrics({ durationMs: Date.now() - startedAt, scannedRecords: serialized.length, index: selectedIndexes[0]?.name, indexes: selectedIndexes.map(index => index.name) })
     }
     return results
   }

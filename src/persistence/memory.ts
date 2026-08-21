@@ -1,7 +1,7 @@
 import type { SerializedNode, SerializedEdge, IndexDefinition, MutationRecord } from '../types.js'
 import type { PersistenceAdapter, PersistenceChanges, PersistedNodeQuery } from './adapter.js'
 import type { PersistedSchemaDefinitions } from '../types.js'
-import { applyPersistedCountPagination, applyPersistedNodeQuery, matchesPersistedNode, SecondaryIndexBuckets } from './query.js'
+import { applyPersistedCountPagination, applyPersistedNodeQuery, assertQueryActive, matchesPersistedNode, SecondaryIndexBuckets } from './query.js'
 import { mutationRecordFromChanges } from './mutation-log.js'
 
 /** Volatile persistence adapter for Node.js, tests, and temporary graphs. */
@@ -194,6 +194,7 @@ export class MemoryAdapter implements PersistenceAdapter {
   }
 
   async queryNodes(query: PersistedNodeQuery): Promise<SerializedNode[]> {
+    assertQueryActive(query.signal)
     const indexed = this.secondaryIndexes.candidates(query)
     const candidates = indexed.ids ? [...indexed.ids] : this.typeCandidateIds(query)
     const nodes = candidates
@@ -203,6 +204,7 @@ export class MemoryAdapter implements PersistenceAdapter {
   }
 
   async countNodes(query: PersistedNodeQuery): Promise<number> {
+    assertQueryActive(query.signal)
     const isTypeOnly = !!query.nodeTypes && query.nodeTypes.length > 0 &&
       !query.attributes && !query.attributeRanges
     let count: number
@@ -218,6 +220,7 @@ export class MemoryAdapter implements PersistenceAdapter {
       if (indexed.ids) {
         count = 0
         for (const id of indexed.ids) {
+          assertQueryActive(query.signal)
           const node = this.nodes.get(id)
           if (node && matchesPersistedNode(node, query)) count++
         }
@@ -225,6 +228,7 @@ export class MemoryAdapter implements PersistenceAdapter {
       }
       count = 0
       for (const node of this.nodes.values()) {
+        assertQueryActive(query.signal)
         if (matchesPersistedNode(node, query)) count++
       }
     }
