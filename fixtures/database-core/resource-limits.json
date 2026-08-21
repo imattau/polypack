@@ -1,0 +1,49 @@
+{
+  "schemaVersion": 1,
+  "name": "resource-limits",
+  "group": "database-core",
+  "limits": {
+    "maxVectorDimensions": 2,
+    "maxNodePayloadBytes": 20,
+    "maxBatchSize": 1
+  },
+  "payloadNode": {
+    "id": "oversized-payload",
+    "type": "record",
+    "data": { "value": "this payload is too large" },
+    "insertedAt": 1,
+    "updatedAt": 1
+  },
+  "vectorNode": {
+    "id": "oversized-vector",
+    "type": "record",
+    "data": {},
+    "vector": [1, 2, 3],
+    "insertedAt": 1,
+    "updatedAt": 1
+  },
+  "batchNodes": [
+    { "id": "batch-one", "type": "record", "data": {}, "insertedAt": 1, "updatedAt": 1 },
+    { "id": "batch-two", "type": "record", "data": {}, "insertedAt": 1, "updatedAt": 1 }
+  ],
+  "transactionNodes": [
+    { "id": "transaction-one", "type": "record", "data": {}, "insertedAt": 1, "updatedAt": 1 },
+    { "id": "transaction-two", "type": "record", "data": {}, "insertedAt": 1, "updatedAt": 1 }
+  ],
+  "afterRollbackNode": {
+    "id": "after-rollback",
+    "type": "record",
+    "data": {},
+    "insertedAt": 1,
+    "updatedAt": 1
+  },
+  "oversizedPatch": {
+    "set": { "data.value": "this patched payload is too large" }
+  },
+  "expect": {
+    "rejectedLimitNames": ["maxNodePayloadBytes", "maxVectorDimensions", "maxBatchSize"],
+    "patchRejectedLimitName": "maxNodePayloadBytes",
+    "absentNodeIds": ["oversized-payload", "oversized-vector", "batch-one", "batch-two", "transaction-one", "transaction-two"],
+    "presentNodeIds": ["after-rollback"]
+  }
+}

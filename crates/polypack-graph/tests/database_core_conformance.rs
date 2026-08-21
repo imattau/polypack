@@ -156,3 +156,64 @@ fn migration_fixture_passes() {
         assert_eq!(graph.get_node(id).unwrap().data["displayName"], fixture["expect"]["displayNames"][id]);
     }
 }
+
+#[test]
+fn resource_limits_fixture_passes() {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../fixtures/database-core/resource-limits.json");
+    let fixture: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    let limits = &fixture["limits"];
+    let mut graph = Graph::open(
+        Box::new(InMemoryStorage::new()),
+        StoreConfig::default(),
+        GraphConfig {
+            resource_limits: polypack_graph::GraphResourceLimits {
+                max_vector_dimensions: limits["maxVectorDimensions"].as_u64().map(|value| value as usize),
+                max_node_payload_bytes: limits["maxNodePayloadBytes"].as_u64().map(|value| value as usize),
+                max_batch_size: limits["maxBatchSize"].as_u64().map(|value| value as usize),
+            },
+            ..GraphConfig::default()
+        },
+    )
+    .unwrap();
+
+    let payload = serde_json::from_value::<Node>(fixture["payloadNode"].clone()).unwrap();
+    assert!(matches!(graph.add_node(payload), Err(PolypackError::ResourceLimit { name, .. }) if name == "maxNodePayloadBytes"));
+    let vector = serde_json::from_value::<Node>(fixture["vectorNode"].clone()).unwrap();
+    assert!(matches!(graph.add_node(vector), Err(PolypackError::ResourceLimit { name, .. }) if name == "maxVectorDimensions"));
+    let batch = fixture["batchNodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .cloned()
+        .map(|value| serde_json::from_value::<Node>(value).unwrap())
+        .collect();
+    assert!(matches!(graph.add_nodes(batch), Err(PolypackError::ResourceLimit { name, .. }) if name == "maxBatchSize"));
+
+    let transaction_nodes = &fixture["transactionNodes"];
+    let result: polypack_core::Result<()> = graph.transaction(|tx| {
+        tx.add_node(serde_json::from_value::<Node>(transaction_nodes[0].clone()).unwrap())?;
+        tx.add_node(serde_json::from_value::<Node>(transaction_nodes[1].clone()).unwrap())?;
+        Ok(())
+    });
+    assert!(matches!(result, Err(PolypackError::ResourceLimit { name, .. }) if name == "maxBatchSize"));
+    for id in fixture["expect"]["absentNodeIds"].as_array().unwrap().iter().map(|value| value.as_str().unwrap()) {
+        assert!(graph.get_node(id).is_none());
+    }
+
+    graph
+        .transaction(|tx| tx.add_node(serde_json::from_value::<Node>(fixture["afterRollbackNode"].clone()).unwrap()))
+        .unwrap();
+    assert!(matches!(graph.patch_node(
+        fixture["afterRollbackNode"]["id"].as_str().unwrap(),
+        object(&fixture["oversizedPatch"]["set"]),
+        Vec::new(),
+        Map::new(),
+        Map::new(),
+        None,
+    ), Err(PolypackError::ResourceLimit { name, .. }) if name == "maxNodePayloadBytes"));
+    assert!(graph.get_node(fixture["afterRollbackNode"]["id"].as_str().unwrap()).unwrap().data.is_empty());
+    for id in fixture["expect"]["presentNodeIds"].as_array().unwrap().iter().map(|value| value.as_str().unwrap()) {
+        assert!(graph.get_node(id).is_some());
+    }
+}

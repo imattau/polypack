@@ -32,7 +32,9 @@ ordering and implementation-specific diagnostic text.
   the language-specific suites. The secondary-index fixture covers candidate
   intersection, selected-index explain output, and stable query results.
   The migration fixture covers batched application-schema transformation and
-  record identity preservation.
+  record identity preservation. The resource-limits fixture covers write-side
+  vector and payload bounds, bulk mutation limits, and transactional rollback
+  when a mutation budget is exceeded.
 
 The Python runner reports the hot-cache eviction fixture as an explicit skip
 because cache sizing is an orchestration concern in that implementation; it

@@ -17,6 +17,7 @@ from polypack import (
     PolypackError,
     PolypackStorageError,
     PolypackValueError,
+    ResourceLimitError,
     engine_info,
 )
 
@@ -365,6 +366,46 @@ def test_transaction_conformance_fixture():
     assert graph.get_node("temporary") is None
     assert graph.get_node("person-1")["data"]["count"] == fixture["expect"]["person1Count"]
     assert graph.get_node("person-1")["revision"] == fixture["expect"]["rollbackRevision"]
+
+
+def test_resource_limits_conformance_fixture():
+    fixture_path = Path(__file__).resolve().parents[2] / "fixtures" / "database-core" / "resource-limits.json"
+    fixture = json.loads(fixture_path.read_text())
+    graph = PolyGraph()
+    graph.set_resource_limits(fixture["limits"])
+    rejected = []
+
+    for candidate in (fixture["payloadNode"], fixture["vectorNode"]):
+        with pytest.raises(ResourceLimitError) as error:
+            graph.add_node(candidate)
+        rejected.append(error.value.limit_name)
+
+    def over_batch_budget(tx):
+        for node in fixture["batchNodes"]:
+            tx.add_node(node)
+
+    with pytest.raises(ResourceLimitError) as error:
+        graph.transaction(over_batch_budget)
+    rejected.append(error.value.limit_name)
+
+    def over_budget(tx):
+        tx.add_node(fixture["transactionNodes"][0])
+        tx.add_node(fixture["transactionNodes"][1])
+
+    with pytest.raises(ResourceLimitError) as error:
+        graph.transaction(over_budget)
+    assert error.value.limit_name == "maxBatchSize"
+    for node_id in fixture["expect"]["absentNodeIds"]:
+        assert graph.get_node(node_id) is None
+
+    graph.transaction(lambda tx: tx.add_node(fixture["afterRollbackNode"]))
+    with pytest.raises(ResourceLimitError) as error:
+        graph.patch_node(fixture["afterRollbackNode"]["id"], set=fixture["oversizedPatch"]["set"])
+    assert error.value.limit_name == fixture["expect"]["patchRejectedLimitName"]
+    assert graph.get_node(fixture["afterRollbackNode"]["id"])["data"] == {}
+    assert rejected == fixture["expect"]["rejectedLimitNames"]
+    for node_id in fixture["expect"]["presentNodeIds"]:
+        assert graph.get_node(node_id) is not None
 
 
 def test_schema_and_unique_index_conformance_fixture():

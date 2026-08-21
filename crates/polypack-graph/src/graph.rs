@@ -215,6 +215,7 @@ pub struct Graph {
 
     warmed: bool,
     transaction_active: bool,
+    transaction_mutation_count: usize,
     transaction_sequence: u64,
     current_transaction_id: Option<String>,
     current_operation_id: Option<String>,
@@ -244,6 +245,7 @@ struct GraphCheckpoint {
     pending_batch_events: Vec<GraphChangeEvent>,
     secondary_indexes: HashMap<String, HashMap<String, HashSet<String>>>,
     warmed: bool,
+    transaction_mutation_count: usize,
 }
 
 impl GraphCheckpoint {
@@ -266,6 +268,7 @@ impl GraphCheckpoint {
             pending_batch_events: graph.pending_batch_events.clone(),
             secondary_indexes: graph.secondary_indexes.clone(),
             warmed: graph.warmed,
+            transaction_mutation_count: graph.transaction_mutation_count,
         }
     }
 
@@ -287,6 +290,7 @@ impl GraphCheckpoint {
         graph.pending_batch_events = self.pending_batch_events;
         graph.secondary_indexes = self.secondary_indexes;
         graph.warmed = self.warmed;
+        graph.transaction_mutation_count = self.transaction_mutation_count;
     }
 }
 
@@ -318,6 +322,7 @@ impl Graph {
             pending_batch_events: Vec::new(),
             warmed: false,
             transaction_active: false,
+            transaction_mutation_count: 0,
             transaction_sequence: 0,
             current_transaction_id: None,
             current_operation_id: None,
@@ -335,6 +340,28 @@ impl Graph {
     /// Report the guarantees declared by the underlying storage adapter.
     pub fn capabilities(&self) -> AdapterCapabilities {
         self.store.capabilities()
+    }
+
+    /// Replace the write-side resource limits for subsequent mutations.
+    /// Limits are intentionally validated at configuration time as positive
+    /// values, matching the TypeScript and Python APIs.
+    pub fn set_resource_limits(&mut self, limits: GraphResourceLimits) -> Result<()> {
+        for (name, value) in [
+            ("maxVectorDimensions", limits.max_vector_dimensions),
+            ("maxNodePayloadBytes", limits.max_node_payload_bytes),
+            ("maxBatchSize", limits.max_batch_size),
+        ] {
+            if value == Some(0) {
+                return Err(PolypackError::InvalidArgument(format!("{name} must be a positive integer")));
+            }
+        }
+        self.config.resource_limits = limits;
+        Ok(())
+    }
+
+    /// Return the active write-side resource limits.
+    pub fn resource_limit_config(&self) -> GraphResourceLimits {
+        self.config.resource_limits.clone()
     }
 
     /// Reject a graph configuration unless the backing adapter declares every
@@ -783,6 +810,7 @@ impl Graph {
     where
         F: FnOnce(&mut Graph) -> Result<T>,
     {
+        self.require_capabilities(AdapterCapabilities { atomic_batches: true, transactions: true, ..Default::default() })?;
         if self.transaction_active {
             return Err(PolypackError::InvalidArgument("nested transactions are not supported".into()));
         }
@@ -791,24 +819,28 @@ impl Graph {
         self.current_transaction_id = Some(format!("tx-{}-{}", now_millis(), self.transaction_sequence));
         self.current_operation_id = Some(operation_id.unwrap_or_else(|| format!("op-{}-{}", now_millis(), self.transaction_sequence)));
         self.transaction_active = true;
+        self.transaction_mutation_count = 0;
         self.start_batch();
         let result = callback(self);
         match result {
             Ok(value) => {
                 if let Err(error) = self.flush().and_then(|_| self.end_batch()) {
                     self.transaction_active = false;
+                    self.transaction_mutation_count = 0;
                     self.current_transaction_id = None;
                     self.current_operation_id = None;
                     checkpoint.restore(self);
                     return Err(error);
                 }
                 self.transaction_active = false;
+                self.transaction_mutation_count = 0;
                 self.current_transaction_id = None;
                 self.current_operation_id = None;
                 Ok(value)
             }
             Err(error) => {
                 self.transaction_active = false;
+                self.transaction_mutation_count = 0;
                 self.current_transaction_id = None;
                 self.current_operation_id = None;
                 checkpoint.restore(self);
@@ -1139,6 +1171,7 @@ impl Graph {
     /// `prepareNode`'s checks (`validate_node` covers id/type/timestamp/
     /// vector-finiteness).
     pub fn add_node(&mut self, node: Node) -> Result<()> {
+        self.reserve_transaction_mutations(1)?;
         self.validate_node_resource_limits(&node)?;
         validate_node(&node)?;
         self.validate_node_schema(&node)?;
@@ -1157,6 +1190,7 @@ impl Graph {
                 return Err(PolypackError::ResourceLimit { name: "maxBatchSize".into(), limit });
             }
         }
+        self.reserve_transaction_mutations(nodes.len())?;
         for n in &nodes {
             self.validate_node_resource_limits(n)?;
             validate_node(n)?;
@@ -1239,6 +1273,7 @@ impl Graph {
         vector: Option<Vec<f64>>,
         activation: Option<NodeActivation>,
     ) -> Result<Option<&Node>> {
+        self.reserve_transaction_mutations(1)?;
         if !self.nodes.contains_key(id) {
             return Ok(None);
         }
@@ -1325,6 +1360,7 @@ impl Graph {
         compare_and_set: serde_json::Map<String, serde_json::Value>,
         expected_revision: Option<u64>,
     ) -> Result<Option<&Node>> {
+        self.reserve_transaction_mutations(1)?;
         let Some(existing) = self.nodes.get(id) else { return Ok(None) };
         if let Some(expected) = expected_revision {
             if existing.revision != expected {
@@ -1386,6 +1422,7 @@ impl Graph {
             revision: existing.revision.saturating_add(1),
             activation: existing.activation.clone(),
         };
+        self.validate_node_resource_limits(&candidate_node)?;
         self.validate_node_schema(&candidate_node)?;
         self.validate_node_indexes(&candidate_node, Some(id))?;
 
@@ -1484,6 +1521,7 @@ impl Graph {
     /// that, like the TS version, this does *not* fire `on_orphan` for
     /// 'shared' targets; only `remove_edges` does that.
     pub fn remove_node(&mut self, id: &str) -> Result<()> {
+        self.reserve_transaction_mutations(1)?;
         let mut visited = HashSet::new();
         self.remove_node_cascade(id, &mut visited)
     }
@@ -1651,6 +1689,7 @@ impl Graph {
         data: Option<serde_json::Map<String, serde_json::Value>>,
         ownership: EdgeOwnership,
     ) -> Result<()> {
+        self.reserve_transaction_mutations(1)?;
         if source.is_empty() || edge_type.is_empty() || target.is_empty() {
             return Err(PolypackError::InvalidArgument(
                 "edge source, type, and target must not be empty".into(),
@@ -1692,6 +1731,7 @@ impl Graph {
         data: Option<serde_json::Map<String, serde_json::Value>>,
         ownership: EdgeOwnership,
     ) -> Result<()> {
+        self.reserve_transaction_mutations(1)?;
         if id.is_empty() || source.is_empty() || edge_type.is_empty() || target.is_empty() {
             return Err(PolypackError::InvalidArgument("edge id, source, type, and target must not be empty".into()));
         }
@@ -1734,6 +1774,7 @@ impl Graph {
         ownership: Option<EdgeOwnership>,
         expected_revision: u64,
     ) -> Result<bool> {
+        self.reserve_transaction_mutations(1)?;
         let Some((source, key)) = self.edges.iter().find_map(|(source, edges)| {
             edges.iter().find_map(|(key, edge)| (edge.id == id).then_some((source.clone(), key.clone())))
         }) else {
@@ -1763,6 +1804,7 @@ impl Graph {
 
     /// Remove exactly one edge by independent ID when its revision matches.
     pub fn remove_edge_if_revision(&mut self, id: &str, expected_revision: u64) -> Result<bool> {
+        self.reserve_transaction_mutations(1)?;
         let Some((source, key, edge)) = self.edges.iter().find_map(|(source, edges)| {
             edges.iter().find_map(|(key, edge)| (edge.id == id).then_some((source.clone(), key.clone(), edge.clone())))
         }) else {
@@ -1882,6 +1924,7 @@ impl Graph {
     /// The owned-edge cascade calls `remove_node`, which handles cycles
     /// (`A -> B -> A`) safely, removing each node only once.
     pub fn remove_edges(&mut self, source: &str, edge_type: Option<&str>, target: Option<&str>) -> Result<()> {
+        self.reserve_transaction_mutations(1)?;
         let Some(edges) = self.edges.get(source) else { return Ok(()) };
         let removed: Vec<EdgeEntry> = edges
             .values()
@@ -2247,6 +2290,23 @@ impl Graph {
 
     // ── internal ──
 
+    /// Reserve logical mutation capacity for the current transaction. The
+    /// reservation happens before validation/mutation, matching the public
+    /// TypeScript transaction API: a failed operation still consumed its
+    /// attempted mutation slot, while rollback restores the prior count.
+    fn reserve_transaction_mutations(&mut self, amount: usize) -> Result<()> {
+        if !self.transaction_active || amount == 0 {
+            return Ok(());
+        }
+        if let Some(limit) = self.config.resource_limits.max_batch_size {
+            if self.transaction_mutation_count.saturating_add(amount) > limit {
+                return Err(PolypackError::ResourceLimit { name: "maxBatchSize".into(), limit });
+            }
+        }
+        self.transaction_mutation_count = self.transaction_mutation_count.saturating_add(amount);
+        Ok(())
+    }
+
     /// Mirrors `PolyGraph.insertNode`: assumes the node has already passed
     /// `validate_node`.
     fn insert_node(&mut self, mut node: Node) {
@@ -2551,6 +2611,48 @@ mod tests {
         oversized_update.insert("value".into(), "updated payload exceeds limit".into());
         assert!(matches!(g.update_node("existing", oversized_update, None, None), Err(PolypackError::ResourceLimit { name, .. }) if name == "maxNodePayloadBytes"));
         assert_eq!(g.get_node("existing").unwrap().data["value"], "ok");
+    }
+
+    #[test]
+    fn resource_limits_can_be_reconfigured_after_open() {
+        let mut g = test_graph();
+        let limits = GraphResourceLimits { max_vector_dimensions: Some(2), max_node_payload_bytes: Some(20), max_batch_size: Some(1) };
+        g.set_resource_limits(limits.clone()).unwrap();
+        assert_eq!(g.resource_limit_config(), limits);
+        assert!(matches!(g.set_resource_limits(GraphResourceLimits { max_batch_size: Some(0), ..Default::default() }), Err(PolypackError::InvalidArgument(_))));
+
+        let mut wide = node("wide");
+        wide.vector = Some(vec![1.0, 2.0, 3.0]);
+        assert!(matches!(g.add_node(wide), Err(PolypackError::ResourceLimit { name, .. }) if name == "maxVectorDimensions"));
+    }
+
+    #[test]
+    fn transaction_resource_limit_rolls_back_and_resets_after_rejection() {
+        let mut g = Graph::open(
+            Box::new(InMemoryStorage::new()),
+            StoreConfig::default(),
+            GraphConfig {
+                resource_limits: GraphResourceLimits { max_batch_size: Some(1), ..Default::default() },
+                ..GraphConfig::default()
+            },
+        )
+        .unwrap();
+
+        let result: Result<()> = g.transaction(|tx| {
+            tx.add_node(node("first"))?;
+            tx.add_node(node("second"))?;
+            Ok(())
+        });
+        assert!(matches!(result, Err(PolypackError::ResourceLimit { name, limit }) if name == "maxBatchSize" && limit == 1));
+        assert!(g.get_node("first").is_none());
+        assert!(g.get_node("second").is_none());
+
+        g.transaction(|tx| {
+            tx.add_node(node("after-rollback"))?;
+            Ok(())
+        })
+        .unwrap();
+        assert!(g.get_node("after-rollback").is_some());
     }
 
     #[test]

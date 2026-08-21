@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { PolyGraph, ResourceLimitError } from '../src/index'
+import fixture from '../fixtures/database-core/resource-limits.json'
 
 const node = (id: string, data: Record<string, unknown> = {}, vector?: number[]) => ({
   id,
@@ -11,6 +12,39 @@ const node = (id: string, data: Record<string, unknown> = {}, vector?: number[])
 })
 
 describe('graph write resource limits', () => {
+  it('matches the shared resource-limit fixture', async () => {
+    const graph = new PolyGraph()
+    graph.setResourceLimits(fixture.limits)
+
+    const rejected: string[] = []
+    for (const candidate of [fixture.payloadNode, fixture.vectorNode]) {
+      try {
+        graph.addNode(node(candidate.id, candidate.data, candidate.vector))
+      } catch (error) {
+        expect(error).toBeInstanceOf(ResourceLimitError)
+        rejected.push((error as ResourceLimitError).limitName)
+      }
+    }
+    try {
+      graph.addNodes(fixture.batchNodes.map(candidate => node(candidate.id, candidate.data)))
+    } catch (error) {
+      expect(error).toBeInstanceOf(ResourceLimitError)
+      rejected.push((error as ResourceLimitError).limitName)
+    }
+
+    await expect(graph.transaction(tx => {
+      tx.addNode(node(fixture.transactionNodes[0].id, fixture.transactionNodes[0].data))
+      tx.addNode(node(fixture.transactionNodes[1].id, fixture.transactionNodes[1].data))
+    })).rejects.toMatchObject({ limitName: 'maxBatchSize' })
+    for (const id of fixture.expect.absentNodeIds) expect(graph.getNode(id)).toBeUndefined()
+
+    await graph.transaction(tx => tx.addNode(node(fixture.afterRollbackNode.id, fixture.afterRollbackNode.data)))
+    expect(() => graph.patchNode(fixture.afterRollbackNode.id, fixture.oversizedPatch)).toThrow(ResourceLimitError)
+    expect(graph.getNode(fixture.afterRollbackNode.id)?.data).toEqual({})
+    expect(rejected).toEqual(fixture.expect.rejectedLimitNames)
+    for (const id of fixture.expect.presentNodeIds) expect(graph.getNode(id)).toBeDefined()
+  })
+
   it('rejects oversized payloads and vectors before mutation', () => {
     const graph = new PolyGraph()
     graph.setResourceLimits({ maxNodePayloadBytes: 20, maxVectorDimensions: 2 })

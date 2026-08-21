@@ -1231,6 +1231,17 @@ class PolyGraph:
         if validator is not None and validator(_copy_node(node)) is False:
             raise PolypackValueError(f"node validator rejected {node['id']}")
 
+    def _validate_node_resource_limits(self, node: Node) -> None:
+        max_dimensions = self._resource_limits.get("maxVectorDimensions")
+        vector = node.get("vector")
+        if max_dimensions is not None and vector is not None and len(vector) > max_dimensions:
+            raise ResourceLimitError("maxVectorDimensions", max_dimensions)
+        max_payload = self._resource_limits.get("maxNodePayloadBytes")
+        if max_payload is not None:
+            payload = json.dumps(node.get("data") or {}, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+            if len(payload) > max_payload:
+                raise ResourceLimitError("maxNodePayloadBytes", max_payload)
+
     def _validate_edge_schema(self, edge: dict) -> None:
         definition = self._edge_type_definitions.get(edge["type"])
         if not definition:
@@ -1334,6 +1345,7 @@ class PolyGraph:
             stored["vector"] = _validate_vector(node["vector"])
         else:
             stored["vector"] = None
+        self._validate_node_resource_limits(stored)
         self._validate_node_schema(stored)
         self._validate_index_candidate(stored)
         if previous is not None:
@@ -1373,6 +1385,7 @@ class PolyGraph:
             candidate["activation"] = _validate_activation(activation)
         candidate["updatedAt"] = int(time.time() * 1000)
         candidate["revision"] = int(node.get("revision", 0)) + 1
+        self._validate_node_resource_limits(candidate)
         self._validate_node_schema(candidate)
         self._validate_index_candidate(candidate)
         self._remove_secondary_index_entry(node)
@@ -1525,6 +1538,7 @@ class PolyGraph:
         candidate_node["data"] = candidate
         candidate_node["updatedAt"] = int(time.time() * 1000)
         candidate_node["revision"] = actual + 1
+        self._validate_node_resource_limits(candidate_node)
         self._validate_node_schema(candidate_node)
         node.clear()
         node.update(candidate_node)
