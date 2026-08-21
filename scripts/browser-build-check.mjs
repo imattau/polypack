@@ -44,6 +44,7 @@ try {
     format: 'esm',
     write: false,
     outdir: '/tmp/polypack-browser-check',
+    logLevel: 'silent',
   })
   console.error('Expected the node persistence subpath to fail a browser bundle; it did not')
   process.exit(1)
