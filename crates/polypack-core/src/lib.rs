@@ -22,7 +22,7 @@ pub mod vector;
 
 pub use activation::{
     activation_score_of, clamp01, decay_activation_state, decay_factor, merge_activation,
-    reinforce_activation, ActivationCurves, DEFAULT_ACTIVATION,
+    reinforce_activation, suppress_activation, ActivationCurves, DEFAULT_ACTIVATION,
 };
 pub use error::{PolypackError, Result};
 pub use hnsw::{HnswConfig, HnswIndex};

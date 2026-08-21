@@ -807,6 +807,15 @@ pub struct NodeActivation {
   pub importance: f64,
   pub reinforcement_count: f64,
   pub last_meaningful_activation: i64,
+  /// Suppression, subtracted from `score` at read time only. Absent is equivalent to 0.
+  pub inhibition: Option<f64>,
+  /// Epoch-ms anchor for `inhibition`'s decay. Absent iff `inhibition` is absent.
+  pub last_inhibited_at: Option<i64>,
+  /// Per-context activation (`{ [context]: { score, lastMeaningfulActivation } }`),
+  /// additional to (not a replacement for) the global `score` above. Passed
+  /// through as plain JSON — no dedicated napi type — so it round-trips
+  /// whatever shape `merge_activation`/`reinforce_activation` produce.
+  pub context: Option<serde_json::Value>,
 }
 
 fn to_napi_activation(a: &CoreNodeActivation) -> NodeActivation {
@@ -815,6 +824,9 @@ fn to_napi_activation(a: &CoreNodeActivation) -> NodeActivation {
     importance: a.importance,
     reinforcement_count: a.reinforcement_count as f64,
     last_meaningful_activation: a.last_meaningful_activation,
+    inhibition: a.inhibition,
+    last_inhibited_at: a.last_inhibited_at,
+    context: a.context.as_ref().map(|c| serde_json::to_value(c).expect("context serializes")),
   }
 }
 
@@ -824,7 +836,9 @@ fn from_napi_activation(a: &NodeActivation) -> CoreNodeActivation {
     importance: a.importance,
     reinforcement_count: a.reinforcement_count as u64,
     last_meaningful_activation: a.last_meaningful_activation,
-    ..Default::default()
+    inhibition: a.inhibition,
+    last_inhibited_at: a.last_inhibited_at,
+    context: a.context.as_ref().and_then(|v| serde_json::from_value(v.clone()).ok()),
   }
 }
 
@@ -849,15 +863,32 @@ pub fn merge_activation(existing: NodeActivation, incoming: NodeActivation, now:
   ))
 }
 
-/// Apply a reinforcement delta to a durable activation record.
+/// Apply a reinforcement delta to a durable activation record. When `context`
+/// is given, the same delta additionally reinforces `activation.context[context]`
+/// — an independently-decaying, additional lens, not a replacement for the
+/// global score.
 #[napi]
-pub fn reinforce_activation(previous: Option<NodeActivation>, delta: f64, now: i64) -> NodeActivation {
+pub fn reinforce_activation(previous: Option<NodeActivation>, delta: f64, now: i64, context: Option<String>) -> NodeActivation {
   to_napi_activation(&polypack_core::reinforce_activation(
     previous.as_ref().map(from_napi_activation).as_ref(),
     delta,
     now,
     &polypack_core::DEFAULT_ACTIVATION,
-    None,
+    context.as_deref(),
+  ))
+}
+
+/// Apply a suppression delta to a durable activation record's `inhibition`
+/// (mirrors `reinforce_activation` but for the inhibition axis, which decays
+/// on its own, shorter-by-default half-life). A negative `delta` releases
+/// suppression.
+#[napi]
+pub fn suppress_activation(previous: Option<NodeActivation>, delta: f64, now: i64) -> NodeActivation {
+  to_napi_activation(&polypack_core::suppress_activation(
+    previous.as_ref().map(from_napi_activation).as_ref(),
+    delta,
+    now,
+    polypack_core::DEFAULT_ACTIVATION.inhibition_half_life_ms,
   ))
 }
 

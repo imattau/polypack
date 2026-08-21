@@ -25,6 +25,12 @@ export interface NativeNodeActivation {
   importance: number
   reinforcementCount: number
   lastMeaningfulActivation: number
+  /** Suppression, subtracted from `score` at read time only. Absent is equivalent to 0. */
+  inhibition?: number
+  /** Epoch-ms anchor for `inhibition`'s decay. Absent iff `inhibition` is absent. */
+  lastInhibitedAt?: number
+  /** Per-context activation, additional to (not a replacement for) the global `score` above. */
+  context?: Record<string, { score: number; lastMeaningfulActivation: number }>
 }
 
 export interface EngineInfo {
@@ -83,6 +89,12 @@ export interface NativeBinding {
     now?: number,
   ): NativeNodeActivation
   reinforceActivation(
+    previous: NativeNodeActivation | undefined,
+    delta: number,
+    now: number,
+    context?: string,
+  ): NativeNodeActivation
+  suppressActivation(
     previous: NativeNodeActivation | undefined,
     delta: number,
     now: number,

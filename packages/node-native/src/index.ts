@@ -575,6 +575,9 @@ export interface NodeActivationLike {
   importance: number
   reinforcementCount: number
   lastMeaningfulActivation: number
+  inhibition?: number
+  lastInhibitedAt?: number
+  context?: Record<string, { score: number; lastMeaningfulActivation: number }>
 }
 
 function toNativeActivation(a: NodeActivationLike): NativeNodeActivation {
@@ -583,6 +586,9 @@ function toNativeActivation(a: NodeActivationLike): NativeNodeActivation {
     importance: a.importance,
     reinforcementCount: a.reinforcementCount,
     lastMeaningfulActivation: a.lastMeaningfulActivation,
+    inhibition: a.inhibition,
+    lastInhibitedAt: a.lastInhibitedAt,
+    context: a.context,
   }
 }
 
@@ -602,15 +608,38 @@ export function mergeActivation(
   return callNative(() => native.mergeActivation(toNativeActivation(existing), toNativeActivation(incoming), now))
 }
 
-/** Apply a reinforcement delta to a durable activation record. */
+/**
+ * Apply a reinforcement delta to a durable activation record. When `context`
+ * is given, the same delta additionally reinforces `activation.context[context]`
+ * — an independently-decaying, additional lens, not a replacement for the
+ * global score.
+ */
 export function reinforceActivation(
+  previous: NodeActivationLike | undefined,
+  delta: number,
+  now: number,
+  context?: string,
+): NativeNodeActivation {
+  assertAvailable()
+  return callNative(() =>
+    native.reinforceActivation(previous ? toNativeActivation(previous) : undefined, delta, now, context)
+  )
+}
+
+/**
+ * Apply a suppression delta to a durable activation record's `inhibition`
+ * (mirrors `reinforceActivation` but for the inhibition axis, which decays on
+ * its own, shorter-by-default half-life). A negative `delta` releases
+ * suppression.
+ */
+export function suppressActivation(
   previous: NodeActivationLike | undefined,
   delta: number,
   now: number,
 ): NativeNodeActivation {
   assertAvailable()
   return callNative(() =>
-    native.reinforceActivation(previous ? toNativeActivation(previous) : undefined, delta, now)
+    native.suppressActivation(previous ? toNativeActivation(previous) : undefined, delta, now)
   )
 }
 
