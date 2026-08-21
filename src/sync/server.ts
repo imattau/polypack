@@ -39,6 +39,7 @@ export class SyncServer {
   private readonly options: SyncServerOptions & { protocolVersion: number; maxOps: number; maxBatchOps: number; maxPendingOps: number }
   private readyPromise: Promise<void> | null = null
   private durableQueue: Promise<void> = Promise.resolve()
+  private durableErrors: unknown[] = []
   private pendingOps = 0
   onOp?: (op: SyncOp) => void
 
@@ -180,7 +181,17 @@ export class SyncServer {
           this.pendingOps -= msg.ops.length
         }
       })
-      this.durableQueue = run.then(() => undefined, () => undefined)
+      this.durableQueue = run.catch(error => {
+        this.durableErrors.push(error)
+        sender.send({
+          type: 'ack',
+          clientId: msg.clientId,
+          fromSeq: msg.fromSeq,
+          ops: [],
+          protocolVersion: this.options.protocolVersion,
+          errors: [{ code: 'persistence_error', message: error instanceof Error ? error.message : String(error) }],
+        })
+      })
       return
     }
     this.processInMemoryDelta(msg, sender, errors)
@@ -283,6 +294,8 @@ export class SyncServer {
   async flush(): Promise<void> {
     await this.ready()
     await this.durableQueue
+    const error = this.durableErrors.shift()
+    if (error !== undefined) throw error
   }
 
   /** Inspect cursor retention and deduplication state for accepted operations. */

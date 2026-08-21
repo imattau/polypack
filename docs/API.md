@@ -536,8 +536,11 @@ payloads** — activation is accumulated knowledge, not last-write-wins data.
   durably append the server history. `maxBatchOps` bounds an incoming envelope
   and `maxPendingOps` applies back-pressure to the durable queue. A rejected
   envelope receives an `ack` with `pending_too_large`; retry it after the queue
-  drains. `await server.flush()` waits for all durable submissions accepted so
-  far to reach the operation log. `addClient(handle)` returns that client's
+  drains. A storage failure returns a `persistence_error` acknowledgement and
+  causes `await server.flush()` to reject with the underlying error, so callers
+  can retry after repairing the log. `await server.flush()` waits for all
+  durable submissions accepted so far to reach the operation log.
+  `addClient(handle)` returns that client's
   incoming-message handler, `removeClient(handle)` unregisters it, and `ops`
   exposes the received log. The server deduplicates operations by client and
   sequence, operation, and transaction identity, acknowledges both first-time

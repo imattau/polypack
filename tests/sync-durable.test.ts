@@ -171,6 +171,81 @@ describe('durable sync operation logs', () => {
     expect(sent).toHaveLength(2)
     expect(sent[1]).toMatchObject({ clientId: 'client' })
   })
+
+  it('does not persist or broadcast a rejected transaction group', async () => {
+    const io = new MemoryFileIO()
+    const sent: SyncMessage[] = []
+    const server = new SyncServer({
+      operationLog: new FileSyncOperationLog(io),
+      authorize: operation => operation.payload.allowed === true,
+    })
+    const senderMessages: SyncMessage[] = []
+    const receiverMessages: SyncMessage[] = []
+    const receive = server.addClient({ clientId: 'sender', send: message => senderMessages.push(message) })
+    server.addClient({ clientId: 'receiver', send: message => receiverMessages.push(message) })
+    const transaction = [
+      { ...op(1), clientId: 'sender', transactionId: 'tx-rejected', payload: { allowed: true } },
+      { ...op(2), clientId: 'sender', operationId: 'op-rejected', transactionId: 'tx-rejected', payload: { allowed: false } },
+    ]
+
+    receive(message(transaction))
+    await server.flush()
+
+    expect(senderMessages[0]).toMatchObject({ type: 'ack', errors: [{ code: 'unauthorized' }] })
+    expect(receiverMessages).toHaveLength(0)
+    expect(server.cursor).toBe(0)
+    await expect(new FileSyncOperationLog(io).load()).resolves.toMatchObject({ baseCursor: 0, ops: [] })
+  })
+
+  it('persists and broadcasts an accepted transaction group as one durable batch', async () => {
+    const io = new MemoryFileIO()
+    let appendBatchCalls = 0
+    const log = new FileSyncOperationLog(io)
+    const durableLog = {
+      load: () => log.load(),
+      append: (operation: Parameters<typeof log.append>[0]) => log.append(operation),
+      appendBatch: async (operations: Parameters<NonNullable<typeof log.appendBatch>>[0]) => {
+        appendBatchCalls++
+        await log.appendBatch(operations)
+      },
+      compact: (cursor: number) => log.compact(cursor),
+      stats: () => log.stats(),
+    }
+    const server = new SyncServer({ operationLog: durableLog })
+    const receiverMessages: SyncMessage[] = []
+    const receive = server.addClient({ clientId: 'sender', send: () => undefined })
+    server.addClient({ clientId: 'receiver', send: message => receiverMessages.push(message) })
+    const transaction = [
+      { ...op(1), clientId: 'sender', transactionId: 'tx-accepted', payload: { id: 'one' } },
+      { ...op(2), clientId: 'sender', transactionId: 'tx-accepted', payload: { id: 'two' } },
+    ]
+
+    receive(message(transaction))
+    await server.flush()
+
+    expect(appendBatchCalls).toBe(1)
+    expect(server.cursor).toBe(2)
+    expect(receiverMessages[0]).toMatchObject({ type: 'delta', ops: transaction })
+    await expect(new FileSyncOperationLog(io).load()).resolves.toMatchObject({ ops: transaction })
+  })
+
+  it('surfaces durable append failures through flush', async () => {
+    const error = new Error('durable append failed')
+    const sent: SyncMessage[] = []
+    const server = new SyncServer({
+      operationLog: {
+        load: async () => ({ baseCursor: 0, ops: [] }),
+        append: async () => { throw error },
+        appendBatch: async () => { throw error },
+      },
+    })
+    const receive = server.addClient({ clientId: 'sender', send: message => sent.push(message) })
+    receive(message([op(1)]))
+
+    await expect(server.flush()).rejects.toBe(error)
+    expect(server.cursor).toBe(0)
+    expect(sent[0]).toMatchObject({ type: 'ack', fromSeq: 0, errors: [{ code: 'persistence_error', message: error.message }] })
+  })
 })
 
 describe('durable sync client state', () => {

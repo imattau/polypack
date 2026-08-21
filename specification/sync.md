@@ -18,6 +18,13 @@ pages advance by the global server cursor, even when a subscription filter
 removes operations from the page, so filtered clients cannot mistake hidden
 operations for an unadvanced cursor.
 
+Durable append or compaction failures must not be acknowledged as successful:
+the server sends a `persistence_error` acknowledgement and makes its durable
+flush operation reject with the underlying error. An append failure leaves the
+operations out of the accepted cursor; a compaction failure may follow an
+already-committed append, so callers must inspect the cursor before retrying.
+Clients may retry after the storage failure is repaired.
+
 When authorization or conflict hooks are configured, all operations carrying
 one transaction ID are validated as a group. If any member is rejected, no
 member is persisted or broadcast. Durable operation logs should implement
