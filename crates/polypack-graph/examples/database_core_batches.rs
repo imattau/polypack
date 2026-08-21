@@ -65,7 +65,7 @@ fn run_case(root: &Path, args: &Args, batch_size: usize) -> serde_json::Value {
         graph.add_node(node(i, &mut rng)).unwrap();
         if (i + 1) % batch_size == 0 { graph.flush().unwrap(); }
     }
-    if args.count % batch_size != 0 { graph.flush().unwrap(); }
+    if !args.count.is_multiple_of(batch_size) { graph.flush().unwrap(); }
     let write_ms = start.elapsed().as_secs_f64() * 1000.0;
     let mutations = graph.mutation_log().unwrap().len();
     let before = json!({
