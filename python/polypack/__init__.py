@@ -687,6 +687,34 @@ class DirectoryStorage:
         except FileNotFoundError:
             pass
 
+    def sync(self, name: str) -> None:
+        # Invoked by the Rust `Store` only under `Durability::Fsync`. Mirrors
+        # the Rust `FileStorage::sync`: fsync the named file so its contents
+        # survive a power loss, not just a process crash.
+        try:
+            fd = os.open(self._path(name), os.O_RDONLY)
+        except FileNotFoundError:
+            return
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+
+    def sync_dir(self) -> None:
+        # Best-effort directory fsync so a rename (see `write`) is durable
+        # too; unsupported on some platforms (e.g. Windows), same as Rust's
+        # `FileStorage::sync_dir`.
+        try:
+            fd = os.open(self._dir, os.O_RDONLY)
+        except OSError:
+            return
+        try:
+            os.fsync(fd)
+        except OSError:
+            pass
+        finally:
+            os.close(fd)
+
     def exists(self, name: str) -> bool:
         return self._path(name).exists()
 

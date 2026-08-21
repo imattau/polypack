@@ -145,6 +145,7 @@ class SyncServer:
                 context = {"clientId": sender_id or operation["clientId"], "protocolVersion": self.protocol_version}
                 if self.authorize is not None and not self.authorize(operation, context):
                     group_errors.append({"code": "unauthorized", "message": "operation was not authorized", "operationId": operation.get("operationId")})
+                    continue
                 if self.conflict is not None:
                     result = self.conflict(operation, context)
                     if result is False or isinstance(result, dict) and not result.get("ok"):

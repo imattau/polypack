@@ -340,7 +340,13 @@ export class BinaryStoreAdapter implements PersistenceAdapter {
     this.assertWritable()
     await this.enqueue(async () => {
       await this.ensureLoaded()
-      if (changes.operationId && this.mutationRecords.some(record => record.operationId === changes.operationId)) return
+      if (
+        (changes.operationId || changes.transactionId) &&
+        this.mutationRecords.some(record =>
+          (changes.operationId && record.operationId === changes.operationId) ||
+          (changes.transactionId && record.transactionId === changes.transactionId),
+        )
+      ) return
       const entries: WalEntry[] = []
       if (changes.indexDefinitions) {
         this.indexDefinitions = changes.indexDefinitions.map(index => ({ ...index, fields: [...index.fields] }))

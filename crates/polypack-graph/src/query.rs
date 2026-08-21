@@ -471,7 +471,9 @@ impl<'a> GraphQuery<'a> {
     fn selected_indexes(&self) -> Vec<&IndexDefinition> {
         let mut selected: Vec<&IndexDefinition> = self.indexes.values().filter(|definition| {
             let compatible_type = self.node_types.as_ref().is_none_or(|types| definition.node_type.as_ref().is_none_or(|node_type| types.len() == 1 && types[0] == *node_type));
-            let equality = !definition.fields.is_empty() && definition.fields.iter().all(|field| self.attributes.contains_key(field) || self.attributes.contains_key(field.strip_prefix("data.").unwrap_or(field)));
+            let equality = !definition.fields.is_empty()
+                && definition.fields.iter().all(|field| self.attributes.contains_key(field) || self.attributes.contains_key(field.strip_prefix("data.").unwrap_or(field)))
+                && (!definition.sparse || definition.fields.iter().all(|field| !query_field_value(&self.attributes, field).is_null()));
             let range = definition.fields.len() == 1 && self.attribute_ranges.contains_key(&definition.fields[0]);
             compatible_type && (equality || range)
         }).collect();

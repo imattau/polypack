@@ -73,12 +73,13 @@ pub struct SyncServer {
     ops: Vec<Value>,
     operation_ids: HashSet<String>,
     transaction_ids: HashSet<String>,
+    seen_ops: HashSet<String>,
 }
 
 impl SyncServer {
     pub fn new(protocol_version: u64, max_ops: Option<usize>, max_batch_ops: Option<usize>) -> Result<Self> {
         if protocol_version == 0 || max_ops == Some(0) || max_batch_ops == Some(0) { return Err(PolypackError::InvalidArgument("invalid sync server limits".into())); }
-        Ok(Self { protocol_version, max_ops, max_batch_ops, base_cursor: 0, ops: Vec::new(), operation_ids: HashSet::new(), transaction_ids: HashSet::new() })
+        Ok(Self { protocol_version, max_ops, max_batch_ops, base_cursor: 0, ops: Vec::new(), operation_ids: HashSet::new(), transaction_ids: HashSet::new(), seen_ops: HashSet::new() })
     }
 
     pub fn cursor(&self) -> u64 { self.base_cursor + self.ops.len() as u64 }
@@ -91,9 +92,15 @@ impl SyncServer {
         let mut accepted_transactions = HashSet::new();
         for operation in operations {
             let object = operation.as_object().unwrap();
-            let operation_key = object.get("operationId").and_then(Value::as_str).map(|id| format!("{}:{id}", object["clientId"].as_str().unwrap()));
-            let transaction_key = object.get("transactionId").and_then(Value::as_str).map(|id| format!("{}:{id}", object["clientId"].as_str().unwrap()));
-            if operation_key.as_ref().is_some_and(|key| self.operation_ids.contains(key)) || transaction_key.as_ref().is_some_and(|key| self.transaction_ids.contains(key) && !accepted_transactions.contains(key)) { continue; }
+            let client_id = object["clientId"].as_str().unwrap();
+            let seq_key = format!("{client_id}:{}", object["seq"].as_u64().unwrap());
+            let operation_key = object.get("operationId").and_then(Value::as_str).map(|id| format!("{client_id}:{id}"));
+            let transaction_key = object.get("transactionId").and_then(Value::as_str).map(|id| format!("{client_id}:{id}"));
+            if self.seen_ops.contains(&seq_key)
+                || operation_key.as_ref().is_some_and(|key| self.operation_ids.contains(key))
+                || transaction_key.as_ref().is_some_and(|key| self.transaction_ids.contains(key) && !accepted_transactions.contains(key))
+            { continue; }
+            self.seen_ops.insert(seq_key);
             if let Some(key) = &operation_key { self.operation_ids.insert(key.clone()); }
             if let Some(key) = &transaction_key { self.transaction_ids.insert(key.clone()); accepted_transactions.insert(key.clone()); }
             accepted.push(operation.clone());
@@ -102,7 +109,15 @@ impl SyncServer {
         if let Some(limit) = self.max_ops {
             if self.ops.len() > limit {
                 let removed = self.ops.len() - limit;
-                self.ops.drain(..removed);
+                // Only the seq-keyed entry is bounded by the ring buffer;
+                // operationId/transactionId identities are retained forever
+                // so a delayed retry after compaction is still deduped
+                // instead of being re-accepted. Matches the TS/Python servers.
+                for op in self.ops.drain(..removed) {
+                    let object = op.as_object().unwrap();
+                    let key = format!("{}:{}", object["clientId"].as_str().unwrap(), object["seq"].as_u64().unwrap());
+                    self.seen_ops.remove(&key);
+                }
                 self.base_cursor += removed as u64;
             }
         }

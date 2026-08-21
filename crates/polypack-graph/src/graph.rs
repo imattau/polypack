@@ -928,6 +928,9 @@ impl Graph {
         self.node_to_edge.clear();
         let all_edges = self.store.edges_snapshot()?;
         for (id, edge) in all_edges {
+            if id.is_empty() {
+                return Err(PolypackError::CorruptData("invalid persisted edge id: empty".into()));
+            }
             let legacy_key = format!("{}::{}", edge.edge_type, edge.target);
             let key = if id == edge_id(&edge.source, &edge.edge_type, &edge.target) { legacy_key } else { id.clone() };
             let (ownership, data) = decode_ownership(edge.data);

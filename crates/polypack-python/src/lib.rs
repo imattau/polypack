@@ -425,6 +425,30 @@ impl Storage for PythonStorage {
         })
     }
 
+    fn sync(&self, name: &str) -> polypack_core::Result<()> {
+        Python::with_gil(|py| {
+            let obj = self.0.bind(py);
+            if !obj.hasattr("sync").unwrap_or(false) {
+                return Ok(());
+            }
+            obj.call_method1("sync", (name,))
+                .map_err(|e| CoreError::Storage(e.to_string()))?;
+            Ok(())
+        })
+    }
+
+    fn sync_dir(&self) -> polypack_core::Result<()> {
+        Python::with_gil(|py| {
+            let obj = self.0.bind(py);
+            if !obj.hasattr("sync_dir").unwrap_or(false) {
+                return Ok(());
+            }
+            obj.call_method0("sync_dir")
+                .map_err(|e| CoreError::Storage(e.to_string()))?;
+            Ok(())
+        })
+    }
+
     fn capabilities(&self) -> AdapterCapabilities {
         Python::with_gil(|py| {
             let obj = self.0.bind(py);

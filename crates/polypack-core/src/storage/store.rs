@@ -196,7 +196,7 @@ fn matches_node(node: &Node, query: &NodeQuery) -> bool {
     }
     if let Some(ranges) = &query.attribute_ranges {
         for (key, range) in ranges {
-            let Some(value) = node.data.get(key).and_then(|v| v.as_f64()) else {
+            let Some(value) = node_field(node, key).as_f64() else {
                 return false;
             };
             if let Some(above) = range.above {
@@ -1388,22 +1388,19 @@ impl Store {
     /// paths mirroring the TypeScript adapter's `countNodes`.
     pub fn count_nodes(&mut self, query: &NodeQuery) -> Result<usize> {
         self.ensure_loaded()?;
-        let no_filters =
-            query.node_types.is_none() && query.attributes.is_none() && query.attribute_ranges.is_none();
-        let candidate_count = query.candidate_ids.as_ref().map_or(self.nodes.len(), Vec::len);
+        let candidate_ids: Option<Vec<String>> = match &query.candidate_ids {
+            Some(ids) => Some(ids.clone()),
+            None => self.indexed_ids(query).or_else(|| self.type_only_ids(query)).map(|ids| ids.into_iter().collect()),
+        };
+        let candidate_count = candidate_ids.as_ref().map_or(self.nodes.len(), Vec::len);
         if let Some(limit) = query.max_nodes_visited {
             if candidate_count > limit {
                 return Err(PolypackError::ResourceLimit { name: "maxNodesVisited".into(), limit });
             }
         }
-        let count = if let Some(ids) = &query.candidate_ids {
-            ids.iter().filter_map(|id| self.nodes.get(id)).filter(|n| matches_node(n, query)).count()
-        } else if no_filters {
-            self.nodes.len()
-        } else if let Some(ids) = self.type_only_ids(query) {
-            ids.len()
-        } else {
-            self.nodes.values().filter(|n| matches_node(n, query)).count()
+        let count = match &candidate_ids {
+            Some(ids) => ids.iter().filter_map(|id| self.nodes.get(id)).filter(|n| matches_node(n, query)).count(),
+            None => self.nodes.values().filter(|n| matches_node(n, query)).count(),
         };
         if let Some(limit) = query.max_result_size {
             if count > limit {
