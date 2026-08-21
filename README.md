@@ -73,6 +73,11 @@ migration notes.
 - **Adaptive memory** — activation model: durable, decayed relevance (`score`/`importance`) per node, spreading activation over edges, semantic pulses, and a live working-memory set — synced additively
 - **Real-time sync** — acknowledgements, retry, deduplication, reconnect recovery, and echo suppression
 
+For scale limits and reproducible 100K/1M/10M-node characterization, see the
+[scale benchmark](benchmarks/scale-characterization.md). Its default vector
+scope is capped at 100K for practical 10M-node storage and graph runs; full
+vector indexing is an explicit opt-in.
+
 ## Quick start
 
 ```typescript

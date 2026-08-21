@@ -1,0 +1,59 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-08-21T22:15:18.662Z",
+  "results": [
+    {
+      "count": 100000,
+      "hotCacheMax": 50000,
+      "vectorCount": 100000,
+      "vectorScope": "full",
+      "nodeCount": 100000,
+      "memoryAfterSeed": {
+        "heapUsedMB": 202.6549530029297,
+        "rssMB": 454.66015625,
+        "maxRssMB": 489.54296875
+      },
+      "memoryAfterQueries": {
+        "heapUsedMB": 1620.993995666504,
+        "rssMB": 1975.59765625,
+        "maxRssMB": 1975.59765625
+      },
+      "storeBytes": 34210001,
+      "insertMs": 1785.359746,
+      "insertOpsPerSec": 56011.120573343534,
+      "edgeMs": 1.538173999999799,
+      "startupMs": 406.628105,
+      "warmMs": 0.030029000000013184,
+      "mutationCount": 21,
+      "mutationReplayMs": 401.2378370000001,
+      "updateCount": 1000,
+      "updateMs": 0.6197230000002492,
+      "updateOpsPerSec": 1613624.1514347508,
+      "coldQueryMs": {
+        "p50": 8.942842999999812,
+        "p95": 13.767166999999972
+      },
+      "hotQueryMs": {
+        "p50": 2.3249449999998433,
+        "p95": 6.620552999999745
+      },
+      "coldTraversalMs": {
+        "p50": 7.4492089999998825,
+        "p95": 16.956098999999995
+      },
+      "hotTraversalMs": {
+        "p50": 2.192326000000321,
+        "p95": 3.8722530000000006
+      },
+      "vectorBuildMs": 15822.368499,
+      "exactVectorMs": {
+        "p50": 9.635609999997541,
+        "p95": 12.801966999999422
+      },
+      "hnswVectorMs": {
+        "p50": 0.09881599999789614,
+        "p95": 0.17794899999717018
+      }
+    }
+  ]
+}
