@@ -3,7 +3,7 @@
 All notable changes to this project are documented here. This project follows
 [Semantic Versioning](https://semver.org/).
 
-## [3.0.1] - 2026-08-21
+## [3.0.1] - Unreleased
 
 ### Fixed
 
@@ -28,7 +28,7 @@ All notable changes to this project are documented here. This project follows
 - Python's `SyncServer.receive` stops evaluating `conflict()` for an
   operation `authorize()` already rejected, matching the TypeScript server.
 
-## [3.0.0] - Unreleased
+## [3.0.0] - 2026-08-21
 
 ### Added
 

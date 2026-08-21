@@ -4,7 +4,11 @@
 [![GitHub release](https://img.shields.io/github/v/release/imattau/polypack?logo=github)](https://github.com/imattau/polypack/releases/latest)
 [![CI](https://github.com/imattau/polypack/actions/workflows/ci.yml/badge.svg)](https://github.com/imattau/polypack/actions/workflows/ci.yml)
 
-Generic property graph engine with vector similarity search, edge ownership semantics, relational queries, and real-time sync. Runs in Node.js and the browser with pluggable persistence (in-memory, filesystem, or OPFS).
+Polypack is an embedded graph and vector database for adaptive, local-first
+applications. It combines property relationships, semantic search, persistent
+activation, working-memory primitives, and real-time synchronisation across
+TypeScript, Python, and Rust. It runs in Node.js and the browser with pluggable
+persistence (in-memory, filesystem, or OPFS).
 
 ## Install
 
@@ -36,8 +40,9 @@ cargo add polypack-core
   is the portable Rust core (property graph, vector search, persistence)
   underlying the TypeScript native addon and the Python bindings.
 - **GitHub releases:** [release notes, source archives, and tags](https://github.com/imattau/polypack/releases)
-  are published from the repository. The current source release is
-  [`v3.0.0`](https://github.com/imattau/polypack/releases/tag/v3.0.0).
+  are published from the repository. The latest GitHub release is
+  [`v3.0.0`](https://github.com/imattau/polypack/releases/tag/v3.0.0); the
+  current coordinated source version is `3.0.1`.
 
 Stable GitHub releases run the complete test, build, export, and package checks
 before the corresponding packages are submitted to npm, PyPI, and crates.io

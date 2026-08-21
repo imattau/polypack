@@ -4,15 +4,15 @@ Release rules from the multi-language roadmap (POLYPACK_RUST_PYTHON_PLAN §9).
 
 ## Version coordination
 
-As of `2.4.2`, every package in the repo — the TypeScript package, the native
+Every package in the repo — the TypeScript package, the native
 stack, and the Python wheel — shares a single version number:
 
 | Package | Version (current) |
 |---|---|
-| `@0xx0lostcause0xx0/polypack` (TypeScript) | `2.5.0` |
-| `polypack-core` crate (`crates/polypack-core`) | `2.5.0` |
-| `@0xx0lostcause0xx0/polypack-native` + per-platform packages | `2.5.0` |
-| `polypack-db` Python wheel | `2.5.0` |
+| `@0xx0lostcause0xx0/polypack` (TypeScript) | `3.0.1` |
+| `polypack-core` crate (`crates/polypack-core`) | `3.0.1` |
+| `@0xx0lostcause0xx0/polypack-native` + per-platform packages | `3.0.1` |
+| `polypack-db` Python wheel | `3.0.1` |
 
 Bump all of them together for every release, even if only one language's code
 changed — registries need a fresh version to re-publish, and drift between
