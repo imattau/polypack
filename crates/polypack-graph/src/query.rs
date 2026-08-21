@@ -824,7 +824,7 @@ mod tests {
         for (k, v) in data {
             map.insert((*k).to_string(), v.clone());
         }
-        Node { id: id.to_string(), node_type: node_type.to_string(), data: map, vector: None, inserted_at: 1, updated_at: 1, revision: 0, activation: None }
+        Node { id: id.to_string(), node_type: node_type.to_string(), data: map, vector: None, inserted_at: 1, updated_at: 1, revision: 0, activation: None, ..Default::default() }
     }
 
     struct Fixture {

@@ -114,7 +114,7 @@ mod tests {
     use super::*;
 
     fn node(id: &str) -> Node {
-        Node { id: id.into(), node_type: "record".into(), data: Default::default(), vector: None, inserted_at: 0, updated_at: 0, revision: 0, activation: None }
+        Node { id: id.into(), node_type: "record".into(), data: Default::default(), vector: None, inserted_at: 0, updated_at: 0, revision: 0, activation: None, ..Default::default() }
     }
 
     #[test]

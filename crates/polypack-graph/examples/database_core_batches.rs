@@ -46,7 +46,7 @@ fn node(i: usize, rng: &mut Rng) -> Node {
     data.insert("idx".into(), json!(i));
     data.insert("value".into(), json!(rng.next()));
     data.insert("tag".into(), json!(format!("tag_{}", i % 50)));
-    Node { id: format!("n{i}"), node_type: ["user", "post", "comment"][i % 3].into(), data, vector: None, inserted_at: i as i64, updated_at: i as i64, revision: 0, activation: None }
+    Node { id: format!("n{i}"), node_type: ["user", "post", "comment"][i % 3].into(), data, vector: None, inserted_at: i as i64, updated_at: i as i64, revision: 0, activation: None, ..Default::default() }
 }
 
 fn bytes(dir: &Path, name: &str) -> u64 {

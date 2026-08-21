@@ -1491,6 +1491,7 @@ mod tests {
             updated_at: 1,
             revision: 0,
             activation: None,
+            ..Default::default()
         }
     }
 
@@ -1637,6 +1638,7 @@ mod tests {
             updated_at: 1,
             revision: 0,
             activation: None,
+            ..Default::default()
         }
     }
 
@@ -1661,8 +1663,8 @@ mod tests {
                 inserted_at: 1,
                 updated_at: 1,
                 revision: 0,
-                activation: None,
-            }],
+                activation: None, ..Default::default()
+}],
             ..Default::default()
         })
         .unwrap();
@@ -1739,8 +1741,10 @@ mod tests {
             sparse: false,
         }).unwrap();
         s.apply(&ChangeBatch { put_nodes: vec![
-            Node { data: serde_json::json!({"isbn": "111"}).as_object().unwrap().clone(), ..book("a", "fiction", 1.0) },
-            Node { data: serde_json::json!({"isbn": "222"}).as_object().unwrap().clone(), ..book("b", "history", 2.0) },
+            Node { data: serde_json::json!({"isbn": "111"}).as_object().unwrap().clone(), ..book("a", "fiction", 1.0)
+},
+            Node { data: serde_json::json!({"isbn": "222"}).as_object().unwrap().clone(), ..book("b", "history", 2.0)
+},
         ], ..Default::default() }).unwrap();
         let query = NodeQuery {
             node_types: Some(vec!["book".into()]),
@@ -1748,7 +1752,8 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(s.query_nodes(&query).unwrap().iter().map(|node| node.id.as_str()).collect::<Vec<_>>(), vec!["b"]);
-        let duplicate = ChangeBatch { put_nodes: vec![Node { data: serde_json::json!({"isbn": "111"}).as_object().unwrap().clone(), ..book("c", "science", 3.0) }], ..Default::default() };
+        let duplicate = ChangeBatch { put_nodes: vec![Node { data: serde_json::json!({"isbn": "111"}).as_object().unwrap().clone(), ..book("c", "science", 3.0)
+}], ..Default::default() };
         assert!(matches!(s.apply(&duplicate), Err(PolypackError::InvalidArgument(message)) if message.contains("unique index")));
         assert_eq!(s.node_count().unwrap(), 2);
 
@@ -1775,16 +1780,19 @@ mod tests {
             data_types: HashMap::new(),
             cardinality: Some("many-to-many".into()),
         }).unwrap();
-        let invalid = ChangeBatch { put_nodes: vec![Node { id: "p1".into(), node_type: "person".into(), data: serde_json::json!({"age": 1}).as_object().unwrap().clone(), ..book("p1", "person", 0.0) }], ..Default::default() };
+        let invalid = ChangeBatch { put_nodes: vec![Node { id: "p1".into(), node_type: "person".into(), data: serde_json::json!({"age": 1}).as_object().unwrap().clone(), ..book("p1", "person", 0.0)
+}], ..Default::default() };
         assert!(matches!(s.apply(&invalid), Err(PolypackError::InvalidArgument(message)) if message.contains("required field name")));
         assert!(storage.lock().unwrap().read(WAL_FILE).unwrap().is_none());
-        let valid = ChangeBatch { put_nodes: vec![Node { id: "p1".into(), node_type: "person".into(), data: serde_json::json!({"name": "A", "age": 1}).as_object().unwrap().clone(), ..book("p1", "person", 0.0) }], ..Default::default() };
+        let valid = ChangeBatch { put_nodes: vec![Node { id: "p1".into(), node_type: "person".into(), data: serde_json::json!({"name": "A", "age": 1}).as_object().unwrap().clone(), ..book("p1", "person", 0.0)
+}], ..Default::default() };
         s.apply(&valid).unwrap();
         let invalid_edge = ChangeBatch { put_edges: vec![Edge { id: "e1".into(), source: "p1".into(), target: "missing".into(), edge_type: "PARENT_OF".into(), data: None, created_at: 1, revision: 0 }], ..Default::default() };
         assert!(matches!(s.apply(&invalid_edge), Err(PolypackError::InvalidArgument(message)) if message.contains("target node is missing")));
         s.close().unwrap();
         let mut reopened = Store::new(Box::new(storage), StoreConfig::default());
-        let invalid_after_reload = ChangeBatch { put_nodes: vec![Node { id: "p2".into(), node_type: "person".into(), data: serde_json::json!({"name": "B", "age": "not-an-integer"}).as_object().unwrap().clone(), ..book("p2", "person", 0.0) }], ..Default::default() };
+        let invalid_after_reload = ChangeBatch { put_nodes: vec![Node { id: "p2".into(), node_type: "person".into(), data: serde_json::json!({"name": "B", "age": "not-an-integer"}).as_object().unwrap().clone(), ..book("p2", "person", 0.0)
+}], ..Default::default() };
         assert!(matches!(reopened.apply(&invalid_after_reload), Err(PolypackError::InvalidArgument(message)) if message.contains("must be integer")));
     }
 
@@ -2016,8 +2024,10 @@ mod tests {
     fn type_index_drops_stale_entry_when_a_node_changes_type() {
         let storage = shared();
         let mut s = Store::new(Box::new(storage), StoreConfig::default());
-        let n1 = Node { id: "a".into(), node_type: "draft".into(), data: Default::default(), vector: None, inserted_at: 1, updated_at: 1, revision: 0, activation: None };
-        let n2 = Node { id: "a".into(), node_type: "published".into(), data: Default::default(), vector: None, inserted_at: 2, updated_at: 2, revision: 0, activation: None };
+        let n1 = Node { id: "a".into(), node_type: "draft".into(), data: Default::default(), vector: None, inserted_at: 1, updated_at: 1, revision: 0, activation: None, ..Default::default()
+};
+        let n2 = Node { id: "a".into(), node_type: "published".into(), data: Default::default(), vector: None, inserted_at: 2, updated_at: 2, revision: 0, activation: None, ..Default::default()
+};
         s.apply(&ChangeBatch { put_nodes: vec![n1], ..Default::default() }).unwrap();
         s.apply(&ChangeBatch { put_nodes: vec![n2], ..Default::default() }).unwrap();
         assert_eq!(

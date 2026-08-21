@@ -313,8 +313,8 @@ fn seed(graph: &mut Graph, args: &Args, centroids: &HashMap<&'static str, Vec<f6
         inserted_at: now,
         updated_at: now,
         revision: 0,
-        activation: None,
-    })?;
+        activation: None, ..Default::default()
+})?;
     add_nodes_in_chunks(graph, docs, |i| {
         let topic = TOPICS[(rng.next() * TOPICS.len() as f64) as usize];
         Node {
@@ -328,8 +328,8 @@ fn seed(graph: &mut Graph, args: &Args, centroids: &HashMap<&'static str, Vec<f6
             inserted_at: now,
             updated_at: now,
             revision: 0,
-        activation: None,
-        }
+        activation: None, ..Default::default()
+}
     })?;
     add_nodes_in_chunks(graph, sections, |i| Node {
         id: sid(i),
@@ -339,8 +339,8 @@ fn seed(graph: &mut Graph, args: &Args, centroids: &HashMap<&'static str, Vec<f6
         inserted_at: now,
         updated_at: now,
         revision: 0,
-        activation: None,
-    })?;
+        activation: None, ..Default::default()
+})?;
     add_nodes_in_chunks(graph, chunks, |i| {
         let r = rng.next();
         let quality = if r < 0.33 { "low" } else if r < 0.66 { "mid" } else { "high" };
@@ -355,8 +355,8 @@ fn seed(graph: &mut Graph, args: &Args, centroids: &HashMap<&'static str, Vec<f6
             inserted_at: now,
             updated_at: now,
             revision: 0,
-        activation: None,
-        }
+        activation: None, ..Default::default()
+}
     })?;
     let node_ms = t0.elapsed().as_secs_f64() * 1000.0;
     println!(

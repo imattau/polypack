@@ -17,12 +17,33 @@ use std::collections::{HashMap, HashSet};
 
 use polypack_core::activation::{clamp01, decay_activation_state, decay_factor, DEFAULT_ACTIVATION};
 use polypack_core::vector::cosine;
-use polypack_core::{Node, PolypackError, Result};
+use polypack_core::{MemoryClass, Node, PolypackError, Result};
 
 use crate::graph::{now_millis, Graph};
 
 const HOUR: i64 = 3_600_000;
 const DAY: i64 = 24 * HOUR;
+
+/// Per-class half-life pair for the score/importance decay curves. `None`
+/// leaves that field at the flat `ActivationConfig` default.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ClassHalfLives {
+    pub score_half_life_ms: Option<i64>,
+    pub importance_half_life_ms: Option<i64>,
+}
+
+/// Default per-class decay curves, mirroring the TypeScript
+/// `DEFAULT_CLASS_HALF_LIVES`. Episodic memories fade fastest unless
+/// reinforced; semantic/procedural facts are far more durable; entities
+/// barely decay at all.
+pub fn default_class_half_lives() -> HashMap<MemoryClass, ClassHalfLives> {
+    HashMap::from([
+        (MemoryClass::Episodic, ClassHalfLives { score_half_life_ms: Some(12 * HOUR), importance_half_life_ms: Some(7 * DAY) }),
+        (MemoryClass::Semantic, ClassHalfLives { score_half_life_ms: Some(7 * DAY), importance_half_life_ms: Some(90 * DAY) }),
+        (MemoryClass::Procedural, ClassHalfLives { score_half_life_ms: Some(7 * DAY), importance_half_life_ms: Some(60 * DAY) }),
+        (MemoryClass::Entity, ClassHalfLives { score_half_life_ms: Some(30 * DAY), importance_half_life_ms: Some(i64::MAX) }),
+    ])
+}
 
 /// Tuning knobs for the engine, field-for-field with the TypeScript
 /// `ActivationConfig`.
@@ -51,6 +72,12 @@ pub struct ActivationConfig {
     pub absorb_threshold: f64,
     /// Reinforcement delta applied by `absorb` (`gain * composite`). Default 0.05.
     pub absorb_gain: f64,
+    /// Per-memory-class overrides for the score/importance half-lives. A
+    /// node's class resolves as `node.memory_class` if set, else the owning
+    /// type's registered default; unclassified nodes always use
+    /// `score_half_life_ms`/`importance_half_life_ms` above, unaffected by
+    /// this map. Defaults to [`default_class_half_lives`].
+    pub class_half_lives: HashMap<MemoryClass, ClassHalfLives>,
 }
 
 /// Weights for the composite pulse score.
@@ -82,6 +109,7 @@ impl Default for ActivationConfig {
             pulse_threshold: 0.0,
             absorb_threshold: 0.3,
             absorb_gain: 0.05,
+            class_half_lives: default_class_half_lives(),
         }
     }
 }
@@ -230,16 +258,43 @@ impl<'a> ActivationEngine<'a> {
         self.attention.get(id).copied().unwrap_or(0.0)
     }
 
+    /// Resolve a node's effective score half-life: `memory_class` if set,
+    /// else the owning `node_type`'s registered `NodeTypeDefinition.memory_class`
+    /// default, else no class — `config.score_half_life_ms` unchanged. A
+    /// class with no configured override in `class_half_lives` also falls
+    /// back to the flat default.
+    fn resolve_score_half_life(&self, memory_class: Option<MemoryClass>, node_type: &str) -> i64 {
+        let memory_class = memory_class.or_else(|| {
+            self.graph.node_type_definitions().get(node_type).and_then(|d| d.memory_class)
+        });
+        memory_class
+            .and_then(|class| self.config.class_half_lives.get(&class))
+            .and_then(|half_lives| half_lives.score_half_life_ms)
+            .unwrap_or(self.config.score_half_life_ms)
+    }
+
     /// Durable decayed score plus any transient attention, minus decayed
     /// inhibition. When `context` is given, the context-scoped score is used
     /// instead of the global score (0 if the node has no history in that
     /// context). Inhibition is applied only here, never inside `pulse`'s
-    /// composite, so a suppressed node stays re-evaluable.
+    /// composite, so a suppressed node stays re-evaluable. Decay uses the
+    /// node's resolved memory-class half-life (see
+    /// [`Self::resolve_score_half_life`]) when it has one, else the flat
+    /// config default.
     pub fn effective(&mut self, id: &str, context: Option<&str>) -> f64 {
         let now = now_millis();
         let attention = self.attention.get(id).copied().unwrap_or(0.0);
+        // `get_node` mutably borrows `self.graph`, so the memory-class/type
+        // are read out first (ending that borrow) before resolving the
+        // half-life against `self.graph.node_type_definitions()`.
+        let Some((memory_class, node_type)) =
+            self.graph.get_node(id).map(|n| (n.memory_class, n.node_type.clone()))
+        else {
+            return 0.0;
+        };
+        let score_half_life_ms = self.resolve_score_half_life(memory_class, &node_type);
         match self.graph.get_node(id) {
-            Some(node) => effective_activation(node, attention, now, self.config.score_half_life_ms, context),
+            Some(node) => effective_activation(node, attention, now, score_half_life_ms, context),
             None => 0.0,
         }
     }
@@ -479,7 +534,7 @@ impl<'a> ActivationEngine<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use polypack_core::{InMemoryStorage, StoreConfig};
+    use polypack_core::{InMemoryStorage, NodeActivation, StoreConfig};
 
     use crate::edge::EdgeOwnership;
     use crate::graph::{Graph, GraphConfig};
@@ -498,6 +553,7 @@ mod tests {
             updated_at: 1,
             revision: 0,
             activation: None,
+            ..Default::default()
         }
     }
 
@@ -667,6 +723,51 @@ mod tests {
             .working_memory_with_options(&WorkingMemoryOptions { limit: 2, diversity_lambda: 0.8, ..Default::default() })
             .unwrap();
         assert_eq!(diverse.iter().map(|n| n.id.as_str()).collect::<Vec<_>>(), vec!["a", "c"]);
+        engine.dispose();
+    }
+
+    fn node_with_activation(id: &str, node_type: &str, act: NodeActivation) -> Node {
+        Node { activation: Some(act), ..node(id, node_type) }
+    }
+
+    #[test]
+    fn resolves_a_per_type_default_memory_class_and_decays_accordingly() {
+        let mut g = test_graph();
+        g.register_node_type("episode", crate::graph::NodeTypeDefinition { memory_class: Some(MemoryClass::Episodic), ..Default::default() }).unwrap();
+        g.register_node_type("fact", crate::graph::NodeTypeDefinition { memory_class: Some(MemoryClass::Semantic), ..Default::default() }).unwrap();
+        let now = now_millis();
+        g.add_node(node_with_activation("e1", "episode", NodeActivation { score: 0.8, importance: 0.0, reinforcement_count: 1, last_meaningful_activation: now - 12 * HOUR, ..Default::default() })).unwrap();
+        g.add_node(node_with_activation("f1", "fact", NodeActivation { score: 0.8, importance: 0.0, reinforcement_count: 1, last_meaningful_activation: now - 12 * HOUR, ..Default::default() })).unwrap();
+
+        let mut engine = ActivationEngine::new(&mut g, ActivationConfig::default());
+        // Episodic's 12h default half-life: exactly one half-life elapsed halves it.
+        assert!((engine.effective("e1", None) - 0.4).abs() < 1e-3);
+        // Semantic's half-life (7 days) is much longer, so far less decay at 12h.
+        assert!(engine.effective("f1", None) > 0.7);
+        engine.dispose();
+    }
+
+    #[test]
+    fn per_node_memory_class_override_takes_precedence_over_the_type_default() {
+        let mut g = test_graph();
+        g.register_node_type("episode", crate::graph::NodeTypeDefinition { memory_class: Some(MemoryClass::Episodic), ..Default::default() }).unwrap();
+        let now = now_millis();
+        let mut n = node_with_activation("n1", "episode", NodeActivation { score: 0.8, importance: 0.0, reinforcement_count: 1, last_meaningful_activation: now - 12 * HOUR, ..Default::default() });
+        n.memory_class = Some(MemoryClass::Entity);
+        g.add_node(n).unwrap();
+
+        let mut engine = ActivationEngine::new(&mut g, ActivationConfig::default());
+        assert!(engine.effective("n1", None) > 0.79);
+        engine.dispose();
+    }
+
+    #[test]
+    fn unclassified_nodes_keep_the_flat_default_half_life() {
+        let mut g = test_graph();
+        let now = now_millis();
+        g.add_node(node_with_activation("n1", "t", NodeActivation { score: 0.8, importance: 0.0, reinforcement_count: 1, last_meaningful_activation: now - DAY, ..Default::default() })).unwrap();
+        let mut engine = ActivationEngine::new(&mut g, ActivationConfig::default());
+        assert!((engine.effective("n1", None) - 0.4).abs() < 1e-3);
         engine.dispose();
     }
 }

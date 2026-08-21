@@ -7,7 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use polypack_core::activation::{
     activation_score_of, decay_activation_state, reinforce_activation, suppress_activation, DEFAULT_ACTIVATION,
 };
-use polypack_core::model::{edge_id, validate_activation, validate_node, NodeActivation};
+use polypack_core::model::{edge_id, validate_activation, validate_node, validate_provenance, NodeActivation};
 use polypack_core::storage::NodeQuery;
 use polypack_core::{
     aggregate as core_aggregate, execute as core_execute, ChangeBatch, Edge, GraphSnapshot, HnswConfig,
@@ -146,6 +146,8 @@ pub(crate) struct QueryMetrics {
 pub struct NodeTypeDefinition {
     pub required_fields: Vec<String>,
     pub data_types: HashMap<String, String>,
+    /// Default memory class for nodes of this type. Overridable per node via `Node.memory_class`.
+    pub memory_class: Option<polypack_core::MemoryClass>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -523,6 +525,11 @@ impl Graph {
             }
         }
         validation
+    }
+
+    /// Registered node-type schema definitions, keyed by type.
+    pub fn node_type_definitions(&self) -> &HashMap<String, NodeTypeDefinition> {
+        &self.node_type_definitions
     }
 
     pub fn register_edge_type(&mut self, edge_type: impl Into<String>, definition: EdgeTypeDefinition) -> Result<()> {
@@ -1329,6 +1336,7 @@ impl Graph {
             candidate.revision = candidate.revision.saturating_add(1);
             self.validate_node_resource_limits(&candidate)?;
             self.validate_node_schema(&candidate)?;
+            validate_provenance(&candidate)?;
             self.validate_node_indexes(&candidate, Some(id))?;
             self.unindex_node(id);
             let node = self.nodes.get_mut(id).unwrap();
@@ -1451,9 +1459,17 @@ impl Graph {
             updated_at: now_millis(),
             revision: existing.revision.saturating_add(1),
             activation: existing.activation.clone(),
+            memory_class: existing.memory_class,
+            confidence: existing.confidence,
+            source: existing.source.clone(),
+            observed_at: existing.observed_at,
+            derived_from: existing.derived_from.clone(),
+            supersedes: existing.supersedes.clone(),
+            contradicts: existing.contradicts.clone(),
         };
         self.validate_node_resource_limits(&candidate_node)?;
         self.validate_node_schema(&candidate_node)?;
+        validate_provenance(&candidate_node)?;
         self.validate_node_indexes(&candidate_node, Some(id))?;
 
         let node_type = {
@@ -2577,6 +2593,7 @@ mod tests {
             updated_at: 1,
             revision: 0,
             activation: None,
+            ..Default::default()
         }
     }
 
@@ -3551,7 +3568,7 @@ mod tests {
     #[test]
     fn schema_hooks_validate_nodes_and_edge_endpoint_types() {
         let mut g = test_graph();
-        g.register_node_type("person", NodeTypeDefinition { required_fields: vec!["name".into()], data_types: HashMap::new() }).unwrap();
+        g.register_node_type("person", NodeTypeDefinition { required_fields: vec!["name".into()], ..Default::default() }).unwrap();
         g.register_edge_type(
             "KNOWS",
             EdgeTypeDefinition { source_types: vec!["person".into()], target_types: vec!["person".into()], cardinality: None, required_fields: vec![], data_types: HashMap::new() },

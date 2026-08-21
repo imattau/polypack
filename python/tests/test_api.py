@@ -219,6 +219,57 @@ def test_schema_metadata_persists_and_reloads(tmp_path):
     reopened.close_store()
 
 
+def test_register_node_type_rejects_invalid_memory_class():
+    graph = PolyGraph()
+    with pytest.raises(PolypackValueError, match="memoryClass must be one of"):
+        graph.register_node_type("person", memory_class="nonsense")
+
+
+def _person(id_, **extra):
+    node = {"id": id_, "type": "person", "data": {"name": "A"}, "insertedAt": 1, "updatedAt": 1}
+    node.update(extra)
+    return node
+
+
+def test_add_node_validates_memory_class_and_provenance_fields():
+    graph = PolyGraph()
+    with pytest.raises(PolypackValueError, match="memoryClass must be one of"):
+        graph.add_node(_person("a", memoryClass="nonsense"))
+    with pytest.raises(PolypackValueError, match="confidence must be a finite number"):
+        graph.add_node(_person("a", confidence=1.5))
+    with pytest.raises(PolypackValueError, match="observedAt must be a finite non-negative number"):
+        graph.add_node(_person("a", observedAt=-1))
+    with pytest.raises(PolypackValueError, match="source must not be empty"):
+        graph.add_node(_person("a", source=""))
+    with pytest.raises(PolypackValueError, match="supersedes must not be empty"):
+        graph.add_node(_person("a", supersedes=""))
+    with pytest.raises(PolypackValueError, match="derivedFrom must contain only non-empty strings"):
+        graph.add_node(_person("a", derivedFrom=["b", ""]))
+    assert graph.get_node("a") is None
+
+
+def test_add_node_accepts_and_round_trips_valid_provenance_fields():
+    graph = PolyGraph()
+    graph.add_node(_person(
+        "a",
+        memoryClass="semantic",
+        confidence=0.9,
+        source="user",
+        observedAt=500,
+        derivedFrom=["e1", "e2"],
+        supersedes="a-old",
+        contradicts=["a-conflicting"],
+    ))
+    node = graph.get_node("a")
+    assert node["memoryClass"] == "semantic"
+    assert node["confidence"] == 0.9
+    assert node["source"] == "user"
+    assert node["observedAt"] == 500
+    assert node["derivedFrom"] == ["e1", "e2"]
+    assert node["supersedes"] == "a-old"
+    assert node["contradicts"] == ["a-conflicting"]
+
+
 def test_schema_metadata_rejects_duplicate_definitions(tmp_path):
     (tmp_path / "schemas.json").write_text(
         '{"nodeTypes":[{"nodeType":"person","requiredFields":[],"dataTypes":{}},{"nodeType":"person","requiredFields":[],"dataTypes":{}}],"edgeTypes":[]}',

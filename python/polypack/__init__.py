@@ -529,6 +529,60 @@ def _validate_activation(activation: Any) -> dict:
     return result
 
 
+MEMORY_CLASSES = ("episodic", "semantic", "procedural", "entity")
+
+# Default per-class score/importance half-lives. Episodic memories fade
+# fastest unless reinforced; semantic/procedural facts are far more durable;
+# entities barely decay. Only used for nodes whose resolved memoryClass (see
+# ActivationEngine.resolve_half_lives) has no override in `classHalfLives`.
+DEFAULT_CLASS_HALF_LIVES = {
+    "episodic": {"scoreHalfLifeMs": 12 * _HOUR, "importanceHalfLifeMs": 7 * _DAY},
+    "semantic": {"scoreHalfLifeMs": 7 * _DAY, "importanceHalfLifeMs": 90 * _DAY},
+    "procedural": {"scoreHalfLifeMs": 7 * _DAY, "importanceHalfLifeMs": 60 * _DAY},
+    "entity": {"scoreHalfLifeMs": 30 * _DAY, "importanceHalfLifeMs": float("inf")},
+}
+
+
+def _validate_provenance(node: dict) -> dict:
+    """Validate memory-class and confidence/provenance fields. Node-level
+    metadata, not activation state, so this is a sibling to `_validate_activation`,
+    not an extension of it. `derivedFrom`/`supersedes`/`contradicts` are soft
+    references — the referenced ids are not required to exist."""
+    result: dict = {}
+    memory_class = node.get("memoryClass")
+    if memory_class is not None:
+        if memory_class not in MEMORY_CLASSES:
+            raise PolypackValueError(f"memoryClass must be one of {', '.join(MEMORY_CLASSES)}")
+        result["memoryClass"] = memory_class
+    confidence = node.get("confidence")
+    if confidence is not None:
+        if not isinstance(confidence, (int, float)) or not math.isfinite(float(confidence)) or not 0 <= float(confidence) <= 1:
+            raise PolypackValueError("confidence must be a finite number in [0, 1]")
+        result["confidence"] = float(confidence)
+    observed_at = node.get("observedAt")
+    if observed_at is not None:
+        if not isinstance(observed_at, (int, float)) or not math.isfinite(float(observed_at)) or observed_at < 0:
+            raise PolypackValueError("observedAt must be a finite non-negative number")
+        result["observedAt"] = int(observed_at)
+    source = node.get("source")
+    if source is not None:
+        if source == "":
+            raise PolypackValueError("source must not be empty")
+        result["source"] = source
+    supersedes = node.get("supersedes")
+    if supersedes is not None:
+        if supersedes == "":
+            raise PolypackValueError("supersedes must not be empty")
+        result["supersedes"] = supersedes
+    for field in ("derivedFrom", "contradicts"):
+        value = node.get(field)
+        if value is not None:
+            if any(id_ == "" for id_ in value):
+                raise PolypackValueError(f"{field} must contain only non-empty strings")
+            result[field] = list(value)
+    return result
+
+
 # ── Vector index wrappers ──
 
 
@@ -838,6 +892,12 @@ def _copy_node(node: Node) -> Node:
     }
     if node.get("activation") is not None:
         out["activation"] = dict(node["activation"])
+    for field in ("memoryClass", "confidence", "source", "observedAt", "supersedes"):
+        if node.get(field) is not None:
+            out[field] = node[field]
+    for field in ("derivedFrom", "contradicts"):
+        if node.get(field) is not None:
+            out[field] = list(node[field])
     return out
 
 
@@ -1052,6 +1112,7 @@ class PolyGraph:
         validate: Optional[Callable[[Node], Any]] = None,
         required_fields: Optional[Iterable[str]] = None,
         data_types: Optional[dict[str, str]] = None,
+        memory_class: Optional[str] = None,
     ) -> None:
         if self._store_read_only:
             raise PolypackStorageError("store was opened read-only")
@@ -1062,11 +1123,14 @@ class PolyGraph:
             raise PolypackValueError("required fields must be unique and non-empty")
         if any(not isinstance(field, str) or not field or expected not in {"string", "number", "integer", "boolean", "object", "array"} for field, expected in types.items()):
             raise PolypackValueError("invalid node data type definition")
+        if memory_class is not None and memory_class not in MEMORY_CLASSES:
+            raise PolypackValueError(f"memoryClass must be one of {', '.join(MEMORY_CLASSES)}")
         previous = self._node_type_definitions.get(node_type)
         self._node_type_definitions[node_type] = {
             "validate": validate,
             "requiredFields": required,
             "dataTypes": types,
+            "memoryClass": memory_class,
         }
         try:
             for node in self._nodes.values():
@@ -1258,7 +1322,12 @@ class PolyGraph:
             raise PolypackStorageError("store was opened read-only")
         metadata = {
             "nodeTypes": [
-                {"nodeType": name, "requiredFields": list(definition["requiredFields"]), "dataTypes": dict(definition["dataTypes"])}
+                {
+                    "nodeType": name,
+                    "requiredFields": list(definition["requiredFields"]),
+                    "dataTypes": dict(definition["dataTypes"]),
+                    "memoryClass": definition.get("memoryClass"),
+                }
                 for name, definition in self._node_type_definitions.items()
             ],
             "edgeTypes": [
@@ -1297,9 +1366,10 @@ class PolyGraph:
                 name = definition.get("nodeType")
                 required = definition.get("requiredFields", [])
                 types = definition.get("dataTypes", {})
-                if not isinstance(name, str) or not name or name in nodes or not isinstance(required, list) or len(set(required)) != len(required) or any(not isinstance(field, str) or not field for field in required) or not isinstance(types, dict) or any(not isinstance(field, str) or not field or expected not in valid_types for field, expected in types.items()):
+                memory_class = definition.get("memoryClass")
+                if not isinstance(name, str) or not name or name in nodes or not isinstance(required, list) or len(set(required)) != len(required) or any(not isinstance(field, str) or not field for field in required) or not isinstance(types, dict) or any(not isinstance(field, str) or not field or expected not in valid_types for field, expected in types.items()) or (memory_class is not None and memory_class not in MEMORY_CLASSES):
                     raise ValueError("invalid node type definition")
-                nodes[name] = {"validate": None, "requiredFields": tuple(required), "dataTypes": dict(types)}
+                nodes[name] = {"validate": None, "requiredFields": tuple(required), "dataTypes": dict(types), "memoryClass": memory_class}
             for definition in metadata["edgeTypes"]:
                 if not isinstance(definition, dict):
                     raise ValueError("edge type definition must be an object")
@@ -1497,6 +1567,7 @@ class PolyGraph:
             stored["revision"] = int(previous.get("revision", 0)) + 1
         if node.get("activation") is not None:
             stored["activation"] = _validate_activation(node["activation"])
+        stored.update(_validate_provenance(node))
         if node.get("vector") is not None:
             stored["vector"] = _validate_vector(node["vector"])
         else:
@@ -1546,6 +1617,7 @@ class PolyGraph:
         candidate["revision"] = int(node.get("revision", 0)) + 1
         self._validate_node_resource_limits(candidate)
         self._validate_node_schema(candidate)
+        _validate_provenance(candidate)
         self._validate_index_candidate(candidate)
         self._remove_secondary_index_entry(node)
         node.clear()
@@ -2840,6 +2912,7 @@ class ActivationEngine:
             "pulseThreshold": 0.0,
             "absorbThreshold": 0.3,
             "absorbGain": 0.05,
+            "classHalfLives": DEFAULT_CLASS_HALF_LIVES,
         }
         cfg.update(config or {})
         weights = dict(cfg["weights"])
@@ -2865,16 +2938,41 @@ class ActivationEngine:
     def attention_of(self, id_: str) -> float:
         return self.attention.get(id_, 0.0)
 
+    def resolve_half_lives(self, node: dict) -> tuple[float, float]:
+        """Resolve a node's effective score/importance half-lives: `node["memoryClass"]`
+        if set, else the owning type's registered default, else no class — the
+        flat `config["scoreHalfLifeMs"]`/`config["importanceHalfLifeMs"]`
+        defaults, unaffected by `classHalfLives`."""
+        memory_class = node.get("memoryClass")
+        if memory_class is None:
+            definition = self.graph._node_type_definitions.get(node.get("type"))
+            memory_class = definition.get("memoryClass") if definition else None
+        override = self.config["classHalfLives"].get(memory_class) if memory_class else None
+        score_half_life_ms = (override or {}).get("scoreHalfLifeMs", self.config["scoreHalfLifeMs"])
+        importance_half_life_ms = (override or {}).get("importanceHalfLifeMs", self.config["importanceHalfLifeMs"])
+        return score_half_life_ms, importance_half_life_ms
+
     def effective(self, id_: str, context: Optional[str] = None) -> float:
-        """Durable decayed score (using `scoreHalfLifeMs`, or the context-scoped
-        score when `context` is given) plus transient attention, minus decayed
-        inhibition. Inhibition is applied only here, never inside `pulse`'s
-        composite, so a suppressed node stays re-evaluable."""
-        state = self.graph.get_activation_state(id_)
-        if not state:
+        """Durable decayed score (using the node's resolved memory-class
+        half-lives when it has one, else the flat config defaults), or the
+        context-scoped score when `context` is given, plus transient
+        attention, minus decayed inhibition. Inhibition is applied only here,
+        never inside `pulse`'s composite, so a suppressed node stays
+        re-evaluable."""
+        node = self.graph.get_node(id_)
+        if node is None or node.get("activation") is None:
             return self.attention_of(id_)
-        base = (state.get("context") or {}).get(context, {}).get("score", 0.0) if context is not None else state["score"]
-        inhibition = state.get("inhibition") or 0.0
+        # Decay the raw stored record exactly once, with the resolved
+        # half-life — NOT `graph.get_activation_state`, which already
+        # decay-corrects with the flat default and would double-decay a
+        # class-resolved half-life.
+        score_half_life_ms, importance_half_life_ms = self.resolve_half_lives(node)
+        decayed = _decay_activation_state(
+            node["activation"], int(time.time() * 1000),
+            score_half_life_ms=score_half_life_ms, importance_half_life_ms=importance_half_life_ms,
+        )
+        base = (decayed.get("context") or {}).get(context, {}).get("score", 0.0) if context is not None else decayed["score"]
+        inhibition = decayed.get("inhibition") or 0.0
         return _clamp01(base + self.attention_of(id_) - inhibition)
 
     def inhibition_of(self, id_: str) -> float:

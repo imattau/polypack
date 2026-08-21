@@ -344,6 +344,55 @@ describe('ActivationEngine', () => {
     engine.dispose()
   })
 
+  it('resolves a per-type default memory class and decays accordingly', () => {
+    vi.useFakeTimers()
+    const graph = new PolyGraph()
+    graph.registerNodeType('episode', { memoryClass: 'episodic' })
+    graph.registerNodeType('fact', { memoryClass: 'semantic' })
+    graph.addNode({ ...node('e1'), type: 'episode' })
+    graph.addNode({ ...node('f1'), type: 'fact' })
+    graph.reinforceNode('e1', 0.8)
+    graph.reinforceNode('f1', 0.8)
+
+    // Advance by the episodic class's default half-life (12h) exactly.
+    vi.advanceTimersByTime(12 * HOUR)
+
+    const engine = new ActivationEngine(graph)
+    // Episodic decays fast: exactly one half-life elapsed halves it.
+    expect(engine.effective('e1')).toBeCloseTo(0.4, 5)
+    // Semantic's half-life (7 days) is much longer, so far less decay at 12h.
+    expect(engine.effective('f1')).toBeGreaterThan(0.7)
+    engine.dispose()
+  })
+
+  it('a per-node memoryClass override takes precedence over the type default', () => {
+    vi.useFakeTimers()
+    const graph = new PolyGraph()
+    graph.registerNodeType('episode', { memoryClass: 'episodic' })
+    graph.addNode({ ...node('n1'), type: 'episode', memoryClass: 'entity' })
+    graph.reinforceNode('n1', 0.8)
+
+    vi.advanceTimersByTime(12 * HOUR)
+
+    const engine = new ActivationEngine(graph)
+    // Entity barely decays (non-decaying importance, long score half-life) —
+    // the per-node override wins over the type's episodic default.
+    expect(engine.effective('n1')).toBeGreaterThan(0.79)
+    engine.dispose()
+  })
+
+  it('unclassified nodes keep the flat default half-life, unaffected by classHalfLives', () => {
+    vi.useFakeTimers()
+    const graph = new PolyGraph()
+    graph.addNode(node('n1'))
+    graph.reinforceNode('n1', 0.8)
+    vi.advanceTimersByTime(DAY)
+
+    const engine = new ActivationEngine(graph)
+    expect(engine.effective('n1')).toBeCloseTo(0.4, 5)
+    engine.dispose()
+  })
+
   it('workingMemory with diversityLambda penalises redundant neighbours', () => {
     const graph = new PolyGraph()
     graph.addNode({ ...node('a'), vector: new Float64Array([1, 0]) })

@@ -24,13 +24,20 @@ A node is the primary entity of the graph.
 | `updatedAt` | integer millis       | yes      | Finite, non-negative.                            |
 | `revision`  | non-negative integer | no       | Defaults to `0`; increments on successful update. |
 | `activation`| object               | no       | Durable activation state (see 1.5).              |
+| `memoryClass`| `episodic` \| `semantic` \| `procedural` \| `entity` | no | Overrides `NodeTypeDefinition.memoryClass` for this node only (see 1.6). |
+| `confidence`| finite f64           | no       | Clamped to `[0, 1]`. Absent means "not tracked," not a stored default of 1. |
+| `source`    | UTF-8 string         | no       | Non-empty if present. Free-form provenance label. |
+| `observedAt`| integer millis       | no       | Finite, non-negative. May predate `insertedAt` for backfilled data. |
+| `derivedFrom`| array of UTF-8 string | no     | Node ids this node was derived/consolidated from. Soft references — not validated for existence. |
+| `supersedes`| UTF-8 string         | no       | Non-empty if present. Node id this node supersedes. Soft reference. |
+| `contradicts`| array of UTF-8 string | no     | Node ids this node conflicts with. Soft references. |
 
 A node without a vector is distinct from a node whose vector is absent from the
 index. Both are valid; similarity operations simply skip vectorless nodes.
 
 ### 1.5 Activation
 
-A node may carry an optional `activation` object with four fields:
+A node may carry an optional `activation` object:
 
 | Field                     | Type         | Constraints                                       |
 |---------------------------|--------------|---------------------------------------------------|
@@ -38,23 +45,73 @@ A node may carry an optional `activation` object with four fields:
 | `importance`              | finite f64   | Clamped to `[0, 1]`.                              |
 | `reinforcementCount`      | integer      | Non-negative.                                     |
 | `lastMeaningfulActivation`| integer millis | Finite, non-negative decay anchor.                |
+| `inhibition`              | finite f64   | Optional. Clamped to `[0, 1]`. Absent is equivalent to 0. |
+| `lastInhibitedAt`         | integer millis | Required iff `inhibition` is present. Finite, non-negative decay anchor for `inhibition`, independent of `lastMeaningfulActivation`. |
+| `context`                 | object       | Optional. Keyed by an application-defined context id; each entry is `{ score, lastMeaningfulActivation }` (same constraints as the top-level pair), an additional per-context lens on top of the global `score`. |
 
 Semantics (shared across TypeScript, Rust, and Python):
 
 - **Decay** is a pure function of elapsed time anchored at
   `lastMeaningfulActivation`: `decay = 0.5 ** (elapsed / halfLife)` for the
   `score` curve (24 h default) and a slower `importance` curve (30 days).
-  Because it depends only on stored state and the clock, replicas with the same
-  state compute identical current scores. Reads decay lazily; nothing is
-  re-written until reinforcement or an explicit `decay()` sweep.
+  `inhibition` decays independently against `lastInhibitedAt` (12 h default
+  half-life, shorter than `score` so suppression fades unless reinforced), and
+  each `context` entry decays independently against its own anchor (same curve
+  as `score` by default). Because decay depends only on stored state and the
+  clock, replicas with the same state compute identical current scores. Reads
+  decay lazily; nothing is re-written until reinforcement/suppression or an
+  explicit `decay()` sweep.
 - **Reinforcement** (`reinforceNode`/`reinforce_node`): decay-correct the prior
   state to now, add the delta to `score`, fold a fraction (`importanceGain`,
   0.05) into `importance`, increment `reinforcementCount`, and re-anchor
   `lastMeaningfulActivation` to now. `score`/`importance` clamp to `[0, 1]`.
+  An optional `context` argument additionally reinforces
+  `activation.context[context]` with the same delta — an independent,
+  additional lens, not a replacement for the global score; the global score is
+  always reinforced too.
+- **Suppression** (`suppressNode`/`suppress_node`) mirrors reinforcement but on
+  the `inhibition` axis: decay-correct the prior inhibition to now, add the
+  delta, clamp to `[0, 1]`, and re-anchor `lastInhibitedAt`. A negative delta
+  releases suppression. Inhibition is subtracted from `score` only at the
+  final read/ranking layer (e.g. `ActivationEngine.effective`), never inside
+  relational spreading — a suppressed node stays re-evaluable, not permanently
+  invisible.
 - **Merge** for total-state payloads (e.g. sync snapshots) is a max-merge of the
   decay-corrected components, re-anchored to now — idempotent for re-delivered
-  snapshots. Concurrent **deltas** accumulate additively instead; activation is
-  accumulated knowledge, not last-write-wins data.
+  snapshots, including a per-key max-merge over `context` and a max-merge of
+  `inhibition`. Concurrent **deltas** accumulate additively instead; activation
+  is accumulated knowledge, not last-write-wins data.
+
+### 1.6 Memory class
+
+A node's memory class (`episodic`, `semantic`, `procedural`, or `entity`)
+selects which score/importance half-lives its activation decays with, letting
+different kinds of memory fade at different rates without a separate decay
+mechanism. Resolution order: `node.memoryClass` (an explicit per-node
+override) if set, else the owning type's `NodeTypeDefinition.memoryClass` (a
+schema-level default registered once via `registerNodeType`/`register_node_type`),
+else no class — the node uses the flat, un-differentiated
+`scoreHalfLifeMs`/`importanceHalfLifeMs` defaults, unaffected by class.
+`NodeTypeDefinition.memoryClass` is schema metadata, so it rides the existing
+schema-definitions sync path alongside `dataTypes`/`requiredFields`; it is not
+part of the per-node wire format. Only nodes actually reinforced/read through
+an `ActivationEngine` use class-based half-lives — the engine resolves the
+class and looks up its (possibly overridden) half-life pair before calling the
+same decay functions described in 1.5; the underlying decay math itself
+remains a pure function of `(activation, now, halfLifeMs)` with no notion of
+class.
+
+### 1.7 Confidence and provenance
+
+`confidence`, `source`, `observedAt`, `derivedFrom`, `supersedes`, and
+`contradicts` (1.1) are ordinary node fields, not activation state — they
+carry no decay curve and are not part of the `activation` object. They are
+static until explicitly revised (confidence does not erode on its own; an
+application that wants confidence to fall over time should do so by writing a
+new value, the same way any other node field is revised). They ride the
+existing full-node write paths (`addNode`/`updateNode`/`patchNode` and their
+sync operations) exactly like `data`; no additive-merge semantics apply to
+them, unlike activation deltas.
 
 ### 1.2 Edge
 

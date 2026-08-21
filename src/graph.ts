@@ -36,6 +36,13 @@ const DEFAULT_HOT_CACHE_MAX = 50000
 
 const OWNERSHIP_KEY = '__ownership'
 
+const MEMORY_CLASSES = ['episodic', 'semantic', 'procedural', 'entity'] as const
+
+/** Provenance/memory-class fields settable directly via `patchNode`'s `set` (not nested under `data.`). */
+const TOP_LEVEL_PATCHABLE_FIELDS = [
+  'memoryClass', 'confidence', 'source', 'observedAt', 'derivedFrom', 'supersedes', 'contradicts',
+] as const
+
 function getOwnership(data?: Record<string, unknown>): EdgeOwnership {
   return (data?.[OWNERSHIP_KEY] as EdgeOwnership) ?? 'reference'
 }
@@ -330,6 +337,7 @@ export class PolyGraph {
         indexes: definition.indexes ? [...definition.indexes] : undefined,
         requiredFields: definition.requiredFields ? [...definition.requiredFields] : undefined,
         dataTypes: definition.dataTypes ? { ...definition.dataTypes } : undefined,
+        memoryClass: definition.memoryClass,
       })),
       edgeTypes: [...this.edgeTypeDefinitions].map(([type, definition]) => ({
         edgeType: type,
@@ -359,6 +367,7 @@ export class PolyGraph {
         indexes: schema.indexes ? [...schema.indexes] : undefined,
         requiredFields: schema.requiredFields ? [...schema.requiredFields] : undefined,
         dataTypes: schema.dataTypes ? { ...schema.dataTypes } : undefined,
+        memoryClass: schema.memoryClass ?? undefined,
       })
     }
     for (const definition of definitions.edgeTypes) {
@@ -391,6 +400,12 @@ export class PolyGraph {
     }
     if (Object.entries(dataTypes).some(([field, expected]) => !field || !validTypes.has(expected))) {
       throw new TypeError('Invalid node data type definition')
+    }
+    // Loose null-check: persisted schema definitions round-trip an absent
+    // `memoryClass` as msgpack nil (`null`), not `undefined` — this is
+    // re-validated on every `warm()`/schema load, unlike node-level fields.
+    if (definition.memoryClass != null && !MEMORY_CLASSES.includes(definition.memoryClass)) {
+      throw new TypeError(`memoryClass must be one of ${MEMORY_CLASSES.join(', ')}`)
     }
   }
 
@@ -792,6 +807,42 @@ export class PolyGraph {
     }
   }
 
+  /**
+   * Validate a node's memory-class and confidence/provenance fields. These are
+   * node-level metadata (not activation state), so this is a sibling
+   * validator to {@link assertActivation}, not an extension of it.
+   * `derivedFrom`/`supersedes`/`contradicts` are soft references — the
+   * referenced ids are not required to exist (a node can reference an id that
+   * arrives later, or is never loaded).
+   */
+  protected assertProvenance(node: PolyNode): void {
+    if (node.memoryClass !== undefined && !MEMORY_CLASSES.includes(node.memoryClass)) {
+      throw new RangeError(`memoryClass must be one of ${MEMORY_CLASSES.join(', ')}`)
+    }
+    if (node.confidence !== undefined) {
+      if (!Number.isFinite(node.confidence) || node.confidence < 0 || node.confidence > 1) {
+        throw new RangeError('confidence must be a finite number in [0, 1]')
+      }
+    }
+    if (node.observedAt !== undefined) {
+      if (!Number.isFinite(node.observedAt) || node.observedAt < 0) {
+        throw new RangeError('observedAt must be a finite non-negative number')
+      }
+    }
+    if (node.source !== undefined && node.source === '') {
+      throw new RangeError('source must not be empty')
+    }
+    if (node.supersedes !== undefined && node.supersedes === '') {
+      throw new RangeError('supersedes must not be empty')
+    }
+    for (const [field, value] of [['derivedFrom', node.derivedFrom], ['contradicts', node.contradicts]] as const) {
+      if (value === undefined) continue
+      for (const id of value) {
+        if (id === '') throw new RangeError(`${field} must contain only non-empty strings`)
+      }
+    }
+  }
+
   protected schedulePersist(): void {
     if (this.persistTimer) clearTimeout(this.persistTimer)
     this.persistTimer = setTimeout(() => {
@@ -855,6 +906,13 @@ export class PolyGraph {
           updatedAt: node.updatedAt,
           revision: node.revision ?? 0,
           activation: node.activation ? { ...node.activation } : undefined,
+          memoryClass: node.memoryClass,
+          confidence: node.confidence,
+          source: node.source,
+          observedAt: node.observedAt,
+          derivedFrom: node.derivedFrom ? [...node.derivedFrom] : undefined,
+          supersedes: node.supersedes,
+          contradicts: node.contradicts ? [...node.contradicts] : undefined,
         })
       } else {
         const snapshot = this.evictedDirtyNodes.get(id)
@@ -987,6 +1045,7 @@ export class PolyGraph {
     }
     if (node.vector) assertFiniteVector(node.vector)
     if (node.activation) this.assertActivation(node.activation)
+    this.assertProvenance(node)
     const serializedData = this.applySerialize(node.id, node.data as Record<string, unknown>)
     if (node.revision !== undefined && (!Number.isInteger(node.revision) || node.revision < 0)) {
       throw new RangeError('Node revision must be a non-negative integer')
@@ -1105,6 +1164,13 @@ export class PolyGraph {
       updatedAt: serialized.updatedAt,
       revision: serialized.revision ?? 0,
       activation: serialized.activation ? { ...serialized.activation } : undefined,
+      memoryClass: serialized.memoryClass,
+      confidence: serialized.confidence,
+      source: serialized.source,
+      observedAt: serialized.observedAt,
+      derivedFrom: serialized.derivedFrom ? [...serialized.derivedFrom] : undefined,
+      supersedes: serialized.supersedes,
+      contradicts: serialized.contradicts ? [...serialized.contradicts] : undefined,
     }
     this.nodes.set(id, restored)
     this.evictedDirtyNodes.delete(id)
@@ -1146,6 +1212,7 @@ export class PolyGraph {
     }
     this.checkNodeResources(candidate, candidate.data)
     this.validateNodeSchema(candidate)
+    this.assertProvenance(candidate)
     Object.assign(node.data, cloneData(serialized))
     if (vector instanceof Float64Array) {
       node.vector = new Float64Array(vector)
@@ -1184,9 +1251,16 @@ export class PolyGraph {
       throw new ConflictError(id, options.expectedRevision, node.revision ?? 0)
     }
     const data = cloneData(node.data)
-    const get = (path: string): unknown => path === 'data' ? data : path.split('.').slice(1).reduce((v: any, key) => v?.[key], data)
+    const isTopLevelPatchable = (path: string): path is typeof TOP_LEVEL_PATCHABLE_FIELDS[number] =>
+      (TOP_LEVEL_PATCHABLE_FIELDS as readonly string[]).includes(path)
+    const get = (path: string): unknown => {
+      if (path === 'data') return data
+      if (isTopLevelPatchable(path)) return (node as unknown as Record<string, unknown>)[path]
+      return path.split('.').slice(1).reduce((v: any, key) => v?.[key], data)
+    }
     const set = (path: string, value: unknown): void => {
       if (path === 'updatedAt') { if (typeof value !== 'number' || !Number.isFinite(value)) throw new RangeError('updatedAt must be finite'); node.updatedAt = value; return }
+      if (isTopLevelPatchable(path)) { (node as unknown as Record<string, unknown>)[path] = value; this.assertProvenance(node); return }
       if (!path.startsWith('data.')) throw new TypeError(`Unsupported patch path: ${path}`)
       const parts = path.split('.').slice(1); let target: any = data
       for (const part of parts.slice(0, -1)) { if (!target[part] || typeof target[part] !== 'object') target[part] = {}; target = target[part] }
@@ -1198,6 +1272,7 @@ export class PolyGraph {
     }
     for (const [path, value] of Object.entries(patch.set ?? {})) set(path, value)
     for (const path of patch.unset ?? []) {
+      if (isTopLevelPatchable(path)) { delete (node as unknown as Record<string, unknown>)[path]; continue }
       if (!path.startsWith('data.')) throw new TypeError(`Unsupported patch path: ${path}`)
       const parts = path.split('.').slice(1); let target: any = data
       for (const part of parts.slice(0, -1)) target = target?.[part]
@@ -1778,6 +1853,13 @@ export class PolyGraph {
           updatedAt: node.updatedAt,
           revision: node.revision ?? 0,
           activation: node.activation ? { ...node.activation } : undefined,
+          memoryClass: node.memoryClass,
+          confidence: node.confidence,
+          source: node.source,
+          observedAt: node.observedAt,
+          derivedFrom: node.derivedFrom ? [...node.derivedFrom] : undefined,
+          supersedes: node.supersedes,
+          contradicts: node.contradicts ? [...node.contradicts] : undefined,
         })
       }
       this.hotCacheOrder.delete(evict)
@@ -1805,6 +1887,13 @@ export class PolyGraph {
         updatedAt: node.updatedAt,
         revision: node.revision ?? 0,
         activation: node.activation ? { ...node.activation } : undefined,
+        memoryClass: node.memoryClass,
+        confidence: node.confidence,
+        source: node.source,
+        observedAt: node.observedAt,
+        derivedFrom: node.derivedFrom ? [...node.derivedFrom] : undefined,
+        supersedes: node.supersedes,
+        contradicts: node.contradicts ? [...node.contradicts] : undefined,
       })
     }
 
@@ -1887,6 +1976,13 @@ export class PolyGraph {
           updatedAt: sn.updatedAt,
           revision: sn.revision ?? 0,
           activation: sn.activation ? { ...sn.activation } : undefined,
+          memoryClass: sn.memoryClass,
+          confidence: sn.confidence,
+          source: sn.source,
+          observedAt: sn.observedAt,
+          derivedFrom: sn.derivedFrom ? [...sn.derivedFrom] : undefined,
+          supersedes: sn.supersedes,
+          contradicts: sn.contradicts ? [...sn.contradicts] : undefined,
         })
         this.indexNode(this.nodes.get(sn.id)!)
         this.indexSecondaryNode(this.nodes.get(sn.id)!)

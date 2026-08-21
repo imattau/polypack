@@ -49,7 +49,7 @@ pub struct NodeActivation {
 
 /// A typed property-graph node. Serializes as camelCase JSON matching the
 /// TypeScript `PolyNode`/`SerializedNode` shape (`type` on the wire, `node_type` in Rust).
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Node {
     pub id: String,
@@ -68,6 +68,39 @@ pub struct Node {
     /// Durable, syncable activation. Optional — absent until first reinforced.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub activation: Option<NodeActivation>,
+    /// Overrides `NodeTypeDefinition.memory_class` for this node only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_class: Option<MemoryClass>,
+    /// Confidence this node's content is currently believed true. Clamped to [0, 1]. Absent means "not tracked."
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<f64>,
+    /// Where this node's content came from (free-form provenance label).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    /// When the underlying fact was actually observed/asserted. Epoch ms.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_at: Option<i64>,
+    /// Node ids this node was derived/consolidated from. Soft references.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub derived_from: Option<Vec<String>>,
+    /// Node id this node supersedes (contradiction axis). A soft reference.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supersedes: Option<String>,
+    /// Node ids this node is in direct conflict with. Soft references.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contradicts: Option<Vec<String>>,
+}
+
+/// Memory class: which decay curve a node's activation follows (see
+/// `crate::activation`'s class-half-life resolution). Episodic memories decay
+/// fastest by default, entity facts slowest.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[serde(rename_all = "lowercase")]
+pub enum MemoryClass {
+    Episodic,
+    Semantic,
+    Procedural,
+    Entity,
 }
 
 /// A directed property-graph edge. `id` is an independent durable identity;
@@ -140,6 +173,7 @@ pub fn validate_node(n: &Node) -> Result<()> {
     if let Some(a) = &n.activation {
         validate_activation(a)?;
     }
+    validate_provenance(n)?;
     Ok(())
 }
 
@@ -183,6 +217,48 @@ pub fn validate_activation(a: &NodeActivation) -> Result<()> {
             if entry.last_meaningful_activation < 0 {
                 return Err(PolypackError::RangeOutOfBounds(format!(
                     "activation.context[{key}].lastMeaningfulActivation must be a finite non-negative number"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Validate a node's memory-class and confidence/provenance fields. These are
+/// node-level metadata (not activation state), so this is a sibling to
+/// `validate_activation`, not an extension of it. `derived_from`/`supersedes`/
+/// `contradicts` are soft references — the referenced ids are not required to
+/// exist.
+pub fn validate_provenance(n: &Node) -> Result<()> {
+    if let Some(confidence) = n.confidence {
+        if !confidence.is_finite() || !(0.0..=1.0).contains(&confidence) {
+            return Err(PolypackError::RangeOutOfBounds(
+                "confidence must be a finite number in [0, 1]".into(),
+            ));
+        }
+    }
+    if let Some(observed_at) = n.observed_at {
+        if observed_at < 0 {
+            return Err(PolypackError::RangeOutOfBounds(
+                "observedAt must be a finite non-negative number".into(),
+            ));
+        }
+    }
+    if let Some(source) = &n.source {
+        if source.is_empty() {
+            return Err(PolypackError::InvalidArgument("source must not be empty".into()));
+        }
+    }
+    if let Some(supersedes) = &n.supersedes {
+        if supersedes.is_empty() {
+            return Err(PolypackError::InvalidArgument("supersedes must not be empty".into()));
+        }
+    }
+    for (field, values) in [("derivedFrom", &n.derived_from), ("contradicts", &n.contradicts)] {
+        if let Some(values) = values {
+            if values.iter().any(|id| id.is_empty()) {
+                return Err(PolypackError::InvalidArgument(format!(
+                    "{field} must contain only non-empty strings"
                 )));
             }
         }
@@ -245,6 +321,7 @@ mod tests {
             updated_at: 1,
             revision: 0,
             activation: None,
+            ..Default::default()
         }
     }
 
@@ -319,6 +396,7 @@ mod tests {
             updated_at: 8,
             revision: 12,
             activation: None,
+            ..Default::default()
         };
         let s = serde_json::to_string(&n).unwrap();
         let back: Node = serde_json::from_str(&s).unwrap();
@@ -338,5 +416,45 @@ mod tests {
         assert!(validate_batch(&batch).is_ok());
         batch.put_nodes.push(node(""));
         assert!(matches!(validate_batch(&batch), Err(PolypackError::InvalidArgument(_))));
+    }
+
+    #[test]
+    fn rejects_invalid_provenance_fields() {
+        let mut n = node("a");
+        n.confidence = Some(1.5);
+        assert!(matches!(validate_node(&n), Err(PolypackError::RangeOutOfBounds(_))));
+
+        let mut n = node("a");
+        n.observed_at = Some(-1);
+        assert!(matches!(validate_node(&n), Err(PolypackError::RangeOutOfBounds(_))));
+
+        let mut n = node("a");
+        n.source = Some(String::new());
+        assert!(matches!(validate_node(&n), Err(PolypackError::InvalidArgument(_))));
+
+        let mut n = node("a");
+        n.supersedes = Some(String::new());
+        assert!(matches!(validate_node(&n), Err(PolypackError::InvalidArgument(_))));
+
+        let mut n = node("a");
+        n.derived_from = Some(vec!["b".into(), String::new()]);
+        assert!(matches!(validate_node(&n), Err(PolypackError::InvalidArgument(_))));
+    }
+
+    #[test]
+    fn accepts_valid_provenance_fields() {
+        let mut n = node("a");
+        n.memory_class = Some(MemoryClass::Semantic);
+        n.confidence = Some(0.9);
+        n.source = Some("user".into());
+        n.observed_at = Some(500);
+        n.derived_from = Some(vec!["e1".into(), "e2".into()]);
+        n.supersedes = Some("a-old".into());
+        n.contradicts = Some(vec!["a-conflicting".into()]);
+        assert!(validate_node(&n).is_ok());
+        let json = serde_json::to_value(&n).unwrap();
+        assert_eq!(json["memoryClass"], json!("semantic"));
+        let back: Node = serde_json::from_value(json).unwrap();
+        assert_eq!(back, n);
     }
 }

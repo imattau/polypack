@@ -19,7 +19,7 @@ export { PersistedGraphQuery } from './persisted-query.js'
 export { MemoryAdapter } from './persistence/memory.js'
 export type { PersistenceAdapter, PersistenceChanges, PersistedNodeQuery } from './persistence/adapter.js'
 export { ActivationEngine, mergeActivation } from './activation.js'
-export type { ActivationConfig, SpreadOptions, PulseOptions, VectorLike, WorkingMemoryOptions } from './activation.js'
+export type { ActivationConfig, SpreadOptions, PulseOptions, VectorLike, WorkingMemoryOptions, ClassHalfLives } from './activation.js'
 export type {
   PolyNode,
   PolyEdge,
@@ -32,6 +32,7 @@ export type {
   DataTransform,
   NodeActivation,
   ContextActivation,
+  MemoryClass,
   WriteOptions,
   NodePatch,
   AdapterCapabilities,

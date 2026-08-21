@@ -1,11 +1,31 @@
 import { Subscription } from 'rxjs'
 import type { PolyGraph } from './graph.js'
-import type { PolyNode, NodeActivation } from './types.js'
+import type { PolyNode, NodeActivation, MemoryClass } from './types.js'
 import { ACTIVATION_DEFAULTS, clamp01, decayActivationState, decayFactor } from './utils.js'
 import { cosineSimilarity } from './vector-index.js'
 
 const HOUR = 3_600_000
 const DAY = 24 * HOUR
+
+/** Per-class half-life pair for the score/importance decay curves. */
+export interface ClassHalfLives {
+  scoreHalfLifeMs?: number
+  importanceHalfLifeMs?: number
+}
+
+/**
+ * Default per-class decay curves. Episodic memories fade fastest unless
+ * reinforced; semantic/procedural facts are far more durable; entities barely
+ * decay at all. Only used for nodes whose resolved `memoryClass` (see
+ * {@link PolyNode.memoryClass} / `NodeTypeDefinition.memoryClass`) has no
+ * explicit override in `ActivationConfig.classHalfLives`.
+ */
+const DEFAULT_CLASS_HALF_LIVES: Record<MemoryClass, Required<ClassHalfLives>> = {
+  episodic: { scoreHalfLifeMs: 12 * HOUR, importanceHalfLifeMs: 7 * DAY },
+  semantic: { scoreHalfLifeMs: 7 * DAY, importanceHalfLifeMs: 90 * DAY },
+  procedural: { scoreHalfLifeMs: 7 * DAY, importanceHalfLifeMs: 60 * DAY },
+  entity: { scoreHalfLifeMs: 30 * DAY, importanceHalfLifeMs: Infinity },
+}
 
 const DEFAULT_CONFIG = {
   scoreHalfLifeMs: ACTIVATION_DEFAULTS.scoreHalfLifeMs,
@@ -19,6 +39,7 @@ const DEFAULT_CONFIG = {
   pulseThreshold: 0,
   absorbThreshold: 0.3,
   absorbGain: 0.05,
+  classHalfLives: DEFAULT_CLASS_HALF_LIVES,
 } as const
 
 export interface ActivationConfig {
@@ -44,6 +65,15 @@ export interface ActivationConfig {
   absorbThreshold?: number
   /** Reinforcement delta applied by `absorb` (`gain * composite`). Default 0.05. */
   absorbGain?: number
+  /**
+   * Per-memory-class overrides for the score/importance half-lives, keyed by
+   * `MemoryClass`. A node's class resolves as `node.memoryClass ??
+   * graph.nodeTypes.get(node.type)?.memoryClass`; unclassified nodes always
+   * use `scoreHalfLifeMs`/`importanceHalfLifeMs` above, unaffected by this map.
+   * Defaults to {@link DEFAULT_CLASS_HALF_LIVES}. Pass `{}` to disable
+   * class-based differentiation entirely.
+   */
+  classHalfLives?: Partial<Record<MemoryClass, ClassHalfLives>>
 }
 
 export interface SpreadOptions {
@@ -152,6 +182,7 @@ export class ActivationEngine {
   readonly graph: PolyGraph
   readonly config: Required<Pick<ActivationConfig, 'scoreHalfLifeMs' | 'importanceHalfLifeMs' | 'importanceGain' | 'spreadDecay' | 'spreadDepth' | 'recencyHalfLifeMs' | 'minReinforceDelta' | 'pulseThreshold' | 'absorbThreshold' | 'absorbGain'>>
   readonly weights: Required<NonNullable<ActivationConfig['weights']>>
+  readonly classHalfLives: Partial<Record<MemoryClass, ClassHalfLives>>
 
   private attention = new Map<string, number>()
   private subscription: Subscription
@@ -171,6 +202,7 @@ export class ActivationEngine {
       absorbGain: config.absorbGain ?? DEFAULT_CONFIG.absorbGain,
     }
     this.weights = { ...DEFAULT_CONFIG.weights, ...config.weights }
+    this.classHalfLives = config.classHalfLives ?? DEFAULT_CONFIG.classHalfLives
     this.subscription = graph.changes.subscribe((event) => {
       if (event.type === 'node_removed' && event.nodeId) this.attention.delete(event.nodeId)
     })
@@ -206,17 +238,40 @@ export class ActivationEngine {
   }
 
   /**
+   * Resolve a node's effective score/importance half-lives: `node.memoryClass
+   * ?? graph.nodeTypes.get(node.type)?.memoryClass` picks the class, then
+   * `classHalfLives[class]` overrides `config.scoreHalfLifeMs`/
+   * `importanceHalfLifeMs` per-field. A node with no resolvable class (or a
+   * class with no configured override) uses the flat config defaults
+   * unchanged — this never changes existing, unclassified nodes' decay.
+   */
+  resolveHalfLives(node: PolyNode): { scoreHalfLifeMs: number; importanceHalfLifeMs: number } {
+    const memoryClass = node.memoryClass ?? this.graph.nodeTypes.get(node.type)?.memoryClass
+    const override = memoryClass ? this.classHalfLives[memoryClass] : undefined
+    return {
+      scoreHalfLifeMs: override?.scoreHalfLifeMs ?? this.config.scoreHalfLifeMs,
+      importanceHalfLifeMs: override?.importanceHalfLifeMs ?? this.config.importanceHalfLifeMs,
+    }
+  }
+
+  /**
    * Durable decayed score plus any transient attention, minus decayed
    * inhibition (clamped to [0,1]). When `context` is given, the context-scoped
    * score is used instead of the global score (0 if the node has no history in
    * that context) — global and context are different lenses, not blended.
    * Inhibition is applied only here, at the final read/ranking layer, never
    * inside `pulse`'s composite — so a suppressed node stays re-evaluable.
+   * Decay uses the node's resolved memory-class half-lives (see
+   * {@link resolveHalfLives}) when it has one, else the flat config defaults.
    */
   effective(id: string, context?: string): number {
-    const state = this.graph.getActivationState(id)
-    if (!state) return this.attentionOf(id)
-    const decayed = decayActivationState(state, Date.now(), this.config.scoreHalfLifeMs, this.config.importanceHalfLifeMs)
+    const node = this.graph.getNode(id)
+    if (!node?.activation) return this.attentionOf(id)
+    // Decay the raw stored record exactly once, with the resolved half-life —
+    // NOT `graph.getActivationState(id)`, which already decay-corrects with
+    // the flat default and would double-decay a class-resolved half-life.
+    const halfLives = this.resolveHalfLives(node)
+    const decayed = decayActivationState(node.activation, Date.now(), halfLives.scoreHalfLifeMs, halfLives.importanceHalfLifeMs)
     const base = context !== undefined ? (decayed.context?.[context]?.score ?? 0) : decayed.score
     return clamp01(base + this.attentionOf(id) - (decayed.inhibition ?? 0))
   }

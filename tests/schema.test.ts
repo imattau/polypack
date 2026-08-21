@@ -105,4 +105,69 @@ describe('schema and constraint hooks', () => {
     expect(graph.nodeTypes.has('person')).toBe(false)
     expect(graph.edgeTypes.has('RELATED')).toBe(false)
   })
+
+  it('rejects an invalid memoryClass on a NodeTypeDefinition', () => {
+    const graph = new PolyGraph()
+    expect(() => graph.registerNodeType('person', { memoryClass: 'nonsense' as never })).toThrow(/memoryClass must be one of/)
+    expect(graph.nodeTypes.has('person')).toBe(false)
+  })
+
+  it('registers and returns a NodeTypeDefinition.memoryClass default', () => {
+    const graph = new PolyGraph()
+    graph.registerNodeType('episode', { memoryClass: 'episodic' })
+    expect(graph.nodeTypes.get('episode')?.memoryClass).toBe('episodic')
+  })
+})
+
+describe('memory class and provenance validation', () => {
+  it('validates memoryClass, confidence, and provenance fields on addNode', () => {
+    const graph = new PolyGraph()
+    expect(() => graph.addNode({ ...person('a', 'A'), memoryClass: 'nonsense' as never })).toThrow(/memoryClass must be one of/)
+    expect(() => graph.addNode({ ...person('a', 'A'), confidence: 1.5 })).toThrow(/confidence must be a finite number/)
+    expect(() => graph.addNode({ ...person('a', 'A'), observedAt: -1 })).toThrow(/observedAt must be a finite non-negative number/)
+    expect(() => graph.addNode({ ...person('a', 'A'), source: '' })).toThrow(/source must not be empty/)
+    expect(() => graph.addNode({ ...person('a', 'A'), supersedes: '' })).toThrow(/supersedes must not be empty/)
+    expect(() => graph.addNode({ ...person('a', 'A'), derivedFrom: ['b', ''] })).toThrow(/derivedFrom must contain only non-empty strings/)
+    expect(() => graph.addNode({ ...person('a', 'A'), contradicts: [''] })).toThrow(/contradicts must contain only non-empty strings/)
+    expect(graph.getNode('a')).toBeUndefined()
+  })
+
+  it('accepts and round-trips valid memoryClass, confidence, and provenance fields', () => {
+    const graph = new PolyGraph()
+    graph.addNode({
+      ...person('a', 'A'),
+      memoryClass: 'semantic',
+      confidence: 0.9,
+      source: 'user',
+      observedAt: 500,
+      derivedFrom: ['e1', 'e2'],
+      supersedes: 'a-old',
+      contradicts: ['a-conflicting'],
+    })
+    const node = graph.getNode('a')
+    expect(node?.memoryClass).toBe('semantic')
+    expect(node?.confidence).toBe(0.9)
+    expect(node?.source).toBe('user')
+    expect(node?.observedAt).toBe(500)
+    expect(node?.derivedFrom).toEqual(['e1', 'e2'])
+    expect(node?.supersedes).toBe('a-old')
+    expect(node?.contradicts).toEqual(['a-conflicting'])
+  })
+
+  it('does not require derivedFrom/supersedes/contradicts targets to exist (soft references)', () => {
+    const graph = new PolyGraph()
+    graph.addNode({ ...person('a', 'A'), derivedFrom: ['does-not-exist'], supersedes: 'also-missing' })
+    expect(graph.getNode('a')?.derivedFrom).toEqual(['does-not-exist'])
+  })
+
+  it('lets patchNode set and unset top-level provenance fields', () => {
+    const graph = new PolyGraph()
+    graph.addNode(person('a', 'A'))
+    graph.patchNode('a', { set: { confidence: 0.6, memoryClass: 'episodic' } })
+    expect(graph.getNode('a')?.confidence).toBe(0.6)
+    expect(graph.getNode('a')?.memoryClass).toBe('episodic')
+    expect(() => graph.patchNode('a', { set: { confidence: 2 } })).toThrow(/confidence must be a finite number/)
+    graph.patchNode('a', { unset: ['confidence'] })
+    expect(graph.getNode('a')?.confidence).toBeUndefined()
+  })
 })

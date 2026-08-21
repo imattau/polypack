@@ -72,7 +72,7 @@ fn make_node(i: usize, rng: &mut Mulberry32) -> Node {
     data.insert("idx".into(), json!(i));
     data.insert("value".into(), json!(rng.next()));
     data.insert("tag".into(), json!(format!("tag_{}", i % 50)));
-    Node { id: format!("n{i}"), node_type, data, vector: None, inserted_at: i as i64, updated_at: i as i64, revision: 0, activation: None }
+    Node { id: format!("n{i}"), node_type, data, vector: None, inserted_at: i as i64, updated_at: i as i64, revision: 0, activation: None, ..Default::default() }
 }
 
 fn bench_durable_writes(args: &Args) -> (f64, f64) {

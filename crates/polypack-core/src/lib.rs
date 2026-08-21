@@ -26,7 +26,7 @@ pub use activation::{
 };
 pub use error::{PolypackError, Result};
 pub use hnsw::{HnswConfig, HnswIndex};
-pub use model::{ChangeBatch, Edge, Node, NodeActivation, VectorEntry};
+pub use model::{ChangeBatch, Edge, MemoryClass, Node, NodeActivation, VectorEntry};
 pub use query::{QueryPlan, QueryResult};
 pub use query_exec::{aggregate, execute, GraphSnapshot};
 pub use storage::{Durability, InMemoryStorage, Storage, Store, StoreConfig, WalEntry};

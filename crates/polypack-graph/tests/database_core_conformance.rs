@@ -235,8 +235,8 @@ fn error_taxonomy_fixture_passes() {
         inserted_at: 1,
         updated_at: 1,
         revision: 0,
-        activation: None,
-    };
+        activation: None, ..Default::default()
+};
     assert!(matches!(polypack_core::model::validate_node(&invalid), Err(PolypackError::InvalidArgument(_))));
     codes.insert("invalid-node-id".into(), Value::String("invalid_argument".into()));
 
@@ -246,7 +246,8 @@ fn error_taxonomy_fixture_passes() {
     codes.insert("dimension-mismatch".into(), Value::String("dimension_mismatch".into()));
 
     let mut graph = Graph::open(Box::new(InMemoryStorage::new()), StoreConfig::default(), GraphConfig::default()).unwrap();
-    graph.add_node(Node { id: "conflict".into(), node_type: "record".into(), data: Map::new(), vector: None, inserted_at: 1, updated_at: 1, revision: 0, activation: None }).unwrap();
+    graph.add_node(Node { id: "conflict".into(), node_type: "record".into(), data: Map::new(), vector: None, inserted_at: 1, updated_at: 1, revision: 0, activation: None, ..Default::default()
+}).unwrap();
     graph.update_node_if_revision("conflict", 0, Map::from_iter([(String::from("value"), Value::from(1))]), None, None).unwrap();
     assert!(matches!(graph.update_node_if_revision("conflict", 0, Map::new(), None, None), Err(PolypackError::Conflict { .. })));
     codes.insert("stale-write".into(), Value::String("conflict".into()));
@@ -256,7 +257,8 @@ fn error_taxonomy_fixture_passes() {
         StoreConfig::default(),
         GraphConfig { resource_limits: polypack_graph::GraphResourceLimits { max_vector_dimensions: Some(1), ..Default::default() }, ..GraphConfig::default() },
     ).unwrap();
-    let wide = Node { id: "limited".into(), node_type: "record".into(), data: Map::new(), vector: Some(vec![1.0, 2.0]), inserted_at: 1, updated_at: 1, revision: 0, activation: None };
+    let wide = Node { id: "limited".into(), node_type: "record".into(), data: Map::new(), vector: Some(vec![1.0, 2.0]), inserted_at: 1, updated_at: 1, revision: 0, activation: None, ..Default::default()
+};
     assert!(matches!(limited.add_node(wide), Err(PolypackError::ResourceLimit { .. })));
     codes.insert("resource-limit".into(), Value::String("resource_limit".into()));
 

@@ -278,8 +278,8 @@ mod tests {
             inserted_at: 1,
             updated_at: 1,
             revision: 0,
-            activation,
-        };
+            activation, ..Default::default()
+};
         let now = 1000;
         let n = node(Some(activation(1.0, 1.0, 1, now - DAY_MS)));
         assert!((activation_score_of(&n, now, DEFAULT_ACTIVATION.score_half_life_ms) - 0.5).abs() < 1e-9);
@@ -329,6 +329,7 @@ mod tests {
             updated_at: 1,
             revision: 0,
             activation: None,
+            ..Default::default()
         };
         let json = serde_json::to_value(&n).unwrap();
         assert!(json.get("activation").is_none());

@@ -178,7 +178,49 @@ fn node_to_msg(node: &Node) -> Msg {
     if node.revision != 0 {
         fields.push(("revision", Msg::Int(node.revision as i64)));
     }
+    if let Some(memory_class) = node.memory_class {
+        fields.push(("memoryClass", Msg::Str(memory_class_to_str(memory_class).to_string())));
+    }
+    if let Some(confidence) = node.confidence {
+        fields.push(("confidence", Msg::Float(confidence)));
+    }
+    if let Some(source) = &node.source {
+        fields.push(("source", Msg::Str(source.clone())));
+    }
+    if let Some(observed_at) = node.observed_at {
+        fields.push(("observedAt", Msg::Int(observed_at)));
+    }
+    if let Some(derived_from) = &node.derived_from {
+        fields.push(("derivedFrom", Msg::Array(derived_from.iter().map(|s| Msg::Str(s.clone())).collect())));
+    }
+    if let Some(supersedes) = &node.supersedes {
+        fields.push(("supersedes", Msg::Str(supersedes.clone())));
+    }
+    if let Some(contradicts) = &node.contradicts {
+        fields.push(("contradicts", Msg::Array(contradicts.iter().map(|s| Msg::Str(s.clone())).collect())));
+    }
     Msg::map(fields)
+}
+
+fn memory_class_to_str(class: crate::model::MemoryClass) -> &'static str {
+    use crate::model::MemoryClass::*;
+    match class {
+        Episodic => "episodic",
+        Semantic => "semantic",
+        Procedural => "procedural",
+        Entity => "entity",
+    }
+}
+
+fn memory_class_from_str(s: &str) -> Result<crate::model::MemoryClass> {
+    use crate::model::MemoryClass::*;
+    match s {
+        "episodic" => Ok(Episodic),
+        "semantic" => Ok(Semantic),
+        "procedural" => Ok(Procedural),
+        "entity" => Ok(Entity),
+        other => Err(PolypackError::CorruptData(format!("invalid memoryClass {other}"))),
+    }
 }
 
 fn msg_to_node(msg: &Msg) -> Result<Node> {
@@ -205,6 +247,42 @@ fn msg_to_node(msg: &Msg) -> Result<Node> {
     let updated_at = msg_int_field(msg, "updatedAt")?;
     let revision = msg_u64_field_default(msg, "revision", 0)?;
     let activation = msg_to_activation(msg)?;
+    let memory_class = match msg.get("memoryClass") {
+        Some(Msg::Str(s)) => Some(memory_class_from_str(s)?),
+        Some(Msg::Nil) | None => None,
+        _ => return Err(PolypackError::CorruptData("memoryClass must be a string or null".into())),
+    };
+    let confidence = match msg.get("confidence") {
+        Some(Msg::Float(f)) => Some(*f),
+        Some(Msg::Int(i)) => Some(*i as f64),
+        Some(Msg::Nil) | None => None,
+        _ => return Err(PolypackError::CorruptData("confidence must be a number or null".into())),
+    };
+    let source = match msg.get("source") {
+        Some(Msg::Str(s)) => Some(s.clone()),
+        Some(Msg::Nil) | None => None,
+        _ => return Err(PolypackError::CorruptData("source must be a string or null".into())),
+    };
+    let observed_at = match msg.get("observedAt") {
+        Some(Msg::Int(i)) => Some(*i),
+        Some(Msg::Nil) | None => None,
+        _ => return Err(PolypackError::CorruptData("observedAt must be an integer or null".into())),
+    };
+    let derived_from = match msg.get("derivedFrom") {
+        Some(Msg::Array(items)) => Some(msg_vec_str(items)?),
+        Some(Msg::Nil) | None => None,
+        _ => return Err(PolypackError::CorruptData("derivedFrom must be an array or null".into())),
+    };
+    let supersedes = match msg.get("supersedes") {
+        Some(Msg::Str(s)) => Some(s.clone()),
+        Some(Msg::Nil) | None => None,
+        _ => return Err(PolypackError::CorruptData("supersedes must be a string or null".into())),
+    };
+    let contradicts = match msg.get("contradicts") {
+        Some(Msg::Array(items)) => Some(msg_vec_str(items)?),
+        Some(Msg::Nil) | None => None,
+        _ => return Err(PolypackError::CorruptData("contradicts must be an array or null".into())),
+    };
     Ok(Node {
         id,
         node_type,
@@ -214,7 +292,24 @@ fn msg_to_node(msg: &Msg) -> Result<Node> {
         updated_at,
         revision,
         activation,
+        memory_class,
+        confidence,
+        source,
+        observed_at,
+        derived_from,
+        supersedes,
+        contradicts,
     })
+}
+
+fn msg_vec_str(items: &[Msg]) -> Result<Vec<String>> {
+    items
+        .iter()
+        .map(|m| match m {
+            Msg::Str(s) => Ok(s.clone()),
+            _ => Err(PolypackError::CorruptData("expected a string array element".into())),
+        })
+        .collect()
 }
 
 fn msg_vec_f64(items: &[Msg]) -> Result<Vec<f64>> {
@@ -520,6 +615,7 @@ mod tests {
             updated_at: 8,
             revision: 0,
             activation: None,
+            ..Default::default()
         }
     }
 

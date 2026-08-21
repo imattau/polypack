@@ -34,6 +34,7 @@ fn schema_and_unique_index_fixture_passes() {
                     .iter()
                     .map(|(k, v)| (k.clone(), v.as_str().unwrap().to_string()))
                     .collect::<HashMap<_, _>>(),
+                memory_class: None,
             },
         )
         .unwrap();

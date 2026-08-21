@@ -20,6 +20,8 @@ export function clonePolyNode<T extends PolyNode>(node: T): T {
     activation: node.activation
       ? { ...node.activation, context: node.activation.context ? { ...node.activation.context } : undefined }
       : undefined,
+    derivedFrom: node.derivedFrom ? [...node.derivedFrom] : undefined,
+    contradicts: node.contradicts ? [...node.contradicts] : undefined,
   }
 }
 

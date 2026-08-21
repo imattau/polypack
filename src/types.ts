@@ -43,6 +43,13 @@ export interface NodeActivation {
   context?: Record<string, ContextActivation>
 }
 
+/**
+ * Memory class: which decay curve a node's activation follows (see
+ * `NodeTypeDefinition.memoryClass` and `ActivationConfig.classHalfLives`).
+ * Episodic memories decay fastest by default, entity facts slowest.
+ */
+export type MemoryClass = 'episodic' | 'semantic' | 'procedural' | 'entity'
+
 /** A typed property-graph node. Timestamps are Unix milliseconds. */
 export interface PolyNode<TData extends Record<string, unknown> = Record<string, unknown>> {
   id: string
@@ -55,6 +62,25 @@ export interface PolyNode<TData extends Record<string, unknown> = Record<string,
   revision?: number
   /** Durable, syncable activation. Optional — absent until the node is first reinforced. */
   activation?: NodeActivation
+  /**
+   * Overrides `NodeTypeDefinition.memoryClass` for this node only. Most nodes
+   * should rely on the type-level default; set this when nodes of the same
+   * `type` genuinely differ in nature (e.g. a "Note" that's sometimes a
+   * one-off event and sometimes a durable fact).
+   */
+  memoryClass?: MemoryClass
+  /** Confidence this node's content is currently believed true. Clamped to [0, 1]. Absent means "not tracked" (treat as fully trusted), not a stored default. */
+  confidence?: number
+  /** Where this node's content came from (free-form, e.g. "user", "inference:gpt-4", "import:crm"). */
+  source?: string
+  /** When the underlying fact was actually observed/asserted (may predate `insertedAt` for backfilled data). Epoch ms. */
+  observedAt?: number
+  /** Node IDs this node was derived or consolidated from. Not validated for referential existence — a soft reference, like edge-free related-node ids in `data`. */
+  derivedFrom?: string[]
+  /** Node ID this node supersedes (contradiction axis). A soft reference. */
+  supersedes?: string
+  /** Node IDs this node is in direct conflict with, without necessarily superseding them. Soft references. */
+  contradicts?: string[]
 }
 
 /** Controls what happens to a target when its incoming edge is removed. */
@@ -110,6 +136,13 @@ export interface SerializedNode {
   revision?: number
   /** Durable activation state. Persisted through the existing snapshot/WAL and adapters. */
   activation?: NodeActivation
+  memoryClass?: MemoryClass
+  confidence?: number
+  source?: string
+  observedAt?: number
+  derivedFrom?: string[]
+  supersedes?: string
+  contradicts?: string[]
 }
 
 /** Persistence-safe edge representation. */
@@ -160,6 +193,8 @@ export interface NodeTypeDefinition {
   indexes?: string[]
   requiredFields?: string[]
   dataTypes?: Record<string, 'string' | 'number' | 'integer' | 'boolean' | 'object' | 'array'>
+  /** Default memory class for nodes of this type. Overridable per node via `PolyNode.memoryClass`. */
+  memoryClass?: MemoryClass
 }
 
 export interface EdgeTypeDefinition {

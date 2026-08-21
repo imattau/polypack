@@ -230,6 +230,44 @@ def test_suppress_subtracts_inhibition_from_effective_but_not_the_raw_score():
     engine.dispose()
 
 
+def test_resolves_a_per_type_default_memory_class_and_decays_accordingly():
+    g = PolyGraph()
+    g.register_node_type("episode", memory_class="episodic")
+    g.register_node_type("fact", memory_class="semantic")
+    now = int(time.time() * 1000)
+    HOUR = 3_600_000
+    g.add_node({**_node("e1"), "type": "episode", "activation": _activation(0.8, 0.0, 1, now - 12 * HOUR)})
+    g.add_node({**_node("f1"), "type": "fact", "activation": _activation(0.8, 0.0, 1, now - 12 * HOUR)})
+
+    engine = ActivationEngine(g)
+    # Episodic's 12h default half-life: exactly one half-life elapsed halves it.
+    assert engine.effective("e1") == pytest.approx(0.4, abs=1e-3)
+    # Semantic's half-life (7 days) is much longer, so far less decay at 12h.
+    assert engine.effective("f1") > 0.7
+    engine.dispose()
+
+
+def test_per_node_memory_class_override_takes_precedence_over_the_type_default():
+    g = PolyGraph()
+    g.register_node_type("episode", memory_class="episodic")
+    now = int(time.time() * 1000)
+    HOUR = 3_600_000
+    g.add_node({**_node("n1"), "type": "episode", "memoryClass": "entity", "activation": _activation(0.8, 0.0, 1, now - 12 * HOUR)})
+
+    engine = ActivationEngine(g)
+    assert engine.effective("n1") > 0.79
+    engine.dispose()
+
+
+def test_unclassified_nodes_keep_the_flat_default_half_life():
+    g = PolyGraph()
+    now = int(time.time() * 1000)
+    g.add_node({**_node("n1"), "activation": _activation(0.8, 0.0, 1, now - DAY)})
+    engine = ActivationEngine(g)
+    assert engine.effective("n1") == pytest.approx(0.4, abs=1e-3)
+    engine.dispose()
+
+
 def test_working_memory_with_token_budget_stops_once_spent():
     g = PolyGraph()
     for id_, amount in [("a", 0.9), ("b", 0.5), ("c", 0.1)]:
