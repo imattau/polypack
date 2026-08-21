@@ -9,10 +9,18 @@ import { MemoryTransport } from '../src/sync/transport'
 import type { SyncMessage, SyncOp } from '../src/sync/types'
 import type { SyncTransport } from '../src/sync/transport'
 import { syncChecksum } from '../src/sync/checksum'
+import { validateSyncBatch, validateSyncOperation } from '../src/sync/protocol'
 import { FileSyncOperationLog } from '../src/sync/log'
 import { MemoryFileIO } from '../src/persistence/file-io'
 
 describe('OpLog', () => {
+  it('validates the shared sync protocol fixture', async () => {
+    const fixture = (await import('../fixtures/sync/protocol.json')).default
+    expect(validateSyncBatch(fixture.operations)).toBe(syncChecksum(fixture.operations))
+    fixture.operations.forEach(validateSyncOperation)
+    expect(() => validateSyncOperation({ ...fixture.operations[0], seq: 0 })).toThrow(TypeError)
+  })
+
   it('appends ops with increasing sequence numbers', () => {
     const log = new OpLog('client-1')
     const op1 = log.append('addNode', { id: 'a' })
@@ -792,6 +800,43 @@ describe('SyncServer + SyncClient', () => {
     expect(received[0].cursor).toBe(2)
     expect(client.syncCursor).toBe(2)
     client.disconnect()
+  })
+
+  it('returns a global cursor when an expired cursor starts recovery after compaction', () => {
+    const server = new SyncServer({ maxOps: 2 })
+    const receive = server.addClient({ clientId: 'writer', send: () => undefined })
+    receive({ type: 'delta', clientId: 'writer', fromSeq: 0, ops: [
+      { seq: 1, timestamp: 1, clientId: 'writer', kind: 'addNode', payload: { id: 'one' } },
+      { seq: 2, timestamp: 2, clientId: 'writer', kind: 'addNode', payload: { id: 'two' } },
+      { seq: 3, timestamp: 3, clientId: 'writer', kind: 'addNode', payload: { id: 'three' } },
+    ] })
+
+    const recovery: SyncMessage[] = []
+    const request = server.addClient({ clientId: 'recovery', send: message => recovery.push(message) })
+    request({ type: 'request-snapshot', clientId: 'recovery', fromSeq: 0, ops: [] })
+
+    expect(recovery[0]).toMatchObject({ type: 'snapshot', fromSeq: 0, cursor: 3, more: false })
+    expect(recovery[0].errors?.[0].code).toBe('cursor_expired')
+    expect(recovery[0].ops.map(op => op.seq)).toEqual([2, 3])
+  })
+
+  it('passes client metadata to recovery subscription filters', () => {
+    const server = new SyncServer({
+      clientMetadata: client => ({ tier: client.clientId === 'premium' ? 'premium' : 'basic' }),
+    })
+    const receive = server.addClient({ clientId: 'writer', send: () => undefined })
+    receive({ type: 'delta', clientId: 'writer', fromSeq: 0, ops: [
+      { seq: 1, timestamp: 1, clientId: 'writer', kind: 'addNode', payload: { id: 'one' } },
+    ] })
+
+    const recovery: SyncMessage[] = []
+    const request = server.addClient(
+      { clientId: 'premium', send: message => recovery.push(message) },
+      { filter: (_operation, context) => context.metadata?.tier === 'premium' },
+    )
+    request({ type: 'request-snapshot', clientId: 'premium', fromSeq: 0, ops: [] })
+
+    expect(recovery[0].ops).toHaveLength(1)
   })
 
   it('bounds sync batches and splits client flushes', async () => {

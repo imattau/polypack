@@ -17,6 +17,7 @@ pub mod query;
 pub mod query_exec;
 pub mod rng;
 pub mod storage;
+pub mod sync;
 pub mod vector;
 
 pub use activation::{

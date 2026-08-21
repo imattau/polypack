@@ -183,3 +183,18 @@ executed by TypeScript, Rust, and Python. They cover snapshot-only stores,
 WAL-only stores, delete replay, clean WAL recovery, and truncated WAL tails;
 implementations must preserve acknowledged records and remove the recovered
 WAL after a successful restart.
+
+Direct Rust users can use `polypack_core::storage::FileStorage` for the same
+single-writer contract as the Node and Python directory adapters. It records
+process identity in `store.lock`, rejects a second writer, supports explicit
+read-only opens, and permits stale-lock recovery after the documented age
+threshold. Its `concurrentWriters` capability is explicitly `false`; deployments
+requiring multiple writers must provide external coordination.
+
+Physical format changes use `FormatMigrationRegistry` and
+`migrate_storage`. A migration must declare an artifact (`Snapshot` or `Wal`),
+an exact source version, a target version, and a byte transformation. Steps
+must form a contiguous path; missing or overshooting steps are rejected.
+Migration reports include bytes read/written and whether each artifact
+changed. Dry runs execute and validate transformations without writing the
+destination. Startup never invokes these callbacks implicitly.

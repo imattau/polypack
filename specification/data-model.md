@@ -1,11 +1,12 @@
 # Data model specification
 
-Version: 2 (draft)
+Version: 2 (stable)
 
 This document is the cross-language behavioural contract for Polypack nodes,
 edges, vectors, and the ownership rules that connect them. The TypeScript
-implementation in `src/` is the reference for this document until the
-conformance harness passes for every language.
+implementation in `src/` was the initial reference; the shared conformance
+fixtures are now the normative executable contract for TypeScript, Rust, and
+Python.
 
 ## 1. Core types
 
@@ -175,3 +176,23 @@ All values crossing the language core must be MessagePack-safe: null, boolean,
 integer, float, string, array, and map. Host-only values (`Blob`, `File`,
 class instances, callbacks) are stored in host sidecars or require a
 `DataTransform`; they never cross the core boundary.
+
+## 10. Compatibility and conformance
+
+Version 2 is stable for the graph data model. Implementations must preserve
+the field meanings, validation order, detached-read behavior, edge identity,
+ownership semantics, query ordering, and vector-score rules above. Legacy
+records may omit `revision` and are interpreted as revision `0`; newly
+materialized records expose the revision explicitly.
+
+The shared fixtures covering node and edge CRUD, ownership and cascade
+behavior, detached reads, revisions and patches, traversal, pagination,
+aggregation, exact search, and ANN search are the compatibility gate. The
+database-core fixtures extend that gate for transactions, independent edge
+identity, snapshots, indexes, migrations, resource limits, and durable
+mutation logs. Recovery behavior is specified separately in
+[`persistence.md`](./persistence.md) and exercised by `fixtures/recovery`.
+
+Changes to observable data-model behavior require a specification version
+bump or an explicitly documented backwards-compatible extension, together
+with updates to the language-neutral fixtures.

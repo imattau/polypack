@@ -80,6 +80,10 @@ or a finite number array. `insertedAt`/`updatedAt` are integer milliseconds.
 
 Query plans use `specification/query-plan.schema.json`.
 
+The exact-vector and HNSW fixtures are the vector compatibility gate. Exact
+searches require ordered equality; ANN searches declare their minimum overlap
+because graph topology and insertion order may differ between implementations.
+
 ## `recovery/` — persistence recovery
 
 Each fixture describes a store to build and the state expected after opening
@@ -112,3 +116,11 @@ All three maintained implementations execute this recovery corpus. The
 database-core error categories are defined by
 [`database-core/error-taxonomy.json`](database-core/error-taxonomy.json) and
 must map to the stable codes in [`specification/errors.md`](../specification/errors.md).
+
+## `sync/` — protocol primitives
+
+The sync fixture defines a canonical ordered operation batch and checksums for
+the batch and retained operation identities. TypeScript, Rust, and Python
+validate it independently. It is intentionally transport-neutral; server
+storage, authorization, and conflict resolution are not part of the shared
+wire primitive.

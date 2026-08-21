@@ -576,3 +576,11 @@ def test_snapshot_isolation_conformance_fixture():
     graph.remove_node(fixture["mutation"]["remove"])
     assert sorted(snapshot.query().ids()) == fixture["expect"]["snapshotIds"]
     assert sorted(graph.query().ids()) == fixture["expect"]["liveIds"]
+
+
+def test_shared_sync_protocol_fixture():
+    fixture = json.loads((Path(__file__).resolve().parents[2] / "fixtures" / "sync" / "protocol.json").read_text())
+    assert polypack.validate_sync_batch(fixture["operations"]) == fixture["checksum"]
+    assert polypack.sync_identity_checksum(fixture["operationIds"], fixture["transactionIds"]) == fixture["identityChecksum"]
+    with pytest.raises(ValueError):
+        polypack.validate_sync_operation({**fixture["operations"][0], "seq": 0})

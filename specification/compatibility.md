@@ -7,6 +7,19 @@ The shared fixtures under `fixtures/conformance` are the behavioural source of
 truth for portable graph, edge, ownership, traversal, pagination, aggregation,
 and vector-index semantics.
 
+The data-model contract is stable at version 2. Its field, validation,
+ownership, detached-read, query, and vector-search rules are gated by the
+shared fixtures rather than by any one implementation.
+
+The sync protocol fixture under `fixtures/sync` is the cross-language wire
+contract for operation validation and checksums. Server orchestration,
+transport, authorization, and conflict policy remain host/application APIs.
+
+Exact vector and ANN compatibility is gated by `exact-vector.json`,
+`hnsw-basic.json`, and `hnsw-churn.json`. Exact results must match in order;
+ANN results use each fixture's declared `minOverlap` tolerance. Rust runs these
+fixtures directly in addition to the TypeScript and Python runners.
+
 Persistence recovery scenarios under `fixtures/recovery` are also executed by
 the TypeScript, Rust, and Python native stores. The shared
 `fixtures/database-core/error-taxonomy.json` fixture defines the stable error
@@ -78,3 +91,7 @@ calling conventions, but must preserve these observable guarantees:
 
 When a capability is unavailable, the implementation must expose the declared
 degradation or reject the operation; it must not claim a stronger guarantee.
+
+Filesystem-backed adapters use an exclusive writer lock and advertise
+`concurrentWriters: false`. This is an intentional single-writer guarantee,
+not an implicit promise of safe multi-process WAL append.

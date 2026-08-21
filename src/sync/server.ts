@@ -119,13 +119,16 @@ export class SyncServer {
     const available = this.opLog.slice(offset)
     const page = available.slice(0, this.options.maxBatchOps)
     const filter = this.clientFilters.get(sender)
-    const context: SyncContext = { clientId: sender.clientId ?? msg.clientId, protocolVersion: this.options.protocolVersion }
+    const context: SyncContext = { clientId: sender.clientId ?? msg.clientId, protocolVersion: this.options.protocolVersion, metadata: this.options.clientMetadata?.(sender) }
     const ops = filter ? page.filter(op => filter(op, context)) : page
     sender.send({
       type: requestedCursor === 0 ? 'snapshot' : 'delta',
       clientId: 'server',
       fromSeq: requestedCursor,
-      cursor: requestedCursor + page.length,
+      // An expired cursor falls back to the retained history boundary. The
+      // returned cursor must remain global so the client can resume after the
+      // page without replaying or skipping operations.
+      cursor: (requestedCursor === 0 ? this.baseCursor : requestedCursor) + page.length,
       more: page.length < available.length,
       ops,
       checksum: syncChecksum(ops),

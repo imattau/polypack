@@ -32,6 +32,7 @@ from ._core import (
     engine_info as _engine_info,
     execute_query_plan as _execute_query_plan,
 )
+from .sync import sync_checksum, sync_identity_checksum, validate_sync_batch, validate_sync_operation
 from ._core import (
     PolypackClosedError,
     PolypackCorruptDataError,

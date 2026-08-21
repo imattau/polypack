@@ -4,6 +4,11 @@ The sync layer is a transport-neutral replication foundation, not an
 identity or permission service. Applications may supply authorization and
 conflict hooks to the server.
 
+The portable protocol surface is shared by TypeScript, Rust, and Python:
+operation envelopes use the same required fields and validation rules, and
+ordered batches use the same deterministic checksum. The implementations do
+not need to share a transport or server runtime.
+
 Server operation history has a global cursor. Clients resume with that cursor;
 when history has been compacted past the requested cursor, the server returns
 `cursor_expired` and a snapshot request starts from the available boundary.
@@ -17,6 +22,13 @@ retry after reducing the batch or after the durable queue drains. Recovery
 pages advance by the global server cursor, even when a subscription filter
 removes operations from the page, so filtered clients cannot mistake hidden
 operations for an unadvanced cursor.
+
+Recovery responses always report a global cursor. If a requested cursor has
+expired, the response starts at the retained-history boundary and reports the
+cursor immediately after the returned page, including that boundary offset.
+Clients can therefore resume pagination without replaying or skipping retained
+operations. Subscription filters receive the same per-client metadata as live
+broadcasts.
 
 Durable append or compaction failures must not be acknowledged as successful:
 the server sends a `persistence_error` acknowledgement and makes its durable
