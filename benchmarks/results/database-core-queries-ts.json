@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "lang": "ts",
+  "count": 10000,
+  "dimensions": 32,
+  "iterations": 20,
+  "topK": 10,
+  "dataSeed": 42,
+  "querySeed": 43,
+  "graphQuery": {
+    "p50Ms": 0.21179599999999255,
+    "p95Ms": 1.323082999999997,
+    "p99Ms": 4.547847999999988,
+    "resultCount": 25
+  },
+  "hotQuery": {
+    "p50Ms": 0.19154100000002927,
+    "p95Ms": 0.20610599999997703,
+    "p99Ms": 0.22872699999999213,
+    "resultCount": 25
+  },
+  "exactVector": {
+    "p50Ms": 0.5486769999999979,
+    "p95Ms": 2.6674409999999966,
+    "p99Ms": 2.7503690000000347,
+    "resultCount": 10
+  },
+  "hnswVector": {
+    "p50Ms": 1.772447999999713,
+    "p95Ms": 3.447320999999647,
+    "p99Ms": 3.454529000000548,
+    "resultCount": 10,
+    "recallAtK": 1
+  }
+}

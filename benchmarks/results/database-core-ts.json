@@ -1,0 +1,16 @@
+{
+  "results": [
+    {
+      "lang": "ts",
+      "count": 20000,
+      "syncOps": 5000,
+      "writeMs": 261.734673,
+      "writeOpsPerSec": 76413.26145581027,
+      "mutationCount": 40,
+      "mutationReplayMs": 43.658525,
+      "recoveryMs": 80.521007,
+      "syncSubmitMs": 3.089085999999952,
+      "syncOpsPerSec": 1618601.7482194013
+    }
+  ]
+}

@@ -102,7 +102,11 @@ impl Storage for FileStorage {
         let temp = self.path(&format!(".{name}.tmp-{}", self.lock_token.as_deref().unwrap_or("readonly")));
         let mut file = File::create(&temp).map_err(|error| PolypackError::Storage(error.to_string()))?;
         file.write_all(data).map_err(|error| PolypackError::Storage(error.to_string()))?;
-        file.sync_all().map_err(|error| PolypackError::Storage(error.to_string()))?;
+        // No `sync_all()` here: durability is `Store`'s call, via the explicit
+        // `sync()`/`sync_dir()` it issues only under `Durability::Fsync`.
+        // Syncing unconditionally on every write silently upgraded
+        // `Durability::Process` ("written to the OS, not fsynced") into an
+        // always-fsync adapter, defeating the whole point of the distinction.
         drop(file);
         if let Err(error) = fs::rename(&temp, &target) {
             // On Windows, rename fails with AlreadyExists when the target is present;
@@ -124,7 +128,8 @@ impl Storage for FileStorage {
         self.writable()?;
         let mut file = OpenOptions::new().create(true).append(true).open(self.path(name)).map_err(|error| PolypackError::Storage(error.to_string()))?;
         file.write_all(data).map_err(|error| PolypackError::Storage(error.to_string()))?;
-        file.sync_all().map_err(|error| PolypackError::Storage(error.to_string()))?;
+        // See `write()`: fsync is `Store`'s call via the explicit `sync()`
+        // it issues under `Durability::Fsync`, not this adapter's default.
         Ok(())
     }
 

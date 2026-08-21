@@ -182,6 +182,7 @@ __all__ = [
     "GraphSnapshot",
     "GraphTransaction",
     "GraphQuery",
+    "PersistedGraphQuery",
     "ExactIndex",
     "HnswIndex",
     "ActivationEngine",
@@ -661,14 +662,15 @@ class DirectoryStorage:
         if self._read_only:
             raise PolypackStorageError("store was opened read-only")
         # Write-then-rename: a crash mid-write leaves the previous snapshot
-        # intact instead of a torn file, and the tmp file is fsynced first
-        # so the rename can never land ahead of its data on disk.
+        # intact instead of a torn file. Fsyncing the tmp file before the
+        # rename is the Rust `Store`'s call via the explicit `sync()`/
+        # `sync_dir()` it issues only under `Durability::Fsync` — doing it
+        # unconditionally here silently upgraded `Durability::Process`
+        # ("written to the OS, not fsynced") into an always-fsync adapter.
         target = self._path(name)
         tmp_path = self._dir / f"{name}.tmp"
         with open(tmp_path, "wb") as f:
             f.write(bytes(data))
-            f.flush()
-            os.fsync(f.fileno())
         os.replace(tmp_path, target)
 
     def append(self, name: str, data: bytes) -> None:
@@ -737,7 +739,11 @@ class GraphTransaction:
             "removed_nodes": set(graph._removed_node_ids),
             "removed_edges": set(graph._removed_edge_ids),
             "removed_vectors": set(graph._removed_vector_ids),
+            "dirty_nodes": set(graph._dirty_node_ids),
+            "dirty_edges": set(graph._dirty_edge_ids),
+            "dirty_vectors": set(graph._dirty_vector_ids),
             "vectors": list(graph.vectors.entries()),
+            "dirty": graph._dirty,
         }
         self._closed = False
         self._mutation_count = 0
@@ -756,6 +762,10 @@ class GraphTransaction:
         self.graph._removed_node_ids = self._snapshot["removed_nodes"]
         self.graph._removed_edge_ids = self._snapshot["removed_edges"]
         self.graph._removed_vector_ids = self._snapshot["removed_vectors"]
+        self.graph._dirty_node_ids = self._snapshot["dirty_nodes"]
+        self.graph._dirty_edge_ids = self._snapshot["dirty_edges"]
+        self.graph._dirty_vector_ids = self._snapshot["dirty_vectors"]
+        self.graph._dirty = self._snapshot["dirty"]
         self.graph.vectors.clear()
         self.graph.vectors.add_many(self._snapshot["vectors"])
         self.graph._rebuild_secondary_indexes()
@@ -844,6 +854,10 @@ class PolyGraph:
         self._removed_node_ids: set = set()
         self._removed_edge_ids: set = set()
         self._removed_vector_ids: set = set()
+        self._dirty_node_ids: set = set()
+        self._dirty_edge_ids: set = set()
+        self._dirty_vector_ids: set = set()
+        self._dirty = False
         self._active_transaction: Optional["GraphTransaction"] = None
         self._node_type_definitions: dict[str, dict] = {}
         self._edge_type_definitions: dict[str, dict] = {}
@@ -1360,9 +1374,12 @@ class PolyGraph:
         if stored["vector"] is None:
             self.vectors.remove(stored["id"])
         self._nodes[stored["id"]] = stored
+        self._dirty_node_ids.add(stored["id"])
+        self._dirty = True
         self._removed_node_ids.discard(stored["id"])
         if stored["vector"] is not None:
             self.vectors.add(stored["id"], stored["vector"])
+            self._dirty_vector_ids.add(stored["id"])
             self._removed_vector_ids.discard(stored["id"])
         else:
             self._removed_vector_ids.add(stored["id"])
@@ -1399,9 +1416,13 @@ class PolyGraph:
         node.clear()
         node.update(candidate)
         self._add_secondary_index_entry(node)
+        self._dirty_node_ids.add(id_)
+        self._dirty = True
         if vector is not None:
             self.vectors.add(id_, node["vector"])
+            self._dirty_vector_ids.add(id_)
             self._removed_vector_ids.discard(id_)
+        self._dirty = True
         return _copy_node(node)
 
     def get_node(self, id_: str) -> Optional[Node]:
@@ -1424,8 +1445,8 @@ class PolyGraph:
             "persistedNodeCount": persisted_node_count,
             "edgeCount": edge_count,
             "vectorCount": vector_count,
-            "dirtyRecordCount": len(self._removed_node_ids) + len(self._removed_edge_ids) + len(self._removed_vector_ids),
-            "pendingPersistence": bool(self._removed_node_ids or self._removed_edge_ids or self._removed_vector_ids),
+            "dirtyRecordCount": len(self._dirty_node_ids) + len(self._dirty_edge_ids) + len(self._dirty_vector_ids) + len(self._removed_node_ids) + len(self._removed_edge_ids) + len(self._removed_vector_ids),
+            "pendingPersistence": bool(self._dirty or self._dirty_node_ids or self._dirty_edge_ids or self._dirty_vector_ids or self._removed_node_ids or self._removed_edge_ids or self._removed_vector_ids),
             "indexCount": len(self._indexes),
             "memoryEstimateBytes": memory_estimate,
             "queryCount": self._query_count,
@@ -1549,6 +1570,8 @@ class PolyGraph:
         self._validate_node_schema(candidate_node)
         node.clear()
         node.update(candidate_node)
+        self._dirty_node_ids.add(id_)
+        self._dirty = True
         return _copy_node(node)
 
     def get_nodes(self, ids: Iterable[str]) -> list:
@@ -1580,9 +1603,12 @@ class PolyGraph:
         self._cleanup_edges(id_)
         self._remove_secondary_index_entry(node)
         del self._nodes[id_]
+        self._dirty_node_ids.discard(id_)
         self.vectors.remove(id_)
+        self._dirty_vector_ids.discard(id_)
         self._removed_node_ids.add(id_)
         self._removed_vector_ids.add(id_)
+        self._dirty = True
 
     # ── edge CRUD ──
 
@@ -1619,9 +1645,11 @@ class PolyGraph:
         }
         self._validate_edge_schema(candidate)
         self._edges.setdefault(source, {})[key] = candidate
+        self._dirty_edge_ids.add(key)
         incoming = self._incoming.setdefault(target, {})
         incoming[source] = incoming.get(source, 0) + 1
         self._removed_edge_ids.discard(key)
+        self._dirty = True
 
     def get_edges(self, source: str, edge_type: Optional[str] = None) -> list:
         edges = self._edges.get(source, {})
@@ -1654,6 +1682,8 @@ class PolyGraph:
             self._validate_edge_schema(candidate)
             edge.clear()
             edge.update(candidate)
+            self._dirty_edge_ids.add(id_)
+            self._dirty = True
             return dict(edge, data=dict(edge.get("data") or {}))
         return None
 
@@ -1673,7 +1703,9 @@ class PolyGraph:
             if not edges:
                 self._edges.pop(source, None)
             self._decrement_incoming(edge["target"], source)
+            self._dirty_edge_ids.discard(id_)
             self._removed_edge_ids.add(id_)
+            self._dirty = True
             return True
         return False
 
@@ -1710,7 +1742,9 @@ class PolyGraph:
             removed = self._edges.get(source, {}).pop(key, None)
             if removed is not None:
                 self._decrement_incoming(e["target"], source)
+                self._dirty_edge_ids.discard(key)
                 self._removed_edge_ids.add(key)
+                self._dirty = True
             if self._ownership(e) == "shared" and not self._has_incoming(e["target"], source):
                 if self._on_orphan:
                     self._on_orphan(e["target"])
@@ -1727,6 +1761,22 @@ class PolyGraph:
         """Create a mutable `GraphQuery` over the currently loaded nodes."""
         return GraphQuery(self)
 
+    def query_persisted(self) -> "PersistedGraphQuery":
+        """Create a storage-level query over persisted nodes.
+
+        Results are filtered, ordered, and paginated inside the native store;
+        only the final result page crosses the Python boundary. Pending graph
+        mutations are saved before the query so persisted visibility matches
+        the rest of the binding's durable API.
+        """
+        if self._store is None:
+            raise PolypackStorageError("no store open; call open_store(path) first")
+        if self._dirty:
+            if self._store_read_only:
+                raise PolypackStorageError("store was opened read-only and has pending changes")
+            self.save()
+        return PersistedGraphQuery(self)
+
     def clear(self) -> None:
         """Clear in-memory state only — does not flush pending deletions or touch the attached store."""
         self._nodes.clear()
@@ -1736,16 +1786,20 @@ class PolyGraph:
         self._removed_node_ids.clear()
         self._removed_edge_ids.clear()
         self._removed_vector_ids.clear()
+        self._dirty_node_ids.clear()
+        self._dirty_edge_ids.clear()
+        self._dirty_vector_ids.clear()
+        self._dirty = False
         if self._store is None:
             self._secondary_index_data = {name: {} for name in self._indexes}
 
     # ── persistence (Rust storage state machine) ──
 
     @classmethod
-    def open(cls, directory: str, read_only: bool = False) -> "PolyGraph":
+    def open(cls, directory: str, read_only: bool = False, compact_threshold: int = 10_000) -> "PolyGraph":
         """Open a directory-backed binary store and load its graph."""
         graph = cls()
-        graph.open_store(directory, read_only=read_only)
+        graph.open_store(directory, read_only=read_only, compact_threshold=compact_threshold)
         return graph
 
     @classmethod
@@ -1762,14 +1816,36 @@ class PolyGraph:
                 shutil.copy2(source_file, destination_path / name)
         return cls.open(str(destination_path))
 
-    def open_store(self, directory: str, read_only: bool = False) -> None:
+    def open_store(self, directory: str, read_only: bool = False, compact_threshold: int = 10_000) -> None:
         """Attach a directory-backed store and load any existing state."""
-        self._store = _NativeStore(DirectoryStorage(directory, read_only=read_only))
+        if not isinstance(compact_threshold, int) or compact_threshold < 1:
+            raise PolypackValueError("compact_threshold must be a positive integer")
+        had_pending_state = bool(
+            self._dirty
+            or self._nodes
+            or self._edges
+            or list(self.vectors.entries())
+            or self._removed_node_ids
+            or self._removed_edge_ids
+            or self._removed_vector_ids
+        )
+        pending_dirty_nodes = set(self._dirty_node_ids)
+        pending_dirty_edges = set(self._dirty_edge_ids)
+        pending_dirty_vectors = set(self._dirty_vector_ids)
+        self._dirty_node_ids.clear()
+        self._dirty_edge_ids.clear()
+        self._dirty_vector_ids.clear()
+        self._store = _NativeStore(DirectoryStorage(directory, read_only=read_only), compact_threshold)
         self._store_directory = Path(directory)
         self._store_read_only = read_only
+        self._dirty = False
         self._load_index_metadata()
         self._load_schema_metadata()
         self._load_from_store()
+        self._dirty_node_ids = pending_dirty_nodes if had_pending_state else set()
+        self._dirty_edge_ids = pending_dirty_edges if had_pending_state else set()
+        self._dirty_vector_ids = pending_dirty_vectors if had_pending_state else set()
+        self._dirty = had_pending_state
         try:
             self._validate_all_indexes()
         except Exception:
@@ -1809,7 +1885,7 @@ class PolyGraph:
         mutations made since the last explicit `save()` — including inside
         a `with PolyGraph.open(...) as g:` block — would be silently lost."""
         if self._store is not None:
-            if not self._store_read_only:
+            if not self._store_read_only and self._dirty:
                 self.save()
             self._store.close()
             self._store = None
@@ -1825,24 +1901,36 @@ class PolyGraph:
         """
         if self._store is None:
             raise PolypackStorageError("no store open; call open_store(path) first")
-        nodes = []
-        for node in self._nodes.values():
-            nodes.append(_copy_node(node))
+        if not self._dirty:
+            return
+        nodes = [_copy_node(self._nodes[id_]) for id_ in self._dirty_node_ids if id_ in self._nodes]
+        edge_by_id = {
+            key: edge
+            for edge_map in self._edges.values()
+            for key, edge in edge_map.items()
+        }
         edges = []
-        for edge_map in self._edges.values():
-            for e in edge_map.values():
-                edges.append(
-                    {
-                        "id": e["id"] if "id" in e else _edge_key(e["source"], e["type"], e["target"]),
-                        "source": e["source"],
-                        "target": e["target"],
-                        "type": e["type"],
-                        "data": dict(e.get("data") or {}),
-                        "createdAt": e.get("createdAt", 0),
-                        "revision": int(e.get("revision", 0)),
-                    }
-                )
-        vectors = [{"id": id_, "vector": vector} for id_, vector in self.vectors.entries()]
+        for id_ in self._dirty_edge_ids:
+            e = edge_by_id.get(id_)
+            if e is not None:
+                edges.append({
+                    "id": e["id"] if "id" in e else _edge_key(e["source"], e["type"], e["target"]),
+                    "source": e["source"],
+                    "target": e["target"],
+                    "type": e["type"],
+                    "data": dict(e.get("data") or {}),
+                    "createdAt": e.get("createdAt", 0),
+                    "revision": int(e.get("revision", 0)),
+                })
+        vector_by_id = dict(self.vectors.entries())
+        # `graph.vectors` is public and recovery/conformance callers may add
+        # vectors directly. If a node load tentatively marked a vector for
+        # deletion but the current index contains it, the current index wins.
+        for id_ in tuple(self._removed_vector_ids):
+            if id_ in vector_by_id:
+                self._dirty_vector_ids.add(id_)
+                self._removed_vector_ids.discard(id_)
+        vectors = [{"id": id_, "vector": vector_by_id[id_]} for id_ in self._dirty_vector_ids if id_ in vector_by_id]
         self._store.apply(
             put_nodes=nodes,
             delete_node_ids=list(self._removed_node_ids),
@@ -1859,6 +1947,10 @@ class PolyGraph:
         self._removed_node_ids.clear()
         self._removed_edge_ids.clear()
         self._removed_vector_ids.clear()
+        self._dirty_node_ids.clear()
+        self._dirty_edge_ids.clear()
+        self._dirty_vector_ids.clear()
+        self._dirty = False
 
     def _load_from_store(self) -> None:
         if self._store is None:
@@ -1902,6 +1994,8 @@ class PolyGraph:
         now = int(time.time() * 1000)
         node["activation"] = _reinforce_activation(node.get("activation"), float(amount), now)
         node["updatedAt"] = now
+        self._dirty_node_ids.add(id_)
+        self._dirty = True
         return _copy_node(node)
 
     def reinforce_node_safe(self, id_: str, amount: float, reason: Optional[str] = None) -> Optional[Node]:
@@ -1952,6 +2046,8 @@ class PolyGraph:
                 "lastMeaningfulActivation": now,
             }
             node["updatedAt"] = now
+            self._dirty_node_ids.add(node["id"])
+            self._dirty = True
 
     # ── ownership internals ──
 
@@ -1991,6 +2087,7 @@ class PolyGraph:
             edges = self._edges.get(src, {})
             for key in [k for k, e in edges.items() if e["target"] == id_]:
                 del edges[key]
+                self._dirty_edge_ids.discard(key)
                 self._removed_edge_ids.add(key)
             if not edges:
                 self._edges.pop(src, None)
@@ -2001,10 +2098,94 @@ class PolyGraph:
         if outgoing:
             for key, e in outgoing.items():
                 self._decrement_incoming(e["target"], id_)
+                self._dirty_edge_ids.discard(key)
                 self._removed_edge_ids.add(key)
 
 
 # ── Query builder ──
+
+
+class PersistedGraphQuery:
+    """Fluent query executed directly by the native persisted store.
+
+    This deliberately covers the storage-level query contract. Similarity,
+    joins, and traversal remain hot-graph operations until their corresponding
+    store indexes can execute without materialising records in Python.
+    """
+
+    def __init__(self, graph: PolyGraph) -> None:
+        self._graph = graph
+        self._node_types: Optional[list[str]] = None
+        self._attributes: dict[str, Any] = {}
+        self._ranges: dict[str, dict[str, float]] = {}
+        self._order: Optional[dict[str, str]] = None
+        self._offset: Optional[int] = None
+        self._limit: Optional[int] = None
+
+    def where_type(self, *types: str) -> "PersistedGraphQuery":
+        self._node_types = list(types)
+        return self
+
+    def where(self, field: str, value: Any) -> "PersistedGraphQuery":
+        self._attributes[field] = value
+        return self
+
+    def where_range(self, field: str, above: Optional[float] = None, below: Optional[float] = None) -> "PersistedGraphQuery":
+        if above is not None and not math.isfinite(float(above)):
+            raise PolypackValueError("range above must be finite")
+        if below is not None and not math.isfinite(float(below)):
+            raise PolypackValueError("range below must be finite")
+        entry: dict[str, float] = {}
+        if above is not None:
+            entry["above"] = float(above)
+        if below is not None:
+            entry["below"] = float(below)
+        self._ranges[field] = entry
+        return self
+
+    def order_by(self, field: str, direction: str = "asc") -> "PersistedGraphQuery":
+        if direction not in ("asc", "desc"):
+            raise PolypackValueError("direction must be 'asc' or 'desc'")
+        self._order = {"field": field, "direction": direction}
+        return self
+
+    def offset(self, n: int) -> "PersistedGraphQuery":
+        if not isinstance(n, int) or isinstance(n, bool) or n < 0:
+            raise PolypackValueError("offset must be a non-negative integer")
+        self._offset = n
+        return self
+
+    def limit(self, n: int) -> "PersistedGraphQuery":
+        if not isinstance(n, int) or isinstance(n, bool) or n < 0:
+            raise PolypackValueError("limit must be a non-negative integer")
+        self._limit = n
+        return self
+
+    def _query(self, paginate: bool = True) -> dict:
+        query: dict[str, Any] = {}
+        if self._node_types is not None:
+            query["nodeTypes"] = list(self._node_types)
+        if self._attributes:
+            query["attributes"] = dict(self._attributes)
+        if self._ranges:
+            query["attributeRanges"] = copy.deepcopy(self._ranges)
+        if self._order is not None:
+            query["orderBy"] = dict(self._order)
+        if paginate:
+            if self._offset is not None:
+                query["offset"] = self._offset
+            if self._limit is not None:
+                query["limit"] = self._limit
+        return query
+
+    def to_list(self) -> list:
+        return self._graph._store.query_nodes(self._query())
+
+    def ids(self) -> list[str]:
+        return [node["id"] for node in self.to_list()]
+
+    def count(self) -> int:
+        return self._graph._store.count_nodes(self._query(paginate=False))
 
 
 class GraphSnapshot:
@@ -2285,29 +2466,37 @@ class GraphQuery:
             plan["limit"] = self._limit
         return plan
 
-    def _native_ids(self, plan: dict) -> Optional[list]:
-        """Run the plan through the Rust query executor; None on failure."""
+    def _native_ids(self, plan: dict, candidates: Optional[list[Node]] = None) -> Optional[list]:
+        """Run expensive plans through Rust; return None for hot simple plans."""
         if self._activation_above is not None or self._activation_order is not None:
             # The native executor doesn't understand activation filters — force
             # the pure-Python pipeline so results can't silently diverge.
             return None
+        # Crossing the Python/Rust boundary costs more than the local pipeline
+        # for ordinary filters/order/pagination. Native execution is reserved
+        # for similarity, joins, and traversal where the Rust executor can
+        # amortise the conversion cost over substantially more work.
+        if self._similarity is None and not self._joins and not self._traversal:
+            return None
         try:
-            nodes_source = self._indexed_candidates() if not self._joins and not self._traversal else self._graph._nodes.values()
-            nodes = [dict(n) for n in nodes_source]
+            nodes_source = candidates if candidates is not None and not self._joins and not self._traversal else self._graph._nodes.values()
+            needs_vectors = self._similarity is not None
+            nodes = [dict(n) if needs_vectors else {key: value for key, value in n.items() if key != "vector"} for n in nodes_source]
             edges = []
-            for edge_map in self._graph._edges.values():
-                for e in edge_map.values():
-                    edges.append(
-                        {
-                            "id": e["id"] if "id" in e else _edge_key(e["source"], e["type"], e["target"]),
-                            "source": e["source"],
-                            "target": e["target"],
-                            "type": e["type"],
-                            "data": dict(e.get("data") or {}),
-                            "createdAt": e.get("createdAt", 0),
-                            "revision": int(e.get("revision", 0)),
-                        }
-                    )
+            if self._joins or self._traversal:
+                for edge_map in self._graph._edges.values():
+                    for e in edge_map.values():
+                        edges.append(
+                            {
+                                "id": e["id"] if "id" in e else _edge_key(e["source"], e["type"], e["target"]),
+                                "source": e["source"],
+                                "target": e["target"],
+                                "type": e["type"],
+                                "data": dict(e.get("data") or {}),
+                                "createdAt": e.get("createdAt", 0),
+                                "revision": int(e.get("revision", 0)),
+                            }
+                        )
             return list(_execute_query_plan(nodes, edges, plan))
         except (TypeError, PolypackValueError):
             # Expected fallback: e.g. a non-JSON-serialisable filter value.
@@ -2317,8 +2506,9 @@ class GraphQuery:
     def _collect(self) -> list:
         started = time.perf_counter()
         plan = self._to_plan()
-        scanned_records = len(self._graph._nodes) if self._joins or self._traversal else len(self._indexed_candidates())
-        native_ids = self._native_ids(plan)
+        candidates = None if self._joins or self._traversal else self._indexed_candidates()
+        scanned_records = len(self._graph._nodes) if candidates is None else len(candidates)
+        native_ids = self._native_ids(plan, candidates)
         if native_ids is not None:
             maximum = self._limits.get("maxNodesVisited")
             if maximum is not None and len(native_ids) > maximum:
@@ -2333,13 +2523,14 @@ class GraphQuery:
             return results
         # Fallback: pure-Python pipeline (only reached if the native path
         # failed, e.g. a non-JSON-serialisable filter value).
-        results = self._collect_python(plan)
+        results = self._collect_python(plan, candidates)
         explanation = self.explain()
         self._graph._record_query((time.perf_counter() - started) * 1000, scanned_records, explanation["index"], explanation["indexes"])
         return results
 
-    def _collect_python(self, plan: dict) -> list:
-        candidates = self._indexed_candidates()
+    def _collect_python(self, plan: dict, candidates: Optional[list[Node]] = None) -> list:
+        if candidates is None:
+            candidates = self._indexed_candidates()
         results = [n for n in candidates if self._match(n)]
         if self._joins:
             results = [n for n in results if all(self._connected(n, et, d) for et, d in self._joins)]

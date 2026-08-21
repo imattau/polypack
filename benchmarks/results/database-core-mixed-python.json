@@ -1,0 +1,47 @@
+{
+  "schemaVersion": 1,
+  "lang": "python",
+  "initial": 2000,
+  "rounds": 200,
+  "dimensions": 32,
+  "schedule": "write,update,hotQuery,persistedQuery,vectorQuery",
+  "totalMs": 932.526733726263,
+  "finalNodeCount": 2200,
+  "operations": {
+    "write": {
+      "count": 200,
+      "p50Ms": 1.3517457991838455,
+      "p95Ms": 2.0674457773566246,
+      "p99Ms": 4.396684933453798,
+      "opsPerSec": 675.9979291987524
+    },
+    "update": {
+      "count": 200,
+      "p50Ms": 1.323177944868803,
+      "p95Ms": 2.0327121019363403,
+      "p99Ms": 4.753643646836281,
+      "opsPerSec": 685.0127726109629
+    },
+    "hotQuery": {
+      "count": 200,
+      "p50Ms": 0.19575189799070358,
+      "p95Ms": 0.35991426557302475,
+      "p99Ms": 0.4369700327515602,
+      "opsPerSec": 4706.079068866404
+    },
+    "persistedQuery": {
+      "count": 200,
+      "p50Ms": 0.43655093759298325,
+      "p95Ms": 0.671721063554287,
+      "p99Ms": 0.9764847345650196,
+      "opsPerSec": 2147.2005503434398
+    },
+    "vectorQuery": {
+      "count": 200,
+      "p50Ms": 0.07532816380262375,
+      "p95Ms": 0.11179829016327858,
+      "p99Ms": 0.14763092622160912,
+      "opsPerSec": 12213.402774616186
+    }
+  }
+}

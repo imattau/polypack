@@ -28,8 +28,9 @@ Before submitting, ensure `npm run check` passes.
 ## Publishing
 
 Publishing a GitHub release triggers `.github/workflows/release.yml`, which
-runs the full check suite (`npm run check`, `cargo test`/`clippy`, Python
-tests against a built wheel) as a gate, then publishes across every
+runs the full check suite (`npm run check`, `cargo test`/`clippy` with
+`--manifest-path crates/Cargo.toml`, Python tests against a built wheel) as a
+gate, then publishes across every
 ecosystem: the TypeScript package to npm, per-platform native addons plus
 the `@0xx0lostcause0xx0/polypack-native` wrapper to npm, `polypack-core` and
 `polypack-graph` to crates.io, and Python wheels to PyPI as `polypack-db`.

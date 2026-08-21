@@ -83,6 +83,36 @@ def test_graph_query_and_vectors():
     assert [r[0] for r in graph.vectors.query([1, 0, 0], 2)] == ["n0", "n1"]
 
 
+def test_persisted_query_runs_in_native_store(tmp_path):
+    graph = PolyGraph.open(str(tmp_path / "store"))
+    for i in range(100):
+        graph.add_node({
+            "id": f"n{i}",
+            "type": "post" if i % 2 == 0 else "comment",
+            "data": {"score": i, "bucket": i % 5},
+            "insertedAt": i,
+            "updatedAt": i,
+        })
+    query = graph.query_persisted().where_type("post").where("bucket", 2).order_by("score", "desc").limit(3)
+    assert query.ids() == ["n92", "n82", "n72"]
+    assert query.count() == 10
+    graph.close_store()
+
+
+def test_simple_hot_query_stays_local_when_native_executor_is_unavailable(monkeypatch):
+    graph = PolyGraph()
+    for i in range(20):
+        graph.add_node({
+            "id": f"n{i}",
+            "type": "post",
+            "data": {"score": i, "bucket": i % 2},
+            "insertedAt": i,
+            "updatedAt": i,
+        })
+    monkeypatch.setattr(polypack, "_execute_query_plan", lambda *_args: (_ for _ in ()).throw(AssertionError("native executor should not run")))
+    assert graph.query().where_type("post").where("bucket", 0).order_by("score", "desc").limit(3).ids() == ["n18", "n16", "n14"]
+
+
 def test_secondary_indexes_filter_equality_and_numeric_ranges():
     graph = PolyGraph()
     graph.define_index("email", ["email"], unique=True)
@@ -260,6 +290,36 @@ def test_persist_round_trip(tmp_path):
     assert g2.get_node("n1")["data"] == {"title": "Hello"}
     assert g2.get_edge_targets("n1", "LINKS") == ["n2"]
     g2.close_store()
+
+
+def test_close_after_save_does_not_append_a_duplicate_mutation(tmp_path):
+    graph = PolyGraph.open(str(tmp_path))
+    graph.add_node({"id": "a", "type": "t", "data": {}, "insertedAt": 1, "updatedAt": 1})
+    graph.save()
+    assert len(graph.mutation_log()) == 1
+
+    graph.close_store()
+
+    reopened = PolyGraph.open(str(tmp_path))
+    assert len(reopened.mutation_log()) == 1
+    assert reopened.get_node("a") is not None
+    reopened.close_store()
+
+
+def test_save_flushes_only_records_changed_since_last_save(tmp_path):
+    graph = PolyGraph.open(str(tmp_path))
+    for i in range(3):
+        graph.add_node({"id": str(i), "type": "t", "data": {}, "insertedAt": i, "updatedAt": i})
+    graph.save()
+
+    graph.patch_node("1", set={"data.changed": True})
+    graph.save()
+
+    records = graph.mutation_log()
+    assert len(records) == 2
+    changed_ids = [operation["payload"]["id"] for operation in records[1]["operations"] if operation["operationType"] == "putNode"]
+    assert changed_ids == ["1"]
+    graph.close_store()
 
 
 def test_latest_mutation_sequence_cursor(tmp_path):

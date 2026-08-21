@@ -46,6 +46,14 @@ graph.query().where("title", "Quantum Computing").traverse("REFERENCES", 3).to_l
 graph.query().where_type("book").aggregate("price", "avg")
 ```
 
+For directory-backed stores, use `graph.query_persisted()` for filters,
+ordering, pagination, and counts. These operations execute in the native store
+and only materialize the requested result page in Python:
+
+```python
+graph.query_persisted().where_type("book").order_by("price", "desc").limit(20).to_list()
+```
+
 ## Persistence
 
 `PolyGraph.open(directory)` attaches a directory-backed binary store

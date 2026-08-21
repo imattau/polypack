@@ -394,14 +394,15 @@ impl Storage for FsStorage {
         std::fs::create_dir_all(&self.dir)
             .map_err(|e| polypack_core::PolypackError::Storage(e.to_string()))?;
         // Write-then-rename: a crash mid-write leaves the previous snapshot
-        // intact instead of a torn file, and the tmp file is fsynced first
-        // so the rename can never land ahead of its data on disk.
+        // intact instead of a torn file. Fsyncing the tmp file before the
+        // rename is `Store`'s call via the explicit `sync()`/`sync_dir()` it
+        // issues only under `Durability::Fsync` — doing it unconditionally
+        // here silently upgraded `Durability::Process` ("written to the OS,
+        // not fsynced") into an always-fsync adapter.
         let tmp_path = self.dir.join(format!("{name}.tmp"));
         let mut file = std::fs::File::create(&tmp_path)
             .map_err(|e| polypack_core::PolypackError::Storage(e.to_string()))?;
         file.write_all(data)
-            .map_err(|e| polypack_core::PolypackError::Storage(e.to_string()))?;
-        file.sync_all()
             .map_err(|e| polypack_core::PolypackError::Storage(e.to_string()))?;
         drop(file);
         std::fs::rename(&tmp_path, self.dir.join(name))
