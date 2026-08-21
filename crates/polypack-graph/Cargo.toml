@@ -13,7 +13,7 @@ categories = ["data-structures", "algorithms", "database"]
 name = "polypack_graph"
 
 [dependencies]
-polypack-core = { path = "../polypack-core", version = "3.0.0" }
+polypack-core = { path = "../polypack-core", version = "3.0.1" }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 

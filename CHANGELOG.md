@@ -3,6 +3,31 @@
 All notable changes to this project are documented here. This project follows
 [Semantic Versioning](https://semver.org/).
 
+## [3.0.1] - 2026-08-21
+
+### Fixed
+
+- Restored an edge-id integrity check in the Rust graph's `rebuild_edge_index`
+  (rejecting empty ids) that had been dropped while adding support for
+  independent edge IDs.
+- Python `DirectoryStorage` now implements real `sync`/`sync_dir` (fsync),
+  bridged from the native storage adapter, so its advertised `fsync`
+  capability is honest.
+- Rust `attribute_ranges` queries now resolve nested dot-path fields the same
+  way `attributes` does, instead of only matching flat top-level fields.
+- Rust's in-memory `GraphQuery` index selection now excludes a sparse index
+  when the queried value is `null`, matching `PersistedGraphQuery`.
+- Rust `count_nodes` now derives its `maxNodesVisited` candidate set the same
+  way `query_nodes` does, instead of always falling back to the full store
+  size.
+- The TypeScript `BinaryStoreAdapter` now dedups retried batches by
+  `transactionId` as well as `operationId`, matching the Rust/Python
+  idempotency contract.
+- Rust's `SyncServer::submit` adds a `clientId:seq` fallback dedup (evicted
+  alongside the ops ring buffer), matching the TypeScript server.
+- Python's `SyncServer.receive` stops evaluating `conflict()` for an
+  operation `authorize()` already rejected, matching the TypeScript server.
+
 ## [3.0.0] - Unreleased
 
 ### Added
