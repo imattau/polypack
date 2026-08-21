@@ -77,12 +77,18 @@ export class MigrationRegistry {
     await graph.flush()
     const allNodes = (await graph.queryPersisted().toArray()).sort((a, b) => a.id.localeCompare(b.id))
     const allEdges = (await graph.persistence.getAllEdges()).sort((a, b) => a.id.localeCompare(b.id))
-    const nodeStart = options.resumeAfter?.nodeId
-      ? Math.max(0, allNodes.findIndex(node => node.id === options.resumeAfter!.nodeId) + 1)
-      : 0
-    const edgeStart = options.resumeAfter?.edgeId
-      ? Math.max(0, allEdges.findIndex(edge => edge.id === options.resumeAfter!.edgeId) + 1)
-      : 0
+    let nodeStart = 0
+    if (options.resumeAfter?.nodeId) {
+      const index = allNodes.findIndex(node => node.id === options.resumeAfter!.nodeId)
+      if (index === -1) throw new MigrationError(`resumeAfter.nodeId ${options.resumeAfter.nodeId} was not found; refusing to silently restart the migration from the beginning`)
+      nodeStart = index + 1
+    }
+    let edgeStart = 0
+    if (options.resumeAfter?.edgeId) {
+      const index = allEdges.findIndex(edge => edge.id === options.resumeAfter!.edgeId)
+      if (index === -1) throw new MigrationError(`resumeAfter.edgeId ${options.resumeAfter.edgeId} was not found; refusing to silently restart the migration from the beginning`)
+      edgeStart = index + 1
+    }
     const nodes = allNodes.slice(nodeStart)
     const edges = allEdges.slice(edgeStart)
     const report: MigrationReport = { from, to, processed: 0, total: nodes.length + edges.length, migrated: 0, dryRun: options.dryRun === true }

@@ -354,6 +354,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("PolypackCorruptDataError", m.py().get_type::<PolypackCorruptDataError>())?;
     m.add("PolypackStorageError", m.py().get_type::<PolypackStorageError>())?;
     m.add("ConflictError", m.py().get_type::<ConflictError>())?;
+    m.add("ResourceLimitError", m.py().get_type::<ResourceLimitError>())?;
     Ok(())
 }
 

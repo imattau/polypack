@@ -581,7 +581,7 @@ impl Graph {
                 }
                 validate_node(&migrated)?;
                 self.validate_node_schema(&migrated)?;
-                if migrated != original { migrated_nodes += 1; nodes.push(migrated); }
+                if migrated != original { migrated_nodes += 1; nodes.push((original.revision, migrated)); }
             }
             processed_nodes_so_far += batch.len();
             if let Some(on_progress) = &options.on_progress {
@@ -610,7 +610,20 @@ impl Graph {
         let report = MigrationReport { from, to, processed_nodes, processed_edges, migrated_nodes, migrated_edges, dry_run: options.dry_run };
         if options.dry_run || from == to { return Ok(report); }
         self.transaction(|graph| {
-            for node in nodes { graph.add_node(node)?; }
+            for (expected_revision, node) in nodes {
+                let id = node.id.clone();
+                // Guard against the node having changed since the snapshot was
+                // read at the top of `migrate`, mirroring the revision-CAS
+                // check edges get via `update_edge_if_revision` below.
+                // `get_node_safe` (not `graph.nodes.get`) so a node merely
+                // evicted from the hot cache since the snapshot — still
+                // durably unchanged — isn't mistaken for a conflict.
+                let actual = graph.get_node_safe(&id)?.map(|n| n.revision);
+                if actual != Some(expected_revision) {
+                    return Err(PolypackError::Conflict { id, expected: expected_revision, actual: actual.unwrap_or(0) });
+                }
+                graph.add_node(node)?;
+            }
             for edge in edges {
                 let (ownership, data) = decode_ownership(edge.data.clone());
                 graph.update_edge_if_revision(&edge.id, data, Some(ownership), edge.revision)?;
@@ -658,14 +671,16 @@ impl Graph {
     }
 
     fn validate_node_indexes(&self, node: &Node, exclude_id: Option<&str>) -> Result<()> {
-        for index in self.indexes.values().filter(|index| index.unique && index.node_type.as_deref().is_none_or(|node_type| node_type == node.node_type)) {
-            let values: Vec<_> = index.fields.iter().map(|field| get_data_path(&serde_json::Value::Object(node.data.clone()), &field.split('.').collect::<Vec<_>>()).cloned()).collect();
-            if index.sparse && values.iter().any(Option::is_none) { continue; }
-            for other in self.nodes.values().filter(|other| Some(other.id.as_str()) != exclude_id && index.node_type.as_deref().is_none_or(|node_type| node_type == other.node_type)) {
-                let other_values: Vec<_> = index.fields.iter().map(|field| get_data_path(&serde_json::Value::Object(other.data.clone()), &field.split('.').collect::<Vec<_>>()).cloned()).collect();
-                if values == other_values {
-                    return Err(PolypackError::InvalidArgument(format!("unique index {} would be violated by node {}", index.name, node.id)));
-                }
+        // Check the maintained `secondary_indexes` buckets rather than only
+        // `self.nodes` (the hot LRU cache): a node evicted from the hot cache
+        // is still durably persisted and must still count as a conflict.
+        // `secondary_indexes` is kept complete for every persisted node (see
+        // `load_index_metadata`, `define_index`, and `evict_from_by_type`).
+        for index in self.indexes.values().filter(|index| index.unique) {
+            let Some(key) = indexed_value_key(node, index) else { continue };
+            let Some(bucket) = self.secondary_indexes.get(&index.name).and_then(|buckets| buckets.get(&key)) else { continue };
+            if bucket.iter().any(|id| Some(id.as_str()) != exclude_id) {
+                return Err(PolypackError::InvalidArgument(format!("unique index {} would be violated by node {}", index.name, node.id)));
             }
         }
         Ok(())
@@ -1191,10 +1206,22 @@ impl Graph {
             }
         }
         self.reserve_transaction_mutations(nodes.len())?;
+        // Track unique-index keys claimed earlier in this same batch so two
+        // nodes conflicting only with each other (neither yet in
+        // `secondary_indexes`) are still caught, matching `add_node`'s
+        // per-insert enforcement.
+        let mut pending_keys: HashMap<&str, HashSet<String>> = HashMap::new();
         for n in &nodes {
             self.validate_node_resource_limits(n)?;
             validate_node(n)?;
             self.validate_node_schema(n)?;
+            self.validate_node_indexes(n, Some(&n.id))?;
+            for index in self.indexes.values().filter(|index| index.unique) {
+                let Some(key) = indexed_value_key(n, index) else { continue };
+                if !pending_keys.entry(index.name.as_str()).or_default().insert(key) {
+                    return Err(PolypackError::InvalidArgument(format!("unique index {} would be violated by node {}", index.name, n.id)));
+                }
+            }
         }
         self.start_batch();
         for n in nodes {
@@ -2361,6 +2388,22 @@ impl Graph {
         }
     }
 
+    /// Drop a node's hot-cache-only bookkeeping (`by_type`) without touching
+    /// `secondary_indexes`. Eviction only removes the node from the hot LRU
+    /// cache — the node is still durably persisted — so its secondary index
+    /// entries (used by both hot and persisted queries, and by unique-index
+    /// enforcement) must stay intact, unlike a real delete via `unindex_node`.
+    fn evict_from_by_type(&mut self, id: &str) {
+        let Some(node) = self.nodes.get(id) else { return };
+        if let Some(set) = self.by_type.get_mut(&node.node_type) {
+            set.remove(id);
+            if set.is_empty() {
+                let node_type = node.node_type.clone();
+                self.by_type.remove(&node_type);
+            }
+        }
+    }
+
     fn add_secondary_index_entry(&mut self, node: &Node) {
         for (name, definition) in &self.indexes {
             let Some(key) = indexed_value_key(node, definition) else { continue };
@@ -2409,7 +2452,7 @@ impl Graph {
                     self.evicted_dirty_nodes.insert(evict_id.clone(), node.clone());
                 }
             }
-            self.unindex_node(&evict_id);
+            self.evict_from_by_type(&evict_id);
             self.nodes.remove(&evict_id);
             self.hnsw.remove(&evict_id);
         }

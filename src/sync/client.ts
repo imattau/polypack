@@ -365,6 +365,7 @@ export class SyncClient {
       return
     }
     if (msg.type === 'snapshot' && msg.clientId === 'server') {
+      for (const error of msg.errors ?? []) this.onError?.(error)
       if (msg.checksum && msg.checksum !== syncChecksum(msg.ops)) {
         this.onError?.({ code: 'checksum_mismatch', message: 'Snapshot checksum mismatch' })
         this.requestSync(true)
@@ -377,6 +378,7 @@ export class SyncClient {
       return
     }
     if (msg.type === 'delta' && msg.clientId === 'server') {
+      for (const error of msg.errors ?? []) this.onError?.(error)
       if (msg.checksum && msg.checksum !== syncChecksum(msg.ops)) {
         this.onError?.({ code: 'checksum_mismatch', message: 'Delta checksum mismatch' })
         this.requestSync(true)

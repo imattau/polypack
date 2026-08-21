@@ -10,7 +10,7 @@ use polypack_core::vector::{DistanceFn, ExactIndex};
 use polypack_core::NodeActivation as CoreNodeActivation;
 use std::cell::RefCell;
 use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::Write;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[napi(object)]
@@ -341,15 +341,16 @@ impl FsStorage {
 
 impl Drop for FsStorage {
     fn drop(&mut self) {
-        let Some(mut lock_file) = self.lock_file.take() else { return };
-        let mut contents = String::new();
-        let _ = lock_file.seek(SeekFrom::Start(0));
-        let owns_lock = lock_file.read_to_string(&mut contents).is_ok()
-            && contents.contains(&format!(r#""token":"{}""#, self.lock_token));
-        drop(lock_file);
-        if owns_lock {
-            let _ = fs::remove_file(self.dir.join("store.lock"));
+        if self.lock_file.take().is_none() {
+            return;
         }
+        // Re-read the lock file by path rather than through the retained file
+        // descriptor: on POSIX, unlinking a path leaves an open fd pointing at
+        // the old (now-detached) inode, so reading via the fd can observe our
+        // own stale content even after another process has since replaced the
+        // lock at that path. A fresh path-based read reflects whichever lock
+        // is actually current, so we only ever delete a lock we still own.
+        release_store_lock(&self.dir, &self.lock_token);
     }
 }
 

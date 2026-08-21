@@ -88,7 +88,7 @@ export class SyncServer {
 
   private handleMessage(msg: SyncMessage, sender: SyncServerClient): void {
     if (msg.protocolVersion !== undefined && msg.protocolVersion !== this.options.protocolVersion) {
-      sender.send({ type: 'ack', clientId: 'server', fromSeq: msg.fromSeq, ops: [], protocolVersion: this.options.protocolVersion, errors: [{ code: 'protocol_version', message: `Unsupported sync protocol version ${msg.protocolVersion}` }] })
+      sender.send({ type: 'ack', clientId: msg.clientId, fromSeq: msg.fromSeq, ops: [], protocolVersion: this.options.protocolVersion, errors: [{ code: 'protocol_version', message: `Unsupported sync protocol version ${msg.protocolVersion}` }] })
       return
     }
     if (msg.type === 'request-snapshot') {
@@ -311,8 +311,12 @@ export class SyncServer {
   }
 
   private forgetOperation(op: SyncOp): void {
+    // Only the seq-keyed entry is bounded by the ring buffer. `operationId`
+    // (like `transactionId`, which was already never removed here) must stay
+    // recognized forever so a delayed retry after compaction is still deduped
+    // instead of being re-accepted and re-broadcast as a duplicate mutation.
+    // Matches the Rust and Python sync implementations.
     this.seenOps.delete(`${op.clientId}:${op.seq}`)
-    if (op.operationId) this.seenOperationIds.delete(`${op.clientId}:${op.operationId}`)
   }
 
   /** Every operation the server has accepted, in order. */

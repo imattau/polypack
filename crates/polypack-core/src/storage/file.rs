@@ -7,7 +7,7 @@
 use super::store::{AdapterCapabilities, Storage, VectorSearchCapability};
 use crate::error::{PolypackError, Result};
 use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -79,6 +79,7 @@ impl Drop for FileStorage {
     fn drop(&mut self) {
         let Some(mut file) = self.lock_file.take() else { return };
         let mut contents = String::new();
+        let _ = file.seek(SeekFrom::Start(0));
         let _ = file.read_to_string(&mut contents);
         let owns_lock = self.lock_token.as_ref().is_some_and(|token| contents.contains(&format!(r#""token":"{}""#, token)));
         drop(file);
@@ -104,10 +105,15 @@ impl Storage for FileStorage {
         file.sync_all().map_err(|error| PolypackError::Storage(error.to_string()))?;
         drop(file);
         if let Err(error) = fs::rename(&temp, &target) {
-            if target.exists() {
+            // On Windows, rename fails with AlreadyExists when the target is present;
+            // only that specific failure warrants clearing the target before retrying.
+            // Any other error (disk full, permissions, AV lock, etc.) must not delete
+            // the existing durable file, or a failed retry would lose it permanently.
+            if error.kind() == std::io::ErrorKind::AlreadyExists {
                 fs::remove_file(&target).map_err(|remove_error| PolypackError::Storage(remove_error.to_string()))?;
                 fs::rename(&temp, &target).map_err(|rename_error| PolypackError::Storage(rename_error.to_string()))?;
             } else {
+                let _ = fs::remove_file(&temp);
                 return Err(PolypackError::Storage(error.to_string()));
             }
         }

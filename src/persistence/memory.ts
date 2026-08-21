@@ -168,15 +168,12 @@ export class MemoryAdapter implements PersistenceAdapter {
   }
 
   async putNode(node: SerializedNode): Promise<void> {
-    this.indexNode(node)
-    this.nodes.set(node.id, node)
-    this.touchNode(node.id)
-    this.evictIfOverCap()
+    await this.applyChanges({ putNodes: [node], deleteNodeIds: [], putEdges: [], deleteEdgeIds: [], putVectors: [], deleteVectorIds: [] })
   }
 
   async bulkPutNodes(nodes: SerializedNode[]): Promise<void> {
-    for (const node of nodes) { this.indexNode(node); this.nodes.set(node.id, node); this.touchNode(node.id) }
-    this.evictIfOverCap()
+    if (nodes.length === 0) return
+    await this.applyChanges({ putNodes: nodes, deleteNodeIds: [], putEdges: [], deleteEdgeIds: [], putVectors: [], deleteVectorIds: [] })
   }
 
   async getNode(id: string): Promise<SerializedNode | undefined> {
@@ -188,13 +185,12 @@ export class MemoryAdapter implements PersistenceAdapter {
   }
 
   async deleteNode(id: string): Promise<void> {
-    this.unindexNode(id)
-    this.nodes.delete(id)
-    this.nodeOrder.delete(id)
+    await this.applyChanges({ putNodes: [], deleteNodeIds: [id], putEdges: [], deleteEdgeIds: [], putVectors: [], deleteVectorIds: [] })
   }
 
   async bulkDeleteNodes(ids: string[]): Promise<void> {
-    for (const id of ids) { this.unindexNode(id); this.nodes.delete(id); this.nodeOrder.delete(id) }
+    if (ids.length === 0) return
+    await this.applyChanges({ putNodes: [], deleteNodeIds: ids, putEdges: [], deleteEdgeIds: [], putVectors: [], deleteVectorIds: [] })
   }
 
   async allNodeIds(): Promise<string[]> {
@@ -255,12 +251,12 @@ export class MemoryAdapter implements PersistenceAdapter {
   }
 
   async putEdge(edge: SerializedEdge): Promise<void> {
-    this.edges.set(edge.id, edge)
-    this.indexEdge(edge)
+    await this.applyChanges({ putNodes: [], deleteNodeIds: [], putEdges: [edge], deleteEdgeIds: [], putVectors: [], deleteVectorIds: [] })
   }
 
   async bulkPutEdges(edges: SerializedEdge[]): Promise<void> {
-    for (const edge of edges) { this.edges.set(edge.id, edge); this.indexEdge(edge) }
+    if (edges.length === 0) return
+    await this.applyChanges({ putNodes: [], deleteNodeIds: [], putEdges: edges, deleteEdgeIds: [], putVectors: [], deleteVectorIds: [] })
   }
 
   async getAllEdges(): Promise<SerializedEdge[]> {
@@ -302,24 +298,25 @@ export class MemoryAdapter implements PersistenceAdapter {
   }
 
   async deleteEdge(id: string): Promise<void> {
-    this.unindexEdge(id)
-    this.edges.delete(id)
+    await this.applyChanges({ putNodes: [], deleteNodeIds: [], putEdges: [], deleteEdgeIds: [id], putVectors: [], deleteVectorIds: [] })
   }
 
   async bulkDeleteEdges(ids: string[]): Promise<void> {
-    for (const id of ids) { this.unindexEdge(id); this.edges.delete(id) }
+    if (ids.length === 0) return
+    await this.applyChanges({ putNodes: [], deleteNodeIds: [], putEdges: [], deleteEdgeIds: ids, putVectors: [], deleteVectorIds: [] })
   }
 
   async putVector(id: string, vector: number[]): Promise<void> {
-    this.vectors.set(id, vector)
+    await this.applyChanges({ putNodes: [], deleteNodeIds: [], putEdges: [], deleteEdgeIds: [], putVectors: [{ id, vector }], deleteVectorIds: [] })
   }
 
   async bulkPutVectors(entries: Array<{ id: string; vector: number[] }>): Promise<void> {
-    for (const entry of entries) this.vectors.set(entry.id, entry.vector)
+    if (entries.length === 0) return
+    await this.applyChanges({ putNodes: [], deleteNodeIds: [], putEdges: [], deleteEdgeIds: [], putVectors: entries, deleteVectorIds: [] })
   }
 
   async deleteVector(id: string): Promise<void> {
-    this.vectors.delete(id)
+    await this.applyChanges({ putNodes: [], deleteNodeIds: [], putEdges: [], deleteEdgeIds: [], putVectors: [], deleteVectorIds: [id] })
   }
 
   async getVectors(ids: string[]): Promise<Array<{ id: string; vector: number[] }>> {

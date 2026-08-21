@@ -487,10 +487,20 @@ impl Store {
     pub fn mutation_log(&mut self) -> Result<Vec<MutationRecord>> {
         self.assert_open()?;
         let Some(data) = self.storage.read(MUTATION_LOG_FILE)? else { return Ok(Vec::new()) };
-        data.split(|byte| *byte == b'\n')
-            .filter(|line| !line.is_empty())
-            .map(|line| serde_json::from_slice(line).map_err(|error| PolypackError::CorruptData(format!("mutation log: {error}"))))
-            .collect()
+        let lines: Vec<&[u8]> = data.split(|byte| *byte == b'\n').filter(|line| !line.is_empty()).collect();
+        let last_index = lines.len().checked_sub(1);
+        let mut records = Vec::with_capacity(lines.len());
+        for (index, line) in lines.into_iter().enumerate() {
+            match serde_json::from_slice(line) {
+                Ok(record) => records.push(record),
+                // A crash mid-append can leave a truncated final line; tolerate that
+                // one case so an otherwise-intact log still loads. Any other line
+                // failing to parse is genuine corruption and must still error.
+                Err(_) if Some(index) == last_index => break,
+                Err(error) => return Err(PolypackError::CorruptData(format!("mutation log: {error}"))),
+            }
+        }
+        Ok(records)
     }
 
     pub fn mutation_log_since(&mut self, sequence: u64) -> Result<Vec<MutationRecord>> {
@@ -1193,9 +1203,11 @@ impl Store {
         metadata: Option<serde_json::Value>,
     ) -> Result<()> {
         self.ensure_loaded()?;
-        validate_batch(changes)?;
-        self.validate_pending_schema(changes)?;
-        self.validate_pending_indexes(changes)?;
+        // Check idempotency before schema/index validation: a retry of an
+        // already-committed operation_id/transaction_id must return Ok even if
+        // the schema has since changed in a way that would reject the same
+        // payload today. Validating first would break the idempotent-retry
+        // guarantee this dedup check exists to provide.
         if (operation_id.is_some() || transaction_id.is_some())
             && self.mutation_log()?.iter().any(|record|
                 operation_id.is_some_and(|id| record.operation_id == id)
@@ -1203,6 +1215,9 @@ impl Store {
         {
             return Ok(());
         }
+        validate_batch(changes)?;
+        self.validate_pending_schema(changes)?;
+        self.validate_pending_indexes(changes)?;
         let mut entries: Vec<WalEntry> = Vec::new();
         for id in &changes.delete_node_ids {
             entries.push(WalEntry::DeleteNode(id.clone()));

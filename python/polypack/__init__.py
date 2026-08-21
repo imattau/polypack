@@ -590,7 +590,7 @@ def _lock_store_file(lock_file: Any, read_only: bool) -> None:
         lock_file.seek(0)
         msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
     else:
-        fcntl.flock(lock_file.fileno(), fcntl.LOCK_SH if read_only else fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(lock_file.fileno(), (fcntl.LOCK_SH if read_only else fcntl.LOCK_EX) | fcntl.LOCK_NB)
 
 
 def _unlock_store_file(lock_file: Any) -> None:
