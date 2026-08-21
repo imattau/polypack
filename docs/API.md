@@ -6,6 +6,11 @@ optional and only loaded by `@0xx0lostcause0xx0/polypack/react`.
 
 ## `@0xx0lostcause0xx0/polypack`
 
+This reference documents the TypeScript package. The Python binding is a
+separate package with `snake_case` method names and a deliberately smaller
+persisted-query surface; see [python/README.md](../python/README.md) for its
+public API and binding-specific behavior.
+
 ### `PolyGraph`
 
 ```ts
@@ -52,6 +57,11 @@ Lifecycle:
 - `dispose()` flushes queued mutations, clears memory, then closes the adapter.
 - `clear()` only clears in-memory state; it does not delete adapter contents.
 - `prune(maxNodes)` removes the oldest loaded nodes and applies ownership rules.
+- `transaction(callback, options?)` provides atomic read-your-own-writes,
+  rollback, nested-transaction rejection, and post-commit events. Options may
+  include `operationId`, `actor`, `baseRevision`, and `metadata`; these values
+  are retained in the durable mutation record when the adapter supports a
+  change feed.
 
 Nodes:
 
@@ -295,6 +305,9 @@ comparisons reject vectors with mismatched dimensions.
   rewrites the snapshot quadratically. Startup replays the WAL, then persists a
   snapshot before deleting it so a crash between those steps loses nothing.
   Recovery also tolerates a truncated WAL tail from a mid-append crash.
+  Schema definitions supplied in an atomic `applyChanges` commit are included
+  in the WAL and snapshot; the legacy `schemas.json` sidecar remains readable
+  for older stores.
 - `syncWrites: true` fsyncs WAL appends and snapshot writes (including the
   containing directory) for crash durability at a throughput cost.
 - `BinaryStoreAdapter` lives behind platform subpaths so the core entry point
@@ -309,6 +322,17 @@ comparisons reject vectors with mismatched dimensions.
   `deleteFile`, `fileExists`. Implement it to plug in any backing store.
 - `PersistenceAdapter` is the contract for custom storage. It contains node,
   edge, and vector single/bulk operations plus `clearAll()` and `close()`.
+- Adapters that expose `changeFeed` provide the durable logical log through
+  `graph.mutationLogSince(sequence)`, `graph.mutationLogPage(sequence, limit)`,
+  and `graph.latestMutationSequence()`.
+  Sequences are exclusive `bigint` cursors, so callers can resume replication
+  or audit scans without rereading acknowledged records.
+- Adapters may implement `getSchemaDefinitions()` and
+  `setSchemaDefinitions()` to persist structural node/edge schema metadata.
+  The canonical file shape is `nodeTypes[{ nodeType, ... }]` and
+  `edgeTypes[{ edgeType, ... }]`, shared with the Rust and Python bindings.
+  Runtime validator callbacks are intentionally not serialized; applications
+  must register those callbacks again after opening a store.
 - `PersistenceChanges` describes one logical node/edge/vector commit. Adapters
   may implement `applyChanges(changes)` to commit it atomically; `PolyGraph`
   prefers this hook and restores the complete dirty batch when it rejects.
@@ -493,10 +517,16 @@ payloads** — activation is accumulated knowledge, not last-write-wins data.
 
 - `OpLog(clientId, existing?)` appends sequenced `SyncOp` values and exposes
   `since(seq)`, `all`, `latestSeq`, and `size`.
+- `MemorySyncClientStateStore` and `FileSyncClientStateStore` persist pending
+  operations plus the acknowledged client and server cursors. Use
+  `await SyncClient.restore({ graph, transport, stateStore, clientId? })` to
+  resume a client after restart. `await client.persist()` waits for the latest
+  local state to be durable; the file store includes a checksum and rejects
+  corrupted state.
 - `SyncAdapter(inner, clientId)` wraps persistence and records successful node
   and edge writes in its `oplog`; set `onOp` to observe them.
 - `SyncClient({ graph, transport, clientId?, autoFlush?, retryMs?,
-  activationSyncThreshold? })` captures graph events, retains operations until
+  activationSyncThreshold?, stateStore? })` captures graph events, retains operations until
   acknowledged, retries unacknowledged deltas, detects server-cursor gaps, and
   applies remote operations with echo suppression. `retryMs` defaults
   to 1,000 ms and `0` disables automatic retry. `activationSyncThreshold`
@@ -506,16 +536,31 @@ payloads** — activation is accumulated knowledge, not last-write-wins data.
   `syncCursor`, call `reconnect(transport)` to replace a transport, resend pending
   work, and request missing server operations, and use `disconnect()` to flush
   any pending operations and close.
-- `SyncServer` is an in-memory relay. `addClient(handle)` returns that client's
+- `SyncServer` is an in-memory relay by default. Pass a `SyncOperationLog` as
+  `operationLog` and await `ready()` before accepting clients to restore and
+  durably append the server history. `maxBatchOps` bounds an incoming envelope
+  and `maxPendingOps` applies back-pressure to the durable queue. A rejected
+  envelope receives an `ack` with `pending_too_large`; retry it after the queue
+  drains. A storage failure returns a `persistence_error` acknowledgement and
+  causes `await server.flush()` to reject with the underlying error, so callers
+  can retry after repairing the log. `await server.flush()` waits for all
+  durable submissions accepted so far to reach the operation log.
+  `addClient(handle)` returns that client's
   incoming-message handler, `removeClient(handle)` unregisters it, and `ops`
   exposes the received log. The server deduplicates operations by client and
-  sequence, acknowledges both first-time and repeated delivery, and serves full
-  operation snapshots or cursor-based deltas for late and reconnecting clients.
+  sequence, operation, and transaction identity, acknowledges both first-time
+  and repeated delivery, and serves full operation snapshots or cursor-based
+  deltas for late and reconnecting clients. Authorization and conflict hooks
+  validate transaction groups atomically: if one operation is rejected, none of
+  that transaction is committed or broadcast. `await server.logStats()` reports
+  cursor retention, retained operations, and operation/transaction identity
+  counts for monitoring and compaction tooling.
 - `SyncTransport` requires `send`, `onMessage`, and `close`.
 - `MemoryTransport.pair()` creates linked asynchronous in-process transports.
 
-The bundled sync layer is intentionally transport-agnostic and in-memory. It
-does not provide authentication, durable server storage, compact state snapshots,
-or conflict resolution. Applications must detect transport failure and supply a
-replacement transport to `reconnect()`; production deployments must also
-supply the remaining durability and security guarantees.
+The bundled sync layer is intentionally transport-agnostic. It provides optional
+durable server and client logs, authentication and conflict hooks, bounded
+batches, checksums, cursor recovery, and filtered subscriptions; it does not
+provide identity management, application permissions, or a domain-specific
+conflict resolver. Applications must detect transport failure and supply a
+replacement transport to `reconnect()`.

@@ -3,6 +3,25 @@
 All notable changes to this project are documented here. This project follows
 [Semantic Versioning](https://semver.org/).
 
+## [3.0.0] - Unreleased
+
+### Added
+
+- Promoted the database-core contract across TypeScript, Rust, and Python with
+  shared persistence, transaction, schema, index, migration, sync, and query
+  conformance coverage.
+- Added cross-binding database-core benchmarks for durable batches, queries,
+  vector search, and mixed read/write workloads.
+- Added Python `PersistedGraphQuery` with native storage-level filtering,
+  ordering, pagination, and counting for directory-backed stores.
+
+### Changed
+
+- Python hot-cache queries route simple filters and pagination through the local
+  pipeline, while native execution is reserved for similarity, joins, and
+  traversal workloads where boundary conversion can be amortized.
+- Aligned the npm, crates.io, and PyPI package versions at `3.0.0`.
+
 ## [2.5.0] - 2026-08-02
 
 ### Added

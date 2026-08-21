@@ -10,6 +10,8 @@
 //! every path always uses the `Store` method.
 
 use std::collections::{HashMap, HashSet};
+use std::cell::RefCell;
+use std::time::Instant;
 
 use polypack_core::activation::{activation_score_of, DEFAULT_ACTIVATION};
 use polypack_core::query::Direction;
@@ -17,7 +19,7 @@ use polypack_core::storage::{NodeQuery, OrderBy, RangeQuery};
 use polypack_core::vector::cosine;
 use polypack_core::{Node, Result, Store};
 
-use crate::graph::now_millis;
+use crate::graph::{now_millis, IndexDefinition, QueryMetrics};
 use crate::query::OrderDirection;
 
 /// A `join`/`join`-predicate closure: `Some` to filter by the connected
@@ -31,10 +33,39 @@ struct SimilaritySpec {
     top_k: Option<usize>,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct QueryExplain {
+    pub index: Option<String>,
+    pub indexes: Vec<String>,
+    pub stages: Vec<String>,
+    pub loaded_records: usize,
+    pub estimated_cost: f64,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct QueryResourceLimits {
+    pub max_traversal_depth: Option<usize>,
+    pub max_nodes_visited: Option<usize>,
+    pub max_results: Option<usize>,
+}
+
+fn query_field_value(attributes: &HashMap<String, serde_json::Value>, field: &str) -> serde_json::Value {
+    if let Some(value) = attributes.get(field) {
+        return value.clone();
+    }
+    attributes
+        .get(field.strip_prefix("data.").unwrap_or(field))
+        .cloned()
+        .unwrap_or(serde_json::Value::Null)
+}
+
 /// Chainable query over all persisted nodes in a `Store`. Results are
 /// detached clones. Mirrors `PersistedGraphQuery`.
 pub struct PersistedGraphQuery<'a> {
     store: &'a mut Store,
+    indexes: &'a HashMap<String, IndexDefinition>,
+    secondary_indexes: &'a HashMap<String, HashMap<String, HashSet<String>>>,
+    metrics: &'a RefCell<QueryMetrics>,
 
     node_types: Option<Vec<String>>,
     attributes: HashMap<String, serde_json::Value>,
@@ -51,12 +82,21 @@ pub struct PersistedGraphQuery<'a> {
     traversals: Vec<(String, usize, Direction)>,
     activation_above: Option<f64>,
     activation_order: Option<OrderDirection>,
+    limits: QueryResourceLimits,
 }
 
 impl<'a> PersistedGraphQuery<'a> {
-    pub(crate) fn new(store: &'a mut Store) -> Self {
+    pub(crate) fn new(
+        store: &'a mut Store,
+        indexes: &'a HashMap<String, IndexDefinition>,
+        secondary_indexes: &'a HashMap<String, HashMap<String, HashSet<String>>>,
+        metrics: &'a RefCell<QueryMetrics>,
+    ) -> Self {
         Self {
             store,
+            indexes,
+            secondary_indexes,
+            metrics,
             node_types: None,
             attributes: HashMap::new(),
             attribute_ranges: HashMap::new(),
@@ -71,6 +111,7 @@ impl<'a> PersistedGraphQuery<'a> {
             traversals: Vec::new(),
             activation_above: None,
             activation_order: None,
+            limits: QueryResourceLimits::default(),
         }
     }
 
@@ -155,10 +196,86 @@ impl<'a> PersistedGraphQuery<'a> {
         self
     }
 
+    pub fn with_resource_limits(mut self, limits: QueryResourceLimits) -> Self {
+        self.limits = limits;
+        self
+    }
+
+    /// Describe the selected persisted-query stages without materializing rows.
+    pub fn explain(&mut self) -> Result<QueryExplain> {
+        let loaded_records = self.store.node_count()?;
+        let mut stages = Vec::new();
+        let selected = self.selected_indexes();
+        let indexes: Vec<String> = selected.iter().map(|definition| definition.name.clone()).collect();
+        let index = indexes.first().cloned().or_else(|| {
+            self.node_types.as_ref().filter(|types| !types.is_empty()).map(|_| "type-index".to_string())
+        });
+        if indexes.is_empty() {
+            stages.push({
+            if index.as_deref() == Some("type-index") { "type-index".to_string() } else { "record-scan".to_string() }
+            });
+        } else {
+            stages.extend(indexes.iter().map(|name| format!("property-index({name})")));
+        }
+        if indexes.len() > 1 {
+            stages.push(format!("index-intersection({})", indexes.len()));
+        }
+        if let Some(types) = &self.node_types {
+            if !types.is_empty() {
+                stages.push(format!("type-filter({})", types.join(",")));
+            }
+        }
+        if !self.attributes.is_empty() || !self.attribute_ranges.is_empty() {
+            stages.push("property-filter".to_string());
+        }
+        if !self.joins.is_empty() {
+            stages.push(format!("join(count={})", self.joins.len()));
+        }
+        if !self.traversals.is_empty() {
+            let depth = self.traversals.iter().map(|(_, depth, _)| *depth).max().unwrap_or(0);
+            stages.push(format!("traversal(depth={depth})"));
+        }
+        if let Some((field, direction)) = &self.order_by {
+            stages.push(format!("order({field},{direction:?})").to_lowercase());
+        }
+        if let Some(limit) = self.result_limit {
+            stages.push(format!("limit({limit})"));
+        }
+        Ok(QueryExplain {
+            indexes: indexes.clone(),
+            index,
+            stages,
+            loaded_records,
+            estimated_cost: (loaded_records as f64 * if indexes.is_empty() { 1.0 } else { 0.25 / indexes.len() as f64 }).max(1.0),
+        })
+    }
+
     // ── internals ──
 
     fn base_query(&self, include_order: bool, include_pagination: bool) -> NodeQuery {
+        let candidate_ids = {
+            let mut sets = Vec::new();
+            for definition in self.selected_indexes() {
+                let equality = definition.fields.iter().all(|field| self.attributes.contains_key(field) || self.attributes.contains_key(field.strip_prefix("data.").unwrap_or(field)));
+                if equality {
+                    let values = definition.fields.iter().map(|field| query_field_value(&self.attributes, field)).collect::<Vec<_>>();
+                    if definition.sparse && values.iter().any(serde_json::Value::is_null) { continue; }
+                    let Some(key) = serde_json::to_string(&values).ok() else { continue };
+                    sets.push(self.secondary_indexes.get(&definition.name).and_then(|buckets| buckets.get(&key)).cloned().unwrap_or_default());
+                } else if definition.fields.len() == 1 {
+                    let Some(range) = self.attribute_ranges.get(&definition.fields[0]) else { continue };
+                    let ids = self.secondary_indexes.get(&definition.name).into_iter().flat_map(|buckets| buckets.iter()).filter_map(|(encoded, bucket)| {
+                        let value = serde_json::from_str::<Vec<serde_json::Value>>(encoded).ok()?.first()?.as_f64()?;
+                        if range.0.is_some_and(|above| value <= above) || range.1.is_some_and(|below| value >= below) { return None; }
+                        Some(bucket.iter().cloned())
+                    }).flatten().collect();
+                    sets.push(ids);
+                }
+            }
+            sets.into_iter().reduce(|mut ids, candidate| { ids.retain(|id| candidate.contains(id)); ids }).map(|ids| ids.into_iter().collect())
+        };
         NodeQuery {
+            candidate_ids,
             node_types: self.node_types.clone(),
             attributes: (!self.attributes.is_empty()).then(|| self.attributes.clone().into_iter().collect()),
             attribute_ranges: (!self.attribute_ranges.is_empty()).then(|| {
@@ -173,7 +290,22 @@ impl<'a> PersistedGraphQuery<'a> {
             }),
             offset: if include_pagination { self.result_offset } else { None },
             limit: if include_pagination { self.result_limit } else { None },
+            max_nodes_visited: self.limits.max_nodes_visited,
+            max_result_size: self.limits.max_results,
         }
+    }
+
+    fn selected_indexes(&self) -> Vec<&IndexDefinition> {
+        let mut selected: Vec<&IndexDefinition> = self.indexes.values().filter(|definition| {
+            let compatible_type = self.node_types.as_ref().is_none_or(|types| definition.node_type.as_ref().is_none_or(|node_type| types.len() == 1 && types[0] == *node_type));
+            let equality = !definition.fields.is_empty()
+                && definition.fields.iter().all(|field| self.attributes.contains_key(field) || self.attributes.contains_key(field.strip_prefix("data.").unwrap_or(field)))
+                && (!definition.sparse || definition.fields.iter().all(|field| !query_field_value(&self.attributes, field).is_null()));
+            let range = definition.fields.len() == 1 && self.attribute_ranges.contains_key(&definition.fields[0]);
+            compatible_type && (equality || range)
+        }).collect();
+        selected.sort_by(|left, right| left.name.cmp(&right.name));
+        selected
     }
 
     fn apply_edge_filters(&mut self, nodes: Vec<Node>) -> Result<Vec<Node>> {
@@ -239,7 +371,17 @@ impl<'a> PersistedGraphQuery<'a> {
         let mut current_ids: Vec<String> = nodes.iter().map(|n| n.id.clone()).collect();
         for i in 0..self.traversals.len() {
             let (edge_type, depth, direction) = self.traversals[i].clone();
+            if let Some(max_depth) = self.limits.max_traversal_depth {
+                if depth > max_depth {
+                    return Err(polypack_core::PolypackError::ResourceLimit { name: "maxTraversalDepth".into(), limit: max_depth });
+                }
+            }
             let mut visited: HashSet<String> = current_ids.iter().cloned().collect();
+            if let Some(max_nodes) = self.limits.max_nodes_visited {
+                if visited.len() > max_nodes {
+                    return Err(polypack_core::PolypackError::ResourceLimit { name: "maxNodesVisited".into(), limit: max_nodes });
+                }
+            }
             let mut frontier = current_ids.clone();
             for _ in 0..depth {
                 if frontier.is_empty() {
@@ -253,6 +395,11 @@ impl<'a> PersistedGraphQuery<'a> {
                 for e in &edges {
                     let id = match direction { Direction::Out => e.target.clone(), Direction::In => e.source.clone() };
                     if visited.insert(id.clone()) {
+                        if let Some(max_nodes) = self.limits.max_nodes_visited {
+                            if visited.len() > max_nodes {
+                                return Err(polypack_core::PolypackError::ResourceLimit { name: "maxNodesVisited".into(), limit: max_nodes });
+                            }
+                        }
                         next.push(id);
                     }
                 }
@@ -273,6 +420,7 @@ impl<'a> PersistedGraphQuery<'a> {
 
     /// Materialize matched nodes. Mirrors `PersistedGraphQuery.toArray`.
     pub fn to_array(&mut self) -> Result<Vec<Node>> {
+        let started = Instant::now();
         let has_traversal = !self.traversals.is_empty();
         let adapter_can_paginate =
             self.similarity.is_none() && self.edge_type.is_none() && self.edge_source.is_none() && self.joins.is_empty() && !has_traversal
@@ -280,6 +428,7 @@ impl<'a> PersistedGraphQuery<'a> {
 
         let query = self.base_query(!has_traversal, adapter_can_paginate);
         let mut nodes = self.store.query_nodes(&query)?;
+        let scanned_records = nodes.len();
 
         nodes = self.apply_edge_filters(nodes)?;
         nodes = self.apply_joins(nodes)?;
@@ -342,7 +491,24 @@ impl<'a> PersistedGraphQuery<'a> {
             }
         }
 
+        if let Some(max_results) = self.limits.max_results {
+            if nodes.len() > max_results {
+                return Err(polypack_core::PolypackError::ResourceLimit { name: "maxResults".into(), limit: max_results });
+            }
+        }
+        self.record_metrics(started, scanned_records);
         Ok(nodes)
+    }
+
+    fn record_metrics(&self, started: Instant, scanned_records: usize) {
+        let selected = self.selected_indexes();
+        let mut metrics = self.metrics.borrow_mut();
+        metrics.count += 1;
+        metrics.duration_ms += started.elapsed().as_secs_f64() * 1000.0;
+        metrics.scanned_records += scanned_records;
+        for index in selected {
+            *metrics.index_usage.entry(index.name.clone()).or_default() += 1;
+        }
     }
 
     pub fn first(&mut self) -> Result<Option<Node>> {

@@ -8,6 +8,7 @@
 
 use std::collections::HashMap;
 
+#[derive(Clone)]
 struct Node {
     id: String,
     prev: Option<usize>,
@@ -17,7 +18,7 @@ struct Node {
 /// Least-recently-used order over a set of string ids. The front is the
 /// least-recently-used end (next to evict); the back is the
 /// most-recently-used end.
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub(crate) struct LruList {
     slots: Vec<Option<Node>>,
     free: Vec<usize>,

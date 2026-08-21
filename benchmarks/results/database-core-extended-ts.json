@@ -1,0 +1,59 @@
+{
+  "schemaVersion": 1,
+  "lang": "ts",
+  "count": 1000,
+  "generatedAt": "2026-08-21T09:31:24.489Z",
+  "durableBatchCurve": [
+    {
+      "batchSize": 1,
+      "count": 1000,
+      "elapsedMs": 120.81759399999999,
+      "bytes": 411252
+    },
+    {
+      "batchSize": 100,
+      "count": 1000,
+      "elapsedMs": 14.253745000000038,
+      "bytes": 280856
+    },
+    {
+      "batchSize": 500,
+      "count": 1000,
+      "elapsedMs": 11.122380000000021,
+      "bytes": 279829
+    },
+    {
+      "batchSize": 5000,
+      "count": 1000,
+      "elapsedMs": 10.072749999999985,
+      "bytes": 279701
+    }
+  ],
+  "updateAndTransaction": {
+    "count": 1000,
+    "patchMs": 9.652648999999997,
+    "patchOpsPerSec": 103598.50441055096,
+    "transactionSize": 100,
+    "transactionMs": 20.872030999999993,
+    "transactionOpsPerSec": 47911.00588150719,
+    "conflictMs": 2.6903220000000374,
+    "conflicts": 1000
+  },
+  "persistedQueries": {
+    "count": 1000,
+    "iterations": 10,
+    "offset": 10,
+    "limit": 25,
+    "p50Ms": 0.21555499999999483,
+    "p95Ms": 0.8449730000000386,
+    "resultCount": 25
+  },
+  "exactVectorSearch": {
+    "count": 1000,
+    "dimensions": 32,
+    "iterations": 10,
+    "p50Ms": 0.16429200000004585,
+    "p95Ms": 1.3038099999999986,
+    "resultCount": 20
+  }
+}

@@ -1,0 +1,415 @@
+import { describe, expect, it } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { AdapterCapabilityError, ConflictError, MemoryAdapter, PolyGraph, ResourceLimitError } from '../src/index'
+import { BinaryStoreAdapter } from '../src/persistence/binary-store'
+import { MemoryFileIO } from '../src/persistence/file-io'
+import { VectorIndex } from '../src/vector-index'
+
+const node = (id: string, data: Record<string, unknown> = {}) => ({
+  id, type: 'record', data, insertedAt: 1, updatedAt: 1,
+})
+
+describe('database-core mutation API', () => {
+  it('commits a transaction atomically and emits after persistence', async () => {
+    const adapter = new MemoryAdapter()
+    const graph = new PolyGraph(adapter)
+    const events: string[] = []
+    graph.changes.subscribe(event => events.push(event.type))
+
+    await graph.transaction(async tx => {
+      tx.addNode(node('a'))
+      expect(tx.getNode('a')?.data).toEqual({})
+      tx.addNode(node('b'))
+      tx.addEdge({ id: 'a::LINKS::b', source: 'a', target: 'b', type: 'LINKS', createdAt: 1, revision: 4 })
+      expect(graph.getNode('b')).toBeDefined()
+    })
+
+    expect(await adapter.getNode('a')).toBeDefined()
+    expect(events).toEqual(['node_added', 'node_added', 'edge_added'])
+  })
+
+  it('rolls back memory, persistence queue, and events when the callback fails', async () => {
+    const graph = new PolyGraph(new MemoryAdapter())
+    const events: string[] = []
+    graph.changes.subscribe(event => events.push(event.type))
+
+    await expect(graph.transaction(async tx => {
+      tx.addNode(node('temporary'))
+      throw new Error('abort')
+    })).rejects.toThrow('abort')
+
+    expect(graph.getNode('temporary')).toBeUndefined()
+    expect(events).toEqual([])
+    await graph.flush()
+    expect(await graph.persistence.getNode('temporary')).toBeUndefined()
+  })
+
+  it('rejects nested transactions', async () => {
+    const graph = new PolyGraph()
+    await expect(graph.transaction(() => graph.transaction(() => undefined))).rejects.toThrow('Nested transactions')
+  })
+
+  it('blocks interleaved ordinary mutations during an async transaction', async () => {
+    const graph = new PolyGraph()
+    await expect(graph.transaction(async tx => {
+      tx.addNode(node('inside'))
+      await Promise.resolve()
+      expect(() => graph.addNode(node('outside'))).toThrow('transaction context')
+    })).resolves.toBeUndefined()
+  })
+
+  it('increments revisions and rejects stale conditional writes', () => {
+    const graph = new PolyGraph()
+    graph.addNode(node('n', { name: 'Alice' }))
+    expect(graph.getNode('n')?.revision).toBe(0)
+
+    graph.updateNode('n', { name: 'Bob' }, { expectedRevision: 0 })
+    expect(graph.getNode('n')?.revision).toBe(1)
+    expect(() => graph.updateNode('n', { name: 'Carol' }, { expectedRevision: 0 }))
+      .toThrow(ConflictError)
+    expect(() => graph.removeNode('n', { expectedRevision: 0 })).toThrow(ConflictError)
+  })
+
+  it('supports conditional replacement through addNode and transactions', async () => {
+    const graph = new PolyGraph()
+    graph.addNode(node('n', { value: 1 }))
+    expect(() => graph.addNode(node('n', { value: 2 }), { expectedRevision: 0 })).not.toThrow()
+    expect(graph.getNode('n')?.data.value).toBe(2)
+    await expect(graph.transaction(tx => tx.addNode(node('n', { value: 3 }), { expectedRevision: 0 })))
+      .rejects.toThrow(ConflictError)
+    expect(graph.getNode('n')?.data.value).toBe(2)
+  })
+
+  it('preserves node revisions through persisted queries and warm reloads', async () => {
+    const adapter = new MemoryAdapter()
+    const graph = new PolyGraph(adapter)
+    graph.addNode(node('n'))
+    graph.updateNode('n', { value: 2 }, { expectedRevision: 0 })
+    await graph.flush()
+    expect((await graph.queryPersisted().first())?.revision).toBe(1)
+
+    const reloaded = new PolyGraph(adapter)
+    await reloaded.warm()
+    expect(reloaded.getNode('n')?.revision).toBe(1)
+    expect(() => reloaded.updateNode('n', { value: 3 }, { expectedRevision: 0 })).toThrow(ConflictError)
+  })
+
+  it('applies nested set, unset, increment, and compare-and-set patches', () => {
+    const graph = new PolyGraph()
+    graph.addNode(node('n', { profile: { name: 'Alice', temporary: true }, views: 2 }))
+    const updated = graph.patchNode('n', {
+      set: { 'data.profile.name': 'Mary Smith' },
+      unset: ['data.profile.temporary'],
+      increment: { 'data.views': 1 },
+      compareAndSet: { 'data.profile.name': { expected: 'Alice', value: 'Mary Smith' } },
+    }, { expectedRevision: 0 })
+
+    expect(updated?.data).toEqual({ profile: { name: 'Mary Smith' }, views: 3 })
+    expect(updated?.revision).toBe(1)
+  })
+
+  it('supports conditional edge removal', async () => {
+    const graph = new PolyGraph()
+    graph.addNode(node('a'))
+    graph.addNode(node('b'))
+    graph.addEdge({ id: 'a::LINKS::b', source: 'a', target: 'b', type: 'LINKS', createdAt: 1, revision: 3 })
+
+    await expect(graph.transaction(tx => tx.removeEdge('a::LINKS::b', { expectedRevision: 2 })))
+      .rejects.toThrow(ConflictError)
+    expect(graph.getEdgeTargets('a', 'LINKS')).toEqual(['b'])
+    await graph.transaction(tx => { expect(tx.removeEdge('a::LINKS::b', { expectedRevision: 3 })).toBe(true) })
+    expect(graph.getEdgeTargets('a', 'LINKS')).toEqual([])
+  })
+
+  it('rejects stale conditional edge additions', async () => {
+    const graph = new PolyGraph()
+    graph.addNode(node('a'))
+    graph.addNode(node('b'))
+    const edge = { id: 'claim', source: 'a', target: 'b', type: 'CLAIMS', createdAt: 1, revision: 3 }
+    graph.addEdge(edge, { expectedRevision: 0 })
+    expect(() => graph.addEdge(edge, { expectedRevision: 0 })).toThrow(ConflictError)
+    await expect(graph.transaction(tx => tx.addEdge(edge, { expectedRevision: 0 }))).rejects.toThrow(ConflictError)
+  })
+
+  it('updates edge data with revisions and rejects stale edge updates', async () => {
+    const graph = new PolyGraph()
+    graph.addNode(node('a'))
+    graph.addNode(node('b'))
+    graph.addEdge({ id: 'claim', source: 'a', target: 'b', type: 'CLAIMS', data: { source: 'archive' }, createdAt: 1 })
+    const updated = graph.updateEdge('claim', { confidence: 0.9 }, { expectedRevision: 0 })
+    expect(updated?.data).toEqual({ source: 'archive', confidence: 0.9 })
+    expect(updated?.revision).toBe(1)
+    expect(() => graph.updateEdge('claim', { confidence: 0.1 }, { expectedRevision: 0 })).toThrow(ConflictError)
+    await expect(graph.transaction(tx => tx.updateEdge('claim', { reviewed: true }, { expectedRevision: 1 }))).resolves.toBeDefined()
+  })
+
+  it('persists parallel edges with independent IDs and reloads them', async () => {
+    const io = new MemoryFileIO()
+    const adapter = new BinaryStoreAdapter({ storeDir: 'parallel-edge-test', fileIO: io })
+    const graph = new PolyGraph(adapter)
+    graph.addNode(node('a'))
+    graph.addNode(node('b'))
+    graph.addEdge({ id: 'claim-1', source: 'a', target: 'b', type: 'CLAIMS', createdAt: 1 })
+    graph.addEdge({ id: 'claim-2', source: 'a', target: 'b', type: 'CLAIMS', createdAt: 2 })
+    await graph.flush()
+
+    expect(graph.getEdges('a', 'CLAIMS').map(edge => edge.id).sort()).toEqual(['claim-1', 'claim-2'])
+    const reloaded = new PolyGraph(new BinaryStoreAdapter({ storeDir: 'parallel-edge-test', fileIO: io }))
+    await reloaded.warm()
+    expect(reloaded.getEdges('a', 'CLAIMS').map(edge => edge.id).sort()).toEqual(['claim-1', 'claim-2'])
+  })
+
+  it('persists structural schemas and reloads them without runtime callbacks', async () => {
+    const io = new MemoryFileIO()
+    const graph = new PolyGraph(new BinaryStoreAdapter({ storeDir: 'schema-test', fileIO: io }))
+    graph.registerNodeType('person', { requiredFields: ['name'], dataTypes: { age: 'integer' } })
+    await graph.flush()
+
+    const reloaded = new PolyGraph(new BinaryStoreAdapter({ storeDir: 'schema-test', fileIO: io }))
+    await reloaded.warm()
+    expect(() => reloaded.addNode({ id: 'invalid', type: 'person', data: {}, insertedAt: 1, updatedAt: 1 })).toThrow(/required field name/)
+    reloaded.addNode({ id: 'valid', type: 'person', data: { name: 'A', age: 1 }, insertedAt: 1, updatedAt: 1 })
+  })
+
+  it('loads the canonical schema metadata shape shared with Rust and Python', async () => {
+    const io = new MemoryFileIO()
+    await io.writeFile('schemas.json', new TextEncoder().encode(JSON.stringify({
+      nodeTypes: [{ nodeType: 'person', requiredFields: ['name'], dataTypes: { age: 'integer' } }],
+      edgeTypes: [],
+    })))
+    const graph = new PolyGraph(new BinaryStoreAdapter({ storeDir: 'canonical-schema-test', fileIO: io }))
+    await graph.warm()
+    expect(() => graph.addNode({ id: 'invalid', type: 'person', data: {}, insertedAt: 1, updatedAt: 1 })).toThrow(/required field name/)
+  })
+
+  it('records acknowledged logical mutations with durable sequences', async () => {
+    const io = new MemoryFileIO()
+    const adapter = new BinaryStoreAdapter({ storeDir: 'mutation-log-test', fileIO: io })
+    const graph = new PolyGraph(adapter)
+    let transactionId = ''
+    await graph.transaction(tx => {
+      transactionId = tx.id
+      tx.addNode(node('logged'))
+    })
+
+    const records = await adapter.getMutationsSince!(0n)
+    expect(records).toHaveLength(1)
+    expect(records[0].sequence).toBe(1n)
+    expect(records[0].transactionId).toBe(transactionId)
+    expect(records[0].operations[0].type).toBe('putNode')
+
+    const reopened = new BinaryStoreAdapter({ storeDir: 'mutation-log-test', fileIO: io })
+    expect(await reopened.latestMutationSequence!()).toBe(1n)
+    expect((await reopened.getMutationsSince!(0n))[0].operationId).toBe(records[0].operationId)
+  })
+
+  it('exposes the durable mutation cursor through the graph API', async () => {
+    const graph = new PolyGraph(new MemoryAdapter())
+    await graph.transaction(tx => tx.addNode(node('graph-log')))
+
+    const latest = await graph.latestMutationSequence()
+    const records = await graph.mutationLogSince(0n)
+    expect(records.at(-1)?.sequence).toBe(latest)
+    expect(records.some(record => record.operations.some(operation => operation.type === 'putNode'))).toBe(true)
+    expect(await graph.mutationLogSince(latest)).toEqual([])
+    expect(await graph.mutationLogPage(0n, 1)).toHaveLength(1)
+    expect(await graph.mutationLogPage(0n, 0)).toEqual([])
+    await expect(graph.mutationLogPage(0n, -1)).rejects.toThrow(/page limit/)
+    expect(graph.adapterCapabilities?.changeFeed).toBe(true)
+  })
+
+  it('persists caller-supplied transaction operation identity', async () => {
+    const fixture = JSON.parse(readFileSync(join(process.cwd(), 'fixtures/database-core/durable-mutation-log.json'), 'utf8'))
+    const graph = new PolyGraph(new MemoryAdapter())
+    await graph.transaction(tx => tx.addNode(fixture.transaction.node), { operationId: fixture.transaction.operationId })
+    const records = await graph.mutationLogSince(0n)
+    expect(Number(await graph.latestMutationSequence())).toBe(fixture.expect.latestSequence)
+    expect(records.at(-1)?.operationId).toBe(fixture.expect.operationId)
+    expect(records.at(-1)?.operations[0].type).toBe(fixture.expect.operationType)
+    expect(records.at(-1)?.operations[0].payload.id).toBe(fixture.expect.nodeId)
+  })
+
+  it('deduplicates repeated operation IDs in the mutation log', async () => {
+    const adapter = new MemoryAdapter()
+    const changes = {
+      operationId: 'retry-1', transactionId: 'tx-retry',
+      putNodes: [{ ...node('once'), vector: null, revision: 0 }],
+      deleteNodeIds: [], putEdges: [], deleteEdgeIds: [], putVectors: [], deleteVectorIds: [],
+    }
+    await adapter.applyChanges(changes)
+    await adapter.applyChanges(changes)
+    expect(await adapter.latestMutationSequence!()).toBe(1n)
+    expect((await adapter.getMutationsSince!(0n))).toHaveLength(1)
+  })
+
+  it('keeps snapshot queries isolated from later writes', async () => {
+    const graph = new PolyGraph()
+    graph.addNode(node('stable', { value: 1 }))
+    const snapshot = await graph.snapshot()
+
+    graph.updateNode('stable', { value: 2 })
+    graph.addNode(node('later', { value: 3 }))
+
+    expect(snapshot.getNode('stable')?.data.value).toBe(1)
+    expect(snapshot.getNode('later')).toBeUndefined()
+    expect(snapshot.query().where('value', 1).ids()).toEqual(['stable'])
+  })
+
+  it('checkpoints, backs up, restores, and verifies a binary store', async () => {
+    const sourceIo = new MemoryFileIO()
+    const source = new BinaryStoreAdapter({ storeDir: 'admin-source', fileIO: sourceIo })
+    const graph = new PolyGraph(source)
+    graph.registerNodeType('record', { requiredFields: ['name'] })
+    graph.addNode({ ...node('a'), data: { name: 'A' } })
+    graph.addNode({ ...node('b'), data: { name: 'B' } })
+    graph.addEdge('a', 'LINKS', 'b')
+    await graph.flush()
+    await source.checkpoint()
+    expect((await source.verify()).ok).toBe(true)
+
+    const backupIo = new MemoryFileIO()
+    await source.backup(backupIo)
+    const restoreIo = new MemoryFileIO()
+    await PolyGraph.restore(backupIo, restoreIo)
+    const restored = new BinaryStoreAdapter({ storeDir: 'admin-restored', fileIO: restoreIo })
+    await restored.getNode('a')
+    expect((await restored.verify()).edgeCount).toBe(1)
+    expect((await restored.getMutationsSince!(0n)).length).toBeGreaterThan(0)
+    const restoredGraph = new PolyGraph(restored)
+    await restoredGraph.warm()
+    expect(() => restoredGraph.addNode(node('invalid'))).toThrow(/required field name/)
+  })
+
+  it('exposes checkpoint and verification through the graph API', async () => {
+    const graph = new PolyGraph(new BinaryStoreAdapter({ storeDir: 'graph-admin', fileIO: new MemoryFileIO() }))
+    graph.addNode(node('admin', { ok: true }))
+    await graph.checkpoint()
+    expect((await graph.verify()).ok).toBe(true)
+    await graph.dispose()
+  })
+
+  it('exposes consistent backups through the graph API', async () => {
+    const io = new MemoryFileIO()
+    const graph = new PolyGraph(new BinaryStoreAdapter({ storeDir: 'graph-backup', fileIO: io }))
+    graph.addNode(node('backup', { ok: true }))
+    const destination = new MemoryFileIO()
+    await graph.backup(destination)
+    const restored = new BinaryStoreAdapter({ storeDir: 'graph-backup-copy', fileIO: destination })
+    expect((await restored.getNode('backup'))?.id).toBe('backup')
+    await graph.dispose()
+    await restored.close()
+  })
+
+  it('persists mutation-log identity and metadata from a commit', async () => {
+    const adapter = new MemoryAdapter()
+    await adapter.applyChanges!({
+      transactionId: 'tx-metadata', operationId: 'op-metadata', actor: 'writer-1', baseRevision: 4,
+      metadata: { source: 'import' },
+      putNodes: [node('metadata', { value: true })], deleteNodeIds: [],
+      putEdges: [], deleteEdgeIds: [], putVectors: [], deleteVectorIds: [],
+    })
+    const record = (await adapter.getMutationsSince!(0n))[0]
+    expect(record).toMatchObject({
+      transactionId: 'tx-metadata', operationId: 'op-metadata', actor: 'writer-1',
+      baseRevision: 4, metadata: { source: 'import' },
+    })
+  })
+
+  it('attaches transaction metadata to the durable mutation record', async () => {
+    const adapter = new MemoryAdapter()
+    const graph = new PolyGraph(adapter)
+    await graph.transaction(tx => {
+      tx.addNode(node('transaction-metadata', { ok: true }))
+    }, { actor: 'importer', baseRevision: 7, metadata: { job: 'migration' } })
+
+    const record = (await adapter.getMutationsSince!(0n))[0]
+    expect(record).toMatchObject({ actor: 'importer', baseRevision: 7, metadata: { job: 'migration' } })
+  })
+
+  it('verifies in-memory graphs when the adapter has no verifier', async () => {
+    const graph = new PolyGraph()
+    graph.addNode(node('memory-verify', { ok: true }))
+    const report = await graph.verify()
+    expect(report).toMatchObject({ ok: true, nodeCount: 1, edgeCount: 0 })
+  })
+
+  it('keeps direct snapshot reads isolated from later graph mutations', async () => {
+    const graph = new PolyGraph()
+    graph.addNode(node('a', { value: 1 }))
+    graph.addNode(node('b', { value: 2 }))
+    graph.addEdge({ id: 'ab', source: 'a', target: 'b', type: 'RELATED', data: { stable: true }, createdAt: 1 })
+    const snapshot = await graph.snapshot()
+
+    graph.updateNode('a', { value: 9 })
+    graph.removeEdge('ab')
+
+    expect(snapshot.getNodes().map(item => item.id)).toEqual(['a', 'b'])
+    expect(snapshot.getNode('a')?.data.value).toBe(1)
+    expect(snapshot.getEdges('a')).toHaveLength(1)
+    expect(snapshot.getEdges('a')[0].data).toEqual({ stable: true })
+  })
+
+  it('reports persisted vector dimensionality corruption during verification', async () => {
+    const io = new MemoryFileIO()
+    const adapter = new BinaryStoreAdapter({ storeDir: 'verify-vector', fileIO: io })
+    await adapter.putNode({ id: 'n', type: 'record', data: {}, vector: [1, 2], insertedAt: 1, updatedAt: 1 })
+    await adapter.putVector('n', [1])
+    const report = await adapter.verify()
+    expect(report.ok).toBe(false)
+    expect(report.errors).toContain('vector dimensionality mismatch: n')
+    await adapter.close()
+  })
+
+  it('reports graph and storage statistics', async () => {
+    const graph = new PolyGraph(new MemoryAdapter())
+    graph.defineIndex({ name: 'value', fields: ['value'] })
+    graph.addNode(node('a', { value: 1 }))
+    const before = await graph.stats()
+    expect(before.loadedNodeCount).toBe(1)
+    expect(before.persistedNodeCount).toBe(0)
+    expect(before.dirtyRecordCount).toBeGreaterThan(0)
+    await graph.flush()
+    const after = await graph.stats()
+    expect(after.persistedNodeCount).toBe(1)
+    expect(after.indexCount).toBe(1)
+    expect(after.pendingPersistence).toBe(false)
+    await graph.queryPersisted().where('value', 1).ids()
+    const observed = await graph.stats()
+    expect(observed.queryCount).toBe(1)
+    expect(observed.queryScannedRecords).toBeGreaterThan(0)
+    expect(observed.queryIndexUsage).toEqual({ value: 1 })
+  })
+
+  it('reports and enforces adapter capability declarations', async () => {
+    const graph = new PolyGraph(new MemoryAdapter())
+    expect(graph.adapterCapabilities?.atomicBatches).toBe(true)
+    expect(() => graph.requireAdapterCapabilities({ transactions: true })).not.toThrow()
+    const unsafe = new MemoryAdapter()
+    Object.defineProperty(unsafe, 'capabilities', { value: { ...unsafe.capabilities, transactions: false } })
+    await expect(new PolyGraph(unsafe).transaction(() => undefined)).rejects.toBeInstanceOf(AdapterCapabilityError)
+  })
+
+  it('matches the shared error taxonomy fixture', () => {
+    const fixture = JSON.parse(readFileSync(join(process.cwd(), 'fixtures/database-core/error-taxonomy.json'), 'utf8')) as { cases: Array<{ name: string; code: string }> }
+    const codes: Record<string, string> = {}
+    try { new PolyGraph().addNode(node('')) } catch { codes['invalid-node-id'] = 'invalid_argument' }
+    try {
+      const index = new VectorIndex()
+      index.add('a', [1, 0])
+      index.query([1, 0, 0], 1)
+    } catch { codes['dimension-mismatch'] = 'dimension_mismatch' }
+    const graph = new PolyGraph()
+    graph.addNode(node('conflict'))
+    graph.updateNode('conflict', { value: 1 }, undefined, undefined, { expectedRevision: 0 })
+    try { graph.updateNode('conflict', { value: 2 }, undefined, undefined, { expectedRevision: 0 }) } catch (error) {
+      if (error instanceof ConflictError) codes['stale-write'] = 'conflict'
+    }
+    const limited = new PolyGraph()
+    limited.setResourceLimits({ maxVectorDimensions: 1 })
+    try { limited.addNode({ ...node('limited'), vector: new Float64Array([1, 2]) }) } catch (error) {
+      if (error instanceof ResourceLimitError) codes['resource-limit'] = 'resource_limit'
+    }
+    expect(fixture.cases.map(item => codes[item.name])).toEqual(fixture.cases.map(item => item.code))
+  })
+})

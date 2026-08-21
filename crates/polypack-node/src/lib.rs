@@ -9,6 +9,9 @@ use polypack_core::hnsw::{HnswConfig, HnswIndex};
 use polypack_core::vector::{DistanceFn, ExactIndex};
 use polypack_core::NodeActivation as CoreNodeActivation;
 use std::cell::RefCell;
+use std::fs::{self, File, OpenOptions};
+use std::io::Write;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[napi(object)]
 pub struct EngineInfo {
@@ -279,15 +282,101 @@ impl NativeHnswIndex {
 // ── Storage / NativeStore ──
 
 use polypack_core::model::ChangeBatch as CoreChangeBatch;
-use polypack_core::storage::{Durability, NodeQuery, Store as CoreStore, StoreConfig, Storage};
-use std::path::PathBuf;
+use polypack_core::storage::{AdapterCapabilities, Durability, NodeQuery, Store as CoreStore, StoreConfig, Storage, VectorSearchCapability};
+use std::path::{Path, PathBuf};
 
 /// Filesystem byte storage used by the native store (host adapter for Node).
 struct FsStorage {
     dir: PathBuf,
+    read_only: bool,
+    lock_token: String,
+    lock_file: Option<File>,
+}
+
+impl FsStorage {
+    fn new(dir: PathBuf, read_only: bool) -> std::result::Result<Self, polypack_core::PolypackError> {
+        fs::create_dir_all(&dir).map_err(|e| polypack_core::PolypackError::Storage(e.to_string()))?;
+        if read_only {
+            return Ok(Self { dir, read_only: true, lock_token: String::new(), lock_file: None });
+        }
+        let lock_path = dir.join("store.lock");
+        let started_at = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|e| polypack_core::PolypackError::Storage(e.to_string()))?
+            .as_millis() as u64;
+        let token = format!("{}-{started_at}", std::process::id());
+        let metadata = format!(r#"{{"pid":{},"startedAt":{},"token":"{}"}}"#, std::process::id(), started_at, token);
+
+        for attempt in 0..2 {
+            match OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create_new(true)
+                .open(&lock_path)
+            {
+                Ok(mut lock_file) => {
+                    lock_file.write_all(metadata.as_bytes()).map_err(|e| polypack_core::PolypackError::Storage(e.to_string()))?;
+                    lock_file.sync_all().map_err(|e| polypack_core::PolypackError::Storage(e.to_string()))?;
+                    return Ok(Self { dir, read_only: false, lock_token: token, lock_file: Some(lock_file) });
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists && attempt == 0 => {
+                    let stale = fs::read_to_string(&lock_path)
+                        .ok()
+                        .and_then(|contents| serde_json::from_str::<serde_json::Value>(&contents).ok())
+                        .and_then(|value| value.get("startedAt").and_then(serde_json::Value::as_u64))
+                        .map(|old| started_at.saturating_sub(old) > 24 * 60 * 60 * 1000)
+                        .unwrap_or(false);
+                    if stale {
+                        let _ = fs::remove_file(&lock_path);
+                        continue;
+                    }
+                    return Err(polypack_core::PolypackError::Storage(format!("store is already locked: {}", lock_path.display())));
+                }
+                Err(error) => return Err(polypack_core::PolypackError::Storage(error.to_string())),
+            }
+        }
+        Err(polypack_core::PolypackError::Storage(format!("store is already locked: {}", lock_path.display())))
+    }
+}
+
+impl Drop for FsStorage {
+    fn drop(&mut self) {
+        if self.lock_file.take().is_none() {
+            return;
+        }
+        // Re-read the lock file by path rather than through the retained file
+        // descriptor: on POSIX, unlinking a path leaves an open fd pointing at
+        // the old (now-detached) inode, so reading via the fd can observe our
+        // own stale content even after another process has since replaced the
+        // lock at that path. A fresh path-based read reflects whichever lock
+        // is actually current, so we only ever delete a lock we still own.
+        release_store_lock(&self.dir, &self.lock_token);
+    }
+}
+
+fn release_store_lock(dir: &Path, token: &str) {
+    let lock_path = dir.join("store.lock");
+    let owns_lock = fs::read_to_string(&lock_path)
+        .map(|contents| contents.contains(&format!(r#""token":"{}""#, token)))
+        .unwrap_or(false);
+    if owns_lock {
+        let _ = fs::remove_file(lock_path);
+    }
 }
 
 impl Storage for FsStorage {
+    fn capabilities(&self) -> AdapterCapabilities {
+        AdapterCapabilities {
+            atomic_batches: true,
+            fsync: true,
+            snapshots: true,
+            change_feed: true,
+            secondary_indexes: true,
+            vector_search: VectorSearchCapability::Exact,
+            ..Default::default()
+        }
+    }
+
     fn read(&self, name: &str) -> std::result::Result<Option<Vec<u8>>, polypack_core::PolypackError> {
         match std::fs::read(self.dir.join(name)) {
             Ok(bytes) => Ok(Some(bytes)),
@@ -300,18 +389,20 @@ impl Storage for FsStorage {
         name: &str,
         data: &[u8],
     ) -> std::result::Result<(), polypack_core::PolypackError> {
+        if self.read_only { return Err(polypack_core::PolypackError::Storage("store was opened read-only".into())); }
         use std::io::Write;
         std::fs::create_dir_all(&self.dir)
             .map_err(|e| polypack_core::PolypackError::Storage(e.to_string()))?;
         // Write-then-rename: a crash mid-write leaves the previous snapshot
-        // intact instead of a torn file, and the tmp file is fsynced first
-        // so the rename can never land ahead of its data on disk.
+        // intact instead of a torn file. Fsyncing the tmp file before the
+        // rename is `Store`'s call via the explicit `sync()`/`sync_dir()` it
+        // issues only under `Durability::Fsync` — doing it unconditionally
+        // here silently upgraded `Durability::Process` ("written to the OS,
+        // not fsynced") into an always-fsync adapter.
         let tmp_path = self.dir.join(format!("{name}.tmp"));
         let mut file = std::fs::File::create(&tmp_path)
             .map_err(|e| polypack_core::PolypackError::Storage(e.to_string()))?;
         file.write_all(data)
-            .map_err(|e| polypack_core::PolypackError::Storage(e.to_string()))?;
-        file.sync_all()
             .map_err(|e| polypack_core::PolypackError::Storage(e.to_string()))?;
         drop(file);
         std::fs::rename(&tmp_path, self.dir.join(name))
@@ -322,6 +413,7 @@ impl Storage for FsStorage {
         name: &str,
         data: &[u8],
     ) -> std::result::Result<(), polypack_core::PolypackError> {
+        if self.read_only { return Err(polypack_core::PolypackError::Storage("store was opened read-only".into())); }
         use std::io::Write;
         std::fs::create_dir_all(&self.dir)
             .map_err(|e| polypack_core::PolypackError::Storage(e.to_string()))?;
@@ -334,6 +426,7 @@ impl Storage for FsStorage {
             .map_err(|e| polypack_core::PolypackError::Storage(e.to_string()))
     }
     fn delete(&mut self, name: &str) -> std::result::Result<(), polypack_core::PolypackError> {
+        if self.read_only { return Err(polypack_core::PolypackError::Storage("store was opened read-only".into())); }
         let _ = std::fs::remove_file(self.dir.join(name));
         Ok(())
     }
@@ -368,22 +461,22 @@ fn to_napi_err(e: polypack_core::PolypackError) -> Error {
 #[napi]
 pub struct NativeStore {
     inner: RefCell<CoreStore>,
+    lock_dir: PathBuf,
+    lock_token: String,
 }
 
 #[napi]
 impl NativeStore {
     #[napi(constructor)]
-    pub fn new(dir: String, compact_threshold: Option<u32>) -> Self {
+    pub fn new(dir: String, compact_threshold: Option<u32>, read_only: Option<bool>) -> Result<Self> {
         let config = StoreConfig {
             compact_threshold: compact_threshold.unwrap_or(10_000) as usize,
             durability: Durability::Process,
         };
-        NativeStore {
-            inner: RefCell::new(CoreStore::new(
-                Box::new(FsStorage { dir: PathBuf::from(dir) }),
-                config,
-            )),
-        }
+        let lock_dir = PathBuf::from(dir);
+        let storage = FsStorage::new(lock_dir.clone(), read_only.unwrap_or(false)).map_err(to_napi_err)?;
+        let lock_token = storage.lock_token.clone();
+        Ok(NativeStore { inner: RefCell::new(CoreStore::new(Box::new(storage), config)), lock_dir, lock_token })
     }
 
     /// Apply a change batch: `{ putNodes, deleteNodeIds, putEdges,
@@ -417,6 +510,48 @@ impl NativeStore {
             .into_iter()
             .map(|n| serde_json::to_value(n).map_err(|e| Error::from_reason(e.to_string())))
             .collect()
+    }
+
+    /// Define or replace a persisted node-data index.
+    #[napi]
+    pub fn define_index(&self, definition: serde_json::Value) -> Result<()> {
+        let definition: polypack_core::storage::SecondaryIndexDefinition = serde_json::from_value(definition)
+            .map_err(|error| Error::from_reason(format!("invalid_argument: {error}")))?;
+        self.inner.borrow_mut().define_index(definition).map_err(to_napi_err)
+    }
+
+    /// Drop a persisted node-data index.
+    #[napi]
+    pub fn drop_index(&self, name: String) -> Result<bool> {
+        self.inner.borrow_mut().drop_index(&name).map_err(to_napi_err)
+    }
+
+    /// Return persisted index definitions.
+    #[napi]
+    pub fn index_definitions(&self) -> Result<Vec<serde_json::Value>> {
+        self.inner
+            .borrow_mut()
+            .index_definitions()
+            .map_err(to_napi_err)?
+            .into_iter()
+            .map(|definition| serde_json::to_value(definition).map_err(|error| Error::from_reason(error.to_string())))
+            .collect()
+    }
+
+    /// Register or replace a node-type schema definition.
+    #[napi]
+    pub fn register_node_type(&self, definition: serde_json::Value) -> Result<()> {
+        let definition: polypack_core::storage::NodeTypeDefinition = serde_json::from_value(definition)
+            .map_err(|error| Error::from_reason(format!("invalid_argument: {error}")))?;
+        self.inner.borrow_mut().register_node_type(definition).map_err(to_napi_err)
+    }
+
+    /// Register or replace an edge-type schema definition.
+    #[napi]
+    pub fn register_edge_type(&self, definition: serde_json::Value) -> Result<()> {
+        let definition: polypack_core::storage::EdgeTypeDefinition = serde_json::from_value(definition)
+            .map_err(|error| Error::from_reason(format!("invalid_argument: {error}")))?;
+        self.inner.borrow_mut().register_edge_type(definition).map_err(to_napi_err)
     }
 
     /// Count nodes matching a storage-level query object.
@@ -494,10 +629,128 @@ impl NativeStore {
         self.inner.borrow_mut().compact().map_err(to_napi_err)
     }
 
+    /// Force a durable checkpoint and compact the recovery WAL.
+    #[napi]
+    pub fn checkpoint(&self) -> Result<()> {
+        self.inner.borrow_mut().compact().map_err(to_napi_err)
+    }
+
+    /// Validate persisted framing, records, references, vectors, and indexes.
+    #[napi]
+    pub fn verify(&self) -> Result<serde_json::Value> {
+        let report = self.inner.borrow_mut().verify().map_err(to_napi_err)?;
+        Ok(serde_json::json!({
+            "ok": report.ok,
+            "errors": report.errors,
+            "nodeCount": report.node_count,
+            "edgeCount": report.edge_count,
+            "vectorCount": report.vector_count,
+            "mutationCount": report.mutation_count,
+        }))
+    }
+
+    /// Report the guarantees provided by the native filesystem adapter.
+    #[napi]
+    pub fn capabilities(&self) -> serde_json::Value {
+        let capabilities = self.inner.borrow().capabilities();
+        serde_json::json!({
+            "atomicBatches": capabilities.atomic_batches,
+            "transactions": capabilities.transactions,
+            "fsync": capabilities.fsync,
+            "secondaryIndexes": capabilities.secondary_indexes,
+            "snapshots": capabilities.snapshots,
+            "changeFeed": capabilities.change_feed,
+            "concurrentWriters": capabilities.concurrent_writers,
+            "vectorSearch": match capabilities.vector_search {
+                VectorSearchCapability::None => "none",
+                VectorSearchCapability::Exact => "exact",
+                VectorSearchCapability::Ann => "ann",
+            },
+        })
+    }
+
+    /// Return operational counters for the native persistence store.
+    #[napi]
+    pub fn stats(&self) -> Result<serde_json::Value> {
+        let mut inner = self.inner.borrow_mut();
+        let node_count = inner.node_count().map_err(to_napi_err)?;
+        let edge_count = inner.edges_snapshot().map_err(to_napi_err)?.len();
+        let vector_count = inner.vectors_snapshot().map_err(to_napi_err)?.len();
+        let mutation_count = inner.mutation_log().map_err(to_napi_err)?.len();
+        let wal_bytes = fs::metadata(self.lock_dir.join("wal.msgpack"))
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
+        Ok(serde_json::json!({
+            "persistedNodeCount": node_count,
+            "edgeCount": edge_count,
+            "vectorCount": vector_count,
+            "mutationCount": mutation_count,
+            "walBytes": wal_bytes,
+        }))
+    }
+
+    /// Read durable logical mutations after a sequence cursor.
+    #[napi]
+    pub fn mutation_log_since(&self, sequence: String, limit: Option<u32>) -> Result<Vec<serde_json::Value>> {
+        let sequence = sequence
+            .parse::<u64>()
+            .map_err(|error| Error::from_reason(format!("invalid_argument: sequence must be an unsigned integer: {error}")))?;
+        let records = if let Some(limit) = limit {
+            self.inner.borrow_mut().mutation_log_page(sequence, limit as usize).map_err(to_napi_err)?
+        } else {
+            self.inner.borrow_mut().mutation_log_since(sequence).map_err(to_napi_err)?
+        };
+        records
+            .into_iter()
+            .map(|record| serde_json::to_value(record).map_err(|error| Error::from_reason(error.to_string())))
+            .collect()
+    }
+
+    /// Return the highest durable logical mutation sequence.
+    #[napi]
+    pub fn latest_mutation_sequence(&self) -> Result<String> {
+        self.inner
+            .borrow_mut()
+            .latest_mutation_sequence()
+            .map(|sequence| sequence.to_string())
+            .map_err(to_napi_err)
+    }
+
+    /// Create a consistent checkpointed directory backup.
+    #[napi]
+    pub fn backup(&self, destination: String) -> Result<()> {
+        let mut destination_storage = FsStorage::new(PathBuf::from(destination), false).map_err(to_napi_err)?;
+        self.inner
+            .borrow_mut()
+            .backup(&mut destination_storage)
+            .map_err(to_napi_err)
+    }
+
     #[napi]
     pub fn close(&self) -> Result<()> {
-        self.inner.borrow_mut().close().map_err(to_napi_err)
+        self.inner.borrow_mut().close().map_err(to_napi_err)?;
+        release_store_lock(&self.lock_dir, &self.lock_token);
+        Ok(())
     }
+}
+
+/// Restore a native store from a directory backup and validate the result.
+#[napi]
+pub fn restore_store(source: String, destination: String, compact_threshold: Option<u32>) -> Result<NativeStore> {
+    let source_storage = FsStorage::new(PathBuf::from(source), true).map_err(to_napi_err)?;
+    let destination_dir = PathBuf::from(destination);
+    let destination_storage = FsStorage::new(destination_dir.clone(), false).map_err(to_napi_err)?;
+    let lock_token = destination_storage.lock_token.clone();
+    let config = StoreConfig {
+        compact_threshold: compact_threshold.unwrap_or(10_000) as usize,
+        durability: Durability::Process,
+    };
+    let mut inner = CoreStore::restore(&source_storage, Box::new(destination_storage), config).map_err(to_napi_err)?;
+    let report = inner.verify().map_err(to_napi_err)?;
+    if !report.ok {
+        return Err(Error::from_reason(format!("storage: restored backup failed verification: {}", report.errors.join("; "))));
+    }
+    Ok(NativeStore { inner: RefCell::new(inner), lock_dir: destination_dir, lock_token })
 }
 
 // ── Query execution ──

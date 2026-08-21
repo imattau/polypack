@@ -1,13 +1,20 @@
-import type { SerializedNode, SerializedEdge } from '../types.js'
+import type { SerializedNode, SerializedEdge, AdapterCapabilities, IndexDefinition, MutationRecord, VerificationReport } from '../types.js'
 import type { PersistenceAdapter, PersistenceChanges, PersistedNodeQuery } from './adapter.js'
-import { applyPersistedCountPagination, applyPersistedNodeQuery, matchesPersistedNode } from './query.js'
+import type { PersistedSchemaDefinitions } from '../types.js'
+import { applyPersistedCountPagination, applyPersistedNodeQuery, assertQueryActive, matchesPersistedNode, SecondaryIndexBuckets } from './query.js'
 import type { WalEntry } from './binary-format.js'
-import { encodeWalEntries, decodeWalEntries, encodeSnapshot, decodeSnapshot } from './binary-format.js'
+import { encodeWalEntries, decodeWalEntries, encodeSnapshot, decodeSnapshot, encodeMutationRecords, decodeMutationRecords } from './binary-format.js'
 import type { FileIO } from './file-io.js'
 import { createFileIO } from './file-io.js'
+import { mutationRecordFromChanges } from './mutation-log.js'
+import { ReadOnlyStoreError } from './lock-errors.js'
 
 const SNAPSHOT_FILE = 'snapshot.msgpack'
 const WAL_FILE = 'wal.msgpack'
+const MUTATION_LOG_FILE = 'mutations.msgpack'
+const SCHEMAS_FILE = 'schemas.json'
+const LOCK_FILE = 'store.lock'
+const DEFAULT_STALE_LOCK_MS = 30_000
 const DEFAULT_COMPACT_THRESHOLD = 10_000
 /** Compact once the WAL holds at least this share of the store's record count. */
 const COMPACT_RATIO = 4
@@ -26,6 +33,10 @@ export interface BinaryStoreConfig {
   fileIO?: FileIO
   /** fsync WAL appends and snapshot writes. Off by default; see durability docs. */
   syncWrites?: boolean
+  /** Open without a writer lock and reject mutations. */
+  readOnly?: boolean
+  /** Age after which an abandoned writer lock may be recovered. */
+  staleLockMs?: number
 }
 
 interface ResolvedBinaryStoreConfig {
@@ -33,6 +44,8 @@ interface ResolvedBinaryStoreConfig {
   compactThreshold: number
   fileIO?: FileIO
   syncWrites: boolean
+  readOnly: boolean
+  staleLockMs: number
 }
 
 /**
@@ -45,9 +58,15 @@ interface ResolvedBinaryStoreConfig {
  * mid-append crash is also tolerated.
  */
 export class BinaryStoreAdapter implements PersistenceAdapter {
+  readonly capabilities: AdapterCapabilities
   private nodes = new Map<string, SerializedNode>()
   private edges = new Map<string, SerializedEdge>()
   private vectors = new Map<string, number[]>()
+  private indexDefinitions: IndexDefinition[] = []
+  private secondaryIndexes = new SecondaryIndexBuckets()
+  private schemaDefinitions: PersistedSchemaDefinitions = { nodeTypes: [], edgeTypes: [] }
+  private mutationRecords: MutationRecord[] = []
+  private nextMutationSequence = 1n
   private byType = new Map<string, Set<string>>()
   private edgesBySource = new Map<string, Set<string>>()
   private edgesByTarget = new Map<string, Set<string>>()
@@ -58,6 +77,7 @@ export class BinaryStoreAdapter implements PersistenceAdapter {
   private initPromise: Promise<void> | null = null
   private closed = false
   private queue: Promise<unknown> = Promise.resolve()
+  private releaseLock?: () => Promise<void>
 
   constructor(config: BinaryStoreConfig) {
     this.config = {
@@ -65,6 +85,18 @@ export class BinaryStoreAdapter implements PersistenceAdapter {
       compactThreshold: config.compactThreshold ?? DEFAULT_COMPACT_THRESHOLD,
       fileIO: config.fileIO,
       syncWrites: config.syncWrites ?? false,
+      readOnly: config.readOnly ?? false,
+      staleLockMs: config.staleLockMs ?? DEFAULT_STALE_LOCK_MS,
+    }
+    this.capabilities = {
+      atomicBatches: true,
+      transactions: true,
+      fsync: this.config.syncWrites,
+      secondaryIndexes: true,
+      snapshots: true,
+      changeFeed: true,
+      concurrentWriters: false,
+      vectorSearch: 'exact',
     }
   }
 
@@ -79,6 +111,7 @@ export class BinaryStoreAdapter implements PersistenceAdapter {
 
   private indexNode(node: SerializedNode): void {
     const existing = this.nodes.get(node.id)
+    if (existing) this.secondaryIndexes.remove(existing)
     if (existing && existing.type !== node.type) this.unindexNode(node.id, existing.type)
     let ids = this.byType.get(node.type)
     if (!ids) {
@@ -86,10 +119,12 @@ export class BinaryStoreAdapter implements PersistenceAdapter {
       this.byType.set(node.type, ids)
     }
     ids.add(node.id)
+    this.secondaryIndexes.add(node)
   }
 
   private unindexNode(id: string, type?: string): void {
     const node = this.nodes.get(id)
+    this.secondaryIndexes.remove(node)
     const ids = this.byType.get(type ?? node?.type ?? '')
     if (ids) {
       ids.delete(id)
@@ -132,6 +167,7 @@ export class BinaryStoreAdapter implements PersistenceAdapter {
     this.byType.clear()
     this.edgesBySource.clear()
     this.edgesByTarget.clear()
+    this.secondaryIndexes.setDefinitions(this.indexDefinitions)
     for (const node of this.nodes.values()) this.indexNode(node)
     for (const edge of this.edges.values()) this.indexEdge(edge)
   }
@@ -169,14 +205,38 @@ export class BinaryStoreAdapter implements PersistenceAdapter {
     if (this.closed) throw new Error('BinaryStoreAdapter is closed')
   }
 
+  private assertWritable(): void {
+    if (this.config.readOnly) throw new ReadOnlyStoreError()
+  }
+
   private async doLoad(): Promise<void> {
     this.io = this.config.fileIO ?? (await createFileIO(this.config.storeDir, this.config.syncWrites))
+    if (!this.config.readOnly && this.io.acquireExclusiveLock) {
+      this.releaseLock = await this.io.acquireExclusiveLock(LOCK_FILE, { storeDir: this.config.storeDir }, this.config.staleLockMs)
+    }
     const snapshotData = await this.io.readFile(SNAPSHOT_FILE)
+    let snapshotHasSchema = false
     if (snapshotData) {
-      const { nodes, edges, vectors } = decodeSnapshot(snapshotData)
+      const { nodes, edges, vectors, indexes, schemaDefinitions } = decodeSnapshot(snapshotData)
       this.nodes = nodes
       this.edges = edges
       this.vectors = vectors
+      this.indexDefinitions = indexes
+      this.secondaryIndexes.setDefinitions(this.indexDefinitions)
+      if (schemaDefinitions) {
+        this.schemaDefinitions = schemaDefinitions
+        snapshotHasSchema = true
+      }
+    }
+    const schemaData = await this.io.readFile(SCHEMAS_FILE)
+    if (schemaData && !snapshotHasSchema) {
+      try {
+        const parsed = JSON.parse(new TextDecoder().decode(schemaData)) as PersistedSchemaDefinitions
+        if (!Array.isArray(parsed.nodeTypes) || !Array.isArray(parsed.edgeTypes)) throw new Error('schema metadata must contain nodeTypes and edgeTypes arrays')
+        this.schemaDefinitions = parsed
+      } catch (error) {
+        throw new Error(`Invalid schema metadata: ${error instanceof Error ? error.message : String(error)}`)
+      }
     }
     const walData = await this.io.readFile(WAL_FILE)
     if (walData && walData.length > 0) {
@@ -187,11 +247,20 @@ export class BinaryStoreAdapter implements PersistenceAdapter {
       for (const entry of decodeWalEntries(walData)) {
         this.replayEntry(entry)
       }
-      await this.writeSnapshot()
-      await this.io.deleteFile(WAL_FILE)
-      this.walEntryCount = 0
+      if (!this.config.readOnly) {
+        await this.writeSnapshot()
+        await this.io.deleteFile(WAL_FILE)
+        this.walEntryCount = 0
+      }
     }
     this.rebuildIndexes()
+    const mutationData = await this.io.readFile(MUTATION_LOG_FILE)
+    if (mutationData && mutationData.length > 0) {
+      this.mutationRecords = [...decodeMutationRecords(mutationData)]
+      if (this.mutationRecords.length > 0) {
+        this.nextMutationSequence = this.mutationRecords[this.mutationRecords.length - 1].sequence + 1n
+      }
+    }
   }
 
   private replayEntry(entry: WalEntry): void {
@@ -219,11 +288,19 @@ export class BinaryStoreAdapter implements PersistenceAdapter {
         this.edges.clear()
         this.vectors.clear()
         break
+      case 'setIndexes':
+        this.indexDefinitions = entry.indexes.map(index => ({ ...index, fields: [...index.fields] }))
+        this.secondaryIndexes.setDefinitions(this.indexDefinitions)
+        this.secondaryIndexes.rebuild(this.nodes.values())
+        break
+      case 'setSchema':
+        this.schemaDefinitions = structuredClone(entry.schema)
+        break
     }
   }
 
   private async writeSnapshot(): Promise<void> {
-    await this.io.writeFile(SNAPSHOT_FILE, encodeSnapshot(this.nodes, this.edges, this.vectors))
+    await this.io.writeFile(SNAPSHOT_FILE, encodeSnapshot(this.nodes, this.edges, this.vectors, this.indexDefinitions, this.schemaDefinitions))
   }
 
   /**
@@ -260,9 +337,21 @@ export class BinaryStoreAdapter implements PersistenceAdapter {
 
   async applyChanges(changes: PersistenceChanges): Promise<void> {
     this.assertOpen()
+    this.assertWritable()
     await this.enqueue(async () => {
       await this.ensureLoaded()
+      if (changes.operationId && this.mutationRecords.some(record => record.operationId === changes.operationId)) return
       const entries: WalEntry[] = []
+      if (changes.indexDefinitions) {
+        this.indexDefinitions = changes.indexDefinitions.map(index => ({ ...index, fields: [...index.fields] }))
+        this.secondaryIndexes.setDefinitions(this.indexDefinitions)
+        this.secondaryIndexes.rebuild(this.nodes.values())
+        entries.push({ kind: 'setIndexes', indexes: this.indexDefinitions })
+      }
+      if (changes.schemaDefinitions) {
+        this.schemaDefinitions = structuredClone(changes.schemaDefinitions)
+        entries.push({ kind: 'setSchema', schema: structuredClone(this.schemaDefinitions) })
+      }
       for (const id of changes.deleteNodeIds) {
         const node = this.nodes.get(id)
         this.unindexNode(id, node?.type)
@@ -295,12 +384,153 @@ export class BinaryStoreAdapter implements PersistenceAdapter {
       if (entries.length > 0) {
         const encoded = encodeWalEntries(entries)
         await this.io.appendFile(WAL_FILE, encoded)
+        const record = mutationRecordFromChanges(changes, this.nextMutationSequence)
+        if (record) {
+          await this.io.appendFile(MUTATION_LOG_FILE, encodeMutationRecords([record]))
+          this.mutationRecords.push(record)
+          this.nextMutationSequence++
+        }
         this.walEntryCount += entries.length
         if (this.walEntryCount >= this.effectiveCompactThreshold()) {
           this.scheduleCompact()
         }
+        if (changes.schemaDefinitions) await this.io.writeFile(SCHEMAS_FILE, new TextEncoder().encode(JSON.stringify(this.schemaDefinitions)))
       }
     })
+  }
+
+  async getIndexDefinitions(): Promise<IndexDefinition[]> {
+    this.assertOpen()
+    await this.enqueue(() => this.ensureLoaded())
+    return this.indexDefinitions.map(index => ({ ...index, fields: [...index.fields] }))
+  }
+
+  async getSchemaDefinitions(): Promise<PersistedSchemaDefinitions> {
+    this.assertOpen()
+    await this.enqueue(() => this.ensureLoaded())
+    return structuredClone(this.schemaDefinitions)
+  }
+
+  async setSchemaDefinitions(definitions: PersistedSchemaDefinitions): Promise<void> {
+    this.assertOpen()
+    this.assertWritable()
+    await this.enqueue(async () => {
+      await this.ensureLoaded()
+      this.schemaDefinitions = structuredClone(definitions)
+      await this.io.writeFile(SCHEMAS_FILE, new TextEncoder().encode(JSON.stringify(this.schemaDefinitions)))
+    })
+  }
+
+  /** Force the current state into a snapshot and compact the recovery WAL. */
+  async checkpoint(): Promise<void> {
+    this.assertOpen()
+    this.assertWritable()
+    await this.enqueue(async () => {
+      await this.ensureLoaded()
+      await this.compact()
+      if (this.walEntryCount === 0) await this.writeSnapshot()
+    })
+  }
+
+  /** Verify decoded records, indexes, vectors, and logical mutation history. */
+  async verify(): Promise<VerificationReport> {
+    this.assertOpen()
+    await this.enqueue(() => this.ensureLoaded())
+    const errors: string[] = []
+    for (const node of this.nodes.values()) {
+      if (!node.id || !node.type) errors.push(`invalid node identity: ${node.id}`)
+      if (!Number.isFinite(node.insertedAt) || !Number.isFinite(node.updatedAt)) errors.push(`invalid timestamps: ${node.id}`)
+      if (node.activation) {
+        if (!Number.isFinite(node.activation.score) || node.activation.score < 0 || node.activation.score > 1) errors.push(`invalid activation score: ${node.id}`)
+        if (!Number.isFinite(node.activation.importance) || node.activation.importance < 0 || node.activation.importance > 1) errors.push(`invalid activation importance: ${node.id}`)
+        if (!Number.isInteger(node.activation.reinforcementCount) || node.activation.reinforcementCount < 0) errors.push(`invalid activation count: ${node.id}`)
+        if (!Number.isFinite(node.activation.lastMeaningfulActivation) || node.activation.lastMeaningfulActivation < 0) errors.push(`invalid activation timestamp: ${node.id}`)
+      }
+      const storedVector = this.vectors.get(node.id)
+      if (node.vector && storedVector && node.vector.length !== storedVector.length) errors.push(`vector dimensionality mismatch: ${node.id}`)
+    }
+    for (const edge of this.edges.values()) {
+      if (!edge.id || !edge.source || !edge.target || !edge.type) errors.push(`invalid edge identity: ${edge.id}`)
+      if (!this.nodes.has(edge.source)) errors.push(`edge ${edge.id} has missing source ${edge.source}`)
+      if (!this.nodes.has(edge.target)) errors.push(`edge ${edge.id} has missing target ${edge.target}`)
+    }
+    for (const [id, vector] of this.vectors) {
+      if (!vector.every(value => Number.isFinite(value))) errors.push(`invalid vector values: ${id}`)
+    }
+    for (const [type, ids] of this.byType) {
+      for (const id of ids) if (this.nodes.get(id)?.type !== type) errors.push(`stale type index entry: ${type}/${id}`)
+    }
+    for (const [id, edgeIds] of this.edgesBySource) {
+      for (const edgeId of edgeIds) if (this.edges.get(edgeId)?.source !== id) errors.push(`stale source edge index entry: ${id}/${edgeId}`)
+    }
+    for (const [id, edgeIds] of this.edgesByTarget) {
+      for (const edgeId of edgeIds) if (this.edges.get(edgeId)?.target !== id) errors.push(`stale target edge index entry: ${id}/${edgeId}`)
+    }
+    errors.push(...this.secondaryIndexes.verify(this.nodes.values()))
+    for (let i = 1; i < this.mutationRecords.length; i++) {
+      if (this.mutationRecords[i].sequence <= this.mutationRecords[i - 1].sequence) errors.push(`non-monotonic mutation sequence at index ${i}`)
+    }
+    return { ok: errors.length === 0, errors, nodeCount: this.nodes.size, edgeCount: this.edges.size, vectorCount: this.vectors.size, mutationCount: this.mutationRecords.length }
+  }
+
+  async stats() {
+    this.assertOpen()
+    await this.enqueue(() => this.ensureLoaded())
+    const wal = await this.io.readFile(WAL_FILE)
+    return {
+      persistedNodeCount: this.nodes.size,
+      edgeCount: this.edges.size,
+      vectorCount: this.vectors.size,
+      mutationCount: this.mutationRecords.length,
+      walBytes: wal?.byteLength ?? 0,
+    }
+  }
+
+  /** Copy a checkpointed store into another FileIO directory. */
+  async backup(destination: FileIO): Promise<void> {
+    if (this.config.readOnly) {
+      this.assertOpen()
+      await this.enqueue(() => this.ensureLoaded())
+    } else {
+      await this.checkpoint()
+    }
+    for (const name of [SNAPSHOT_FILE, WAL_FILE, MUTATION_LOG_FILE, SCHEMAS_FILE]) {
+      const data = await this.io.readFile(name)
+      if (data) await destination.writeFile(name, data)
+    }
+  }
+
+  /** Restore all store files from one FileIO directory into another. */
+  static async restore(source: FileIO, destination: FileIO): Promise<void> {
+    for (const name of [SNAPSHOT_FILE, WAL_FILE, MUTATION_LOG_FILE, SCHEMAS_FILE]) {
+      const data = await source.readFile(name)
+      if (data) await destination.writeFile(name, data)
+      else await destination.deleteFile(name)
+    }
+  }
+
+  async getMutationsSince(sequence: bigint): Promise<MutationRecord[]> {
+    this.assertOpen()
+    await this.enqueue(() => this.ensureLoaded())
+    return this.mutationRecords
+      .filter(record => record.sequence > sequence)
+      .map(record => ({ ...record, operations: record.operations.map(operation => ({ ...operation, payload: structuredClone(operation.payload) })) }))
+  }
+
+  async getMutationLogPage(sequence: bigint, limit: number): Promise<MutationRecord[]> {
+    if (!Number.isInteger(limit) || limit < 0) throw new RangeError('mutation log page limit must be a non-negative integer')
+    this.assertOpen()
+    await this.enqueue(() => this.ensureLoaded())
+    return this.mutationRecords
+      .filter(record => record.sequence > sequence)
+      .slice(0, limit)
+      .map(record => ({ ...record, operations: record.operations.map(operation => ({ ...operation, payload: structuredClone(operation.payload) })) }))
+  }
+
+  async latestMutationSequence(): Promise<bigint> {
+    this.assertOpen()
+    await this.enqueue(() => this.ensureLoaded())
+    return this.nextMutationSequence - 1n
   }
 
   async putNode(node: SerializedNode): Promise<void> {
@@ -349,7 +579,9 @@ export class BinaryStoreAdapter implements PersistenceAdapter {
     this.assertOpen()
     return this.enqueue(async () => {
       await this.ensureLoaded()
-      const candidates = this.typeCandidateIds(query)
+      assertQueryActive(query.signal)
+      const indexed = this.secondaryIndexes.candidates(query)
+      const candidates = indexed.ids ? [...indexed.ids] : this.typeCandidateIds(query)
       const nodes = candidates
         ? candidates.map(id => this.nodes.get(id)).filter((n): n is SerializedNode => !!n)
         : [...this.nodes.values()]
@@ -363,7 +595,8 @@ export class BinaryStoreAdapter implements PersistenceAdapter {
       await this.ensureLoaded()
       const isTypeOnly = !!query.nodeTypes && query.nodeTypes.length > 0 &&
         !query.attributes && !query.attributeRanges
-      let count: number
+    assertQueryActive(query.signal)
+    let count: number
       if (!query.nodeTypes && !query.attributes && !query.attributeRanges) {
         count = this.nodes.size
       } else if (isTypeOnly) {
@@ -371,9 +604,20 @@ export class BinaryStoreAdapter implements PersistenceAdapter {
         for (const type of query.nodeTypes!) {
           count += this.byType.get(type)?.size ?? 0
         }
-      } else {
+    } else {
+      const indexed = this.secondaryIndexes.candidates(query)
+      if (indexed.ids) {
         count = 0
-        for (const node of this.nodes.values()) {
+        for (const id of indexed.ids) {
+          assertQueryActive(query.signal)
+          const node = this.nodes.get(id)
+          if (node && matchesPersistedNode(node, query)) count++
+        }
+        return applyPersistedCountPagination(count, query)
+      }
+      count = 0
+      for (const node of this.nodes.values()) {
+        assertQueryActive(query.signal)
           if (matchesPersistedNode(node, query)) count++
         }
       }
@@ -485,6 +729,7 @@ export class BinaryStoreAdapter implements PersistenceAdapter {
 
   async clearAll(): Promise<void> {
     this.assertOpen()
+    this.assertWritable()
     await this.enqueue(async () => {
       await this.ensureLoaded()
       this.nodes.clear()
@@ -493,8 +738,9 @@ export class BinaryStoreAdapter implements PersistenceAdapter {
       this.byType.clear()
       this.edgesBySource.clear()
       this.edgesByTarget.clear()
+      this.secondaryIndexes.rebuild([])
       this.walEntryCount = 0
-      await this.io.writeFile(SNAPSHOT_FILE, encodeSnapshot(this.nodes, this.edges, this.vectors))
+      await this.io.writeFile(SNAPSHOT_FILE, encodeSnapshot(this.nodes, this.edges, this.vectors, this.indexDefinitions, this.schemaDefinitions))
       await this.io.writeFile(WAL_FILE, new Uint8Array(0))
     })
   }
@@ -512,7 +758,11 @@ export class BinaryStoreAdapter implements PersistenceAdapter {
     await this.enqueue(async () => {
       if (this.initPromise) {
         await this.ensureLoaded()
-        await this.compact()
+        if (!this.config.readOnly) await this.compact()
+      }
+      if (this.releaseLock) {
+        await this.releaseLock()
+        this.releaseLock = undefined
       }
     })
   }

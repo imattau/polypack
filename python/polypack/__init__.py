@@ -7,12 +7,21 @@ Semantics mirror `specification/data-model.md` and the TypeScript reference.
 from __future__ import annotations
 
 import copy
+import ast
+import json
 import math
 import os
+import shutil
+import uuid
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator, Optional, Sequence
+
+if os.name == "nt":
+    import msvcrt
+else:
+    import fcntl
 
 import numpy as np
 
@@ -23,6 +32,7 @@ from ._core import (
     engine_info as _engine_info,
     execute_query_plan as _execute_query_plan,
 )
+from .sync import FileSyncOperationLog, SyncServer, sync_checksum, sync_identity_checksum, validate_sync_batch, validate_sync_operation
 from ._core import (
     PolypackClosedError,
     PolypackCorruptDataError,
@@ -33,9 +43,146 @@ from ._core import (
     PolypackVersionError,
 )
 
+
+class ConflictError(PolypackError):
+    """Raised when a conditional write observes a stale record revision."""
+
+    pass
+
+
+class AdapterCapabilityError(PolypackError):
+    """Raised when an operation requires an adapter guarantee it does not have."""
+
+    def __init__(self, capability: str) -> None:
+        super().__init__(f"Persistence adapter does not support capability: {capability}")
+        self.capability = capability
+
+
+class ResourceLimitError(PolypackError):
+    """Raised when a configured graph or query resource limit is exceeded."""
+
+    def __init__(self, limit_name: str, limit: int) -> None:
+        super().__init__(f"Resource exceeded {limit_name} limit of {limit}")
+        self.limit_name = limit_name
+        self.limit = limit
+
+
+class MigrationError(PolypackError):
+    """Raised when an application migration is invalid or cannot run."""
+
+
+class MigrationRegistry:
+    """Registry for resumable application-level node and edge migrations."""
+
+    def __init__(self) -> None:
+        self._definitions: dict[int, dict] = {}
+
+    def register(self, definition: dict) -> None:
+        source = definition.get("from")
+        target = definition.get("to")
+        if not isinstance(source, int) or not isinstance(target, int) or target <= source:
+            raise MigrationError("migration versions must be integers with to greater than from")
+        if source in self._definitions:
+            raise MigrationError(f"migration from {source} is already registered")
+        if not callable(definition.get("migrateNode")):
+            raise MigrationError("migration requires migrateNode")
+        self._definitions[source] = dict(definition)
+
+    @property
+    def all(self) -> list[dict]:
+        return [self._definitions[key] for key in sorted(self._definitions)]
+
+    def _path(self, source: int, target: int) -> list[dict]:
+        path = []
+        version = source
+        while version < target:
+            definition = self._definitions.get(version)
+            if definition is None or definition["to"] > target:
+                raise MigrationError(f"no contiguous migration path from {version} to {target}")
+            path.append(definition)
+            version = definition["to"]
+        return path
+
+    def run(self, graph: "PolyGraph", source: int, target: int, options: Optional[dict] = None) -> dict:
+        options = dict(options or {})
+        if not isinstance(source, int) or not isinstance(target, int) or target < source:
+            raise MigrationError("migration versions must be integers with to greater than or equal to from")
+        batch_size = options.get("batchSize", 2**63 - 1)
+        if not isinstance(batch_size, int) or batch_size < 1:
+            raise MigrationError("migration batchSize must be a positive integer")
+        path = self._path(source, target)
+        all_nodes = sorted(graph._nodes.values(), key=lambda node: node["id"])
+        all_edges = sorted((edge for edges in graph._edges.values() for edge in edges.values()), key=lambda edge: edge["id"])
+        resume = options.get("resumeAfter") or {}
+        nodes = [node for node in all_nodes if not resume.get("nodeId") or node["id"] > resume["nodeId"]]
+        edges = [edge for edge in all_edges if not resume.get("edgeId") or edge["id"] > resume["edgeId"]]
+        report = {"from": source, "to": target, "processed": 0, "total": len(nodes) + len(edges), "migrated": 0, "dryRun": options.get("dryRun", False)}
+        migrate_node = lambda node: self._apply_node(path, node)
+        migrate_edge = lambda edge: self._apply_edge(path, edge)
+        for start in range(0, len(nodes), batch_size):
+            originals = nodes[start:start + batch_size]
+            batch = [migrate_node(copy.deepcopy(node)) for node in originals]
+            for original, migrated in zip(originals, batch):
+                if migrated["id"] != original["id"] or migrated["type"] != original["type"]:
+                    raise MigrationError(f"node migration changed identity or type for {original['id']}")
+            if not report["dryRun"] and path:
+                with graph.transaction() as tx:
+                    for node in batch:
+                        tx.add_node(node)
+            report["processed"] += len(batch)
+            report["migrated"] += len(batch) if path else 0
+            report["lastProcessed"] = {"kind": "node", "id": batch[-1]["id"]}
+            callback = options.get("onProgress")
+            if callback:
+                callback(dict(report))
+        edge_migrations = any(callable(definition.get("migrateEdge")) for definition in path)
+        for start in range(0, len(edges), batch_size):
+            original = edges[start:start + batch_size]
+            batch = [migrate_edge(copy.deepcopy(edge)) for edge in original]
+            for before, migrated in zip(original, batch):
+                if migrated["id"] != before["id"] or migrated["source"] != before["source"] or migrated["target"] != before["target"] or migrated["type"] != before["type"]:
+                    raise MigrationError(f"edge migration changed identity or endpoints for {before['id']}")
+            changed = [edge for before, edge in zip(original, batch) if edge.get("data") != before.get("data")]
+            if not report["dryRun"] and changed:
+                with graph.transaction() as tx:
+                    for edge in changed:
+                        tx.update_edge(edge["id"], edge.get("data") or {})
+            report["processed"] += len(batch)
+            report["migrated"] += len(batch) if edge_migrations else 0
+            report["lastProcessed"] = {"kind": "edge", "id": batch[-1]["id"]}
+            callback = options.get("onProgress")
+            if callback:
+                callback(dict(report))
+        return report
+
+    @staticmethod
+    def _apply_node(path: list[dict], node: Node) -> Node:
+        for definition in path:
+            result = definition["migrateNode"](_copy_node(node))
+            if result is not None:
+                node = result
+        return node
+
+    @staticmethod
+    def _apply_edge(path: list[dict], edge: dict) -> dict:
+        for definition in path:
+            callback = definition.get("migrateEdge")
+            if callback:
+                result = callback(copy.deepcopy(edge))
+                if result is not None:
+                    edge = result
+        return edge
+
+
+class UniqueConstraintError(PolypackError):
+    """Raised when a unique secondary index would contain duplicate data."""
+
 __all__ = [
     "PolyGraph",
+    "GraphSnapshot",
+    "GraphTransaction",
     "GraphQuery",
+    "PersistedGraphQuery",
     "ExactIndex",
     "HnswIndex",
     "ActivationEngine",
@@ -51,6 +198,18 @@ __all__ = [
     "PolypackVersionError",
     "PolypackCorruptDataError",
     "PolypackStorageError",
+    "ConflictError",
+    "AdapterCapabilityError",
+    "ResourceLimitError",
+    "MigrationError",
+    "MigrationRegistry",
+    "UniqueConstraintError",
+    "SyncServer",
+    "FileSyncOperationLog",
+    "sync_checksum",
+    "sync_identity_checksum",
+    "validate_sync_batch",
+    "validate_sync_operation",
 ]
 
 Node = dict
@@ -92,6 +251,56 @@ def _validate_id(id_: str, name: str = "id") -> None:
 def _validate_timestamp(ts: Any) -> None:
     if not isinstance(ts, (int, float)) or not math.isfinite(float(ts)) or ts < 0:
         raise PolypackValueError("timestamps must be finite non-negative numbers")
+
+
+def _patch_parts(path: str) -> list[str]:
+    if not isinstance(path, str) or not path or any(not part for part in path.split(".")):
+        raise PolypackValueError("patch paths must not be empty")
+    parts = path.split(".")
+    if parts[0] == "data":
+        parts = parts[1:]
+    if not parts or any(not part for part in parts):
+        raise PolypackValueError("patch paths must target node data")
+    return parts
+
+
+def _patch_set(root: dict, path: str, value: Any) -> None:
+    parts = _patch_parts(path)
+    current = root
+    for part in parts[:-1]:
+        if not isinstance(current.get(part), dict):
+            current[part] = {}
+        current = current[part]
+    current[parts[-1]] = copy.deepcopy(value)
+
+
+def _patch_unset(root: dict, path: str) -> None:
+    parts = _patch_parts(path)
+    current: Any = root
+    for part in parts[:-1]:
+        if not isinstance(current, dict) or part not in current:
+            return
+        current = current[part]
+    if isinstance(current, dict):
+        current.pop(parts[-1], None)
+
+
+def _patch_get(root: dict, path: str) -> Any:
+    current: Any = root
+    for part in _patch_parts(path):
+        if not isinstance(current, dict) or part not in current:
+            return None
+        current = current[part]
+    return current
+
+
+def _patch_has(root: dict, path: str) -> bool:
+    current: Any = root
+    for part in _patch_parts(path):
+        if not isinstance(current, dict) or part not in current:
+            return False
+        current = current[part]
+    return True
 
 
 def _cosine(a: Sequence[float], b: Sequence[float]) -> float:
@@ -368,12 +577,79 @@ class HnswIndex:
 # ── Graph ──
 
 
+def _lock_store_file(lock_file: Any, read_only: bool) -> None:
+    """Acquire the platform-specific lock for a directory-backed store."""
+    if os.name == "nt":
+        # msvcrt.locking requires a byte to exist and locks from the current
+        # file position. Windows has no shared-lock equivalent in msvcrt, so
+        # read-only opens use a non-blocking exclusive lock as well.
+        lock_file.seek(0)
+        if lock_file.read(1) == b"":
+            lock_file.seek(0)
+            lock_file.write(b"\0")
+            lock_file.flush()
+        lock_file.seek(0)
+        msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+    else:
+        fcntl.flock(lock_file.fileno(), (fcntl.LOCK_SH if read_only else fcntl.LOCK_EX) | fcntl.LOCK_NB)
+
+
+def _unlock_store_file(lock_file: Any) -> None:
+    if os.name == "nt":
+        lock_file.seek(0)
+        msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+    else:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
 class DirectoryStorage:
     """Host byte-storage adapter over a directory (snapshot.msgpack / wal.msgpack)."""
 
-    def __init__(self, directory: str) -> None:
+    def __init__(self, directory: str, read_only: bool = False) -> None:
         self._dir = Path(directory)
         self._dir.mkdir(parents=True, exist_ok=True)
+        self._read_only = read_only
+        self._lock_file = open(self._dir / "store.lock", "a+b")
+        try:
+            _lock_store_file(self._lock_file, read_only)
+        except OSError as exc:
+            self._lock_file.close()
+            self._lock_file = None
+            raise PolypackStorageError(f"store is already locked: {directory}") from exc
+        if not read_only:
+            self._lock_file.seek(0)
+            self._lock_file.truncate()
+            self._lock_file.write(f"pid={os.getpid()}\n".encode())
+            self._lock_file.flush()
+
+    def close(self) -> None:
+        if getattr(self, "_lock_file", None) is not None:
+            _unlock_store_file(self._lock_file)
+            self._lock_file.close()
+            self._lock_file = None
+
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except (OSError, AttributeError):
+            pass
+
+    @property
+    def capabilities(self) -> dict:
+        return {
+            "atomicBatches": True,
+            "transactions": True,
+            "fsync": True,
+            "secondaryIndexes": True,
+            "snapshots": True,
+            "changeFeed": True,
+            "concurrentWriters": False,
+            "vectorSearch": "exact",
+        }
+
+    @property
+    def read_only(self) -> bool:
+        return self._read_only
 
     def _path(self, name: str) -> Path:
         return self._dir / name
@@ -383,22 +659,29 @@ class DirectoryStorage:
         return path.read_bytes() if path.exists() else None
 
     def write(self, name: str, data: bytes) -> None:
+        if self._read_only:
+            raise PolypackStorageError("store was opened read-only")
         # Write-then-rename: a crash mid-write leaves the previous snapshot
-        # intact instead of a torn file, and the tmp file is fsynced first
-        # so the rename can never land ahead of its data on disk.
+        # intact instead of a torn file. Fsyncing the tmp file before the
+        # rename is the Rust `Store`'s call via the explicit `sync()`/
+        # `sync_dir()` it issues only under `Durability::Fsync` — doing it
+        # unconditionally here silently upgraded `Durability::Process`
+        # ("written to the OS, not fsynced") into an always-fsync adapter.
         target = self._path(name)
         tmp_path = self._dir / f"{name}.tmp"
         with open(tmp_path, "wb") as f:
             f.write(bytes(data))
-            f.flush()
-            os.fsync(f.fileno())
         os.replace(tmp_path, target)
 
     def append(self, name: str, data: bytes) -> None:
+        if self._read_only:
+            raise PolypackStorageError("store was opened read-only")
         with open(self._path(name), "ab") as f:
             f.write(bytes(data))
 
     def delete(self, name: str) -> None:
+        if self._read_only:
+            raise PolypackStorageError("store was opened read-only")
         try:
             self._path(name).unlink()
         except FileNotFoundError:
@@ -416,6 +699,7 @@ def _copy_node(node: Node) -> Node:
         "vector": None if node.get("vector") is None else list(node.get("vector")),
         "insertedAt": node["insertedAt"],
         "updatedAt": node["updatedAt"],
+        "revision": int(node.get("revision", 0)),
     }
     if node.get("activation") is not None:
         out["activation"] = dict(node["activation"])
@@ -426,6 +710,129 @@ def _edge_key(source: str, edge_type: str, target: str) -> str:
     if "::" in source or "::" in edge_type:
         raise PolypackValueError('edge source and type must not contain "::"')
     return f"{source}::{edge_type}::{target}"
+
+
+class GraphTransaction:
+    """Checkpointed transaction for ``PolyGraph``.
+
+    Mutations are applied to the graph immediately, providing read-your-own-
+    writes. A failed callback or explicit rollback restores the graph and
+    vector index. This is an in-process transaction boundary; callers should
+    not concurrently mutate the same graph from another thread.
+    """
+
+    def __init__(self, graph: "PolyGraph", actor: Optional[str] = None, base_revision: Optional[int] = None, metadata: Optional[dict] = None, operation_id: Optional[str] = None) -> None:
+        if graph._active_transaction is not None:
+            raise PolypackValueError("nested transactions are not supported")
+        self.graph = graph
+        self.id = f"tx-{uuid.uuid4().hex}"
+        if operation_id is not None and not operation_id:
+            raise PolypackValueError("operation_id must not be empty")
+        self.operation_id = operation_id or f"op-{uuid.uuid4().hex}"
+        self.actor = actor
+        self.base_revision = base_revision
+        self.metadata = copy.deepcopy(metadata) if metadata is not None else None
+        self._snapshot = {
+            "nodes": copy.deepcopy(graph._nodes),
+            "edges": copy.deepcopy(graph._edges),
+            "incoming": copy.deepcopy(graph._incoming),
+            "removed_nodes": set(graph._removed_node_ids),
+            "removed_edges": set(graph._removed_edge_ids),
+            "removed_vectors": set(graph._removed_vector_ids),
+            "dirty_nodes": set(graph._dirty_node_ids),
+            "dirty_edges": set(graph._dirty_edge_ids),
+            "dirty_vectors": set(graph._dirty_vector_ids),
+            "vectors": list(graph.vectors.entries()),
+            "dirty": graph._dirty,
+        }
+        self._closed = False
+        self._mutation_count = 0
+        graph._active_transaction = self
+
+    def _before_mutation(self) -> None:
+        limit = self.graph._resource_limits.get("maxBatchSize")
+        if limit is not None and self._mutation_count >= limit:
+            raise ResourceLimitError("maxBatchSize", limit)
+        self._mutation_count += 1
+
+    def _restore(self) -> None:
+        self.graph._nodes = self._snapshot["nodes"]
+        self.graph._edges = self._snapshot["edges"]
+        self.graph._incoming = self._snapshot["incoming"]
+        self.graph._removed_node_ids = self._snapshot["removed_nodes"]
+        self.graph._removed_edge_ids = self._snapshot["removed_edges"]
+        self.graph._removed_vector_ids = self._snapshot["removed_vectors"]
+        self.graph._dirty_node_ids = self._snapshot["dirty_nodes"]
+        self.graph._dirty_edge_ids = self._snapshot["dirty_edges"]
+        self.graph._dirty_vector_ids = self._snapshot["dirty_vectors"]
+        self.graph._dirty = self._snapshot["dirty"]
+        self.graph.vectors.clear()
+        self.graph.vectors.add_many(self._snapshot["vectors"])
+        self.graph._rebuild_secondary_indexes()
+
+    def commit(self) -> None:
+        if self._closed:
+            return
+        try:
+            if self.graph._store is not None:
+                self.graph.save()
+        except Exception:
+            self._restore()
+            self.graph._active_transaction = None
+            self._closed = True
+            raise
+        self.graph._active_transaction = None
+        self._closed = True
+
+    def rollback(self) -> None:
+        if self._closed:
+            return
+        self._restore()
+        self.graph._active_transaction = None
+        self._closed = True
+
+    def __enter__(self) -> "GraphTransaction":
+        return self
+
+    def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
+        if exc_type is None:
+            self.commit()
+        else:
+            self.rollback()
+
+    def add_node(self, node: Node) -> None:
+        self._before_mutation()
+        self.graph.add_node(node)
+
+    def update_node(self, *args: Any, **kwargs: Any) -> Optional[Node]:
+        self._before_mutation()
+        return self.graph.update_node(*args, **kwargs)
+
+    def patch_node(self, *args: Any, **kwargs: Any) -> Optional[Node]:
+        self._before_mutation()
+        return self.graph.patch_node(*args, **kwargs)
+
+    def remove_node(self, *args: Any, **kwargs: Any) -> None:
+        self._before_mutation()
+        self.graph.remove_node(*args, **kwargs)
+
+    def add_edge(self, *args: Any, **kwargs: Any) -> None:
+        self._before_mutation()
+        self.graph.add_edge(*args, **kwargs)
+
+    def update_edge(self, *args: Any, **kwargs: Any) -> Optional[dict]:
+        self._before_mutation()
+        return self.graph.update_edge(*args, **kwargs)
+
+    def remove_edge(self, *args: Any, **kwargs: Any) -> bool:
+        self._before_mutation()
+        return self.graph.remove_edge(*args, **kwargs)
+
+    def get_node(self, id_: str) -> Optional[Node]:
+        return self.graph.get_node(id_)
+
+    def get_edges(self, source: str, edge_type: Optional[str] = None) -> list:
+        return self.graph.get_edges(source, edge_type)
 
 
 class PolyGraph:
@@ -442,11 +849,488 @@ class PolyGraph:
         self.vectors = vector_index or ExactIndex()
         self._on_orphan = on_orphan
         self._store: Optional[_NativeStore] = None
+        self._store_directory: Optional[Path] = None
+        self._store_read_only = False
         self._removed_node_ids: set = set()
         self._removed_edge_ids: set = set()
         self._removed_vector_ids: set = set()
+        self._dirty_node_ids: set = set()
+        self._dirty_edge_ids: set = set()
+        self._dirty_vector_ids: set = set()
+        self._dirty = False
+        self._active_transaction: Optional["GraphTransaction"] = None
+        self._node_type_definitions: dict[str, dict] = {}
+        self._edge_type_definitions: dict[str, dict] = {}
+        self._resource_limits: dict[str, int] = {}
+        self.migrations = MigrationRegistry()
+        self._indexes: dict[str, dict] = {}
+        self._secondary_index_data: dict[str, dict[str, set[str]]] = {}
+        self._query_count = 0
+        self._query_duration_ms = 0.0
+        self._query_scanned_records = 0
+        self._query_index_usage: dict[str, int] = {}
+
+    @property
+    def capabilities(self) -> dict:
+        if self._store is not None:
+            return dict(self._store.capabilities())
+        return {
+            "atomicBatches": True,
+            "transactions": True,
+            "fsync": False,
+            "secondaryIndexes": True,
+            "snapshots": True,
+            "changeFeed": True,
+            "concurrentWriters": False,
+            "vectorSearch": "exact",
+        }
+
+    def require_adapter_capabilities(self, required: Optional[dict] = None, **kwargs: Any) -> None:
+        """Reject the graph unless its adapter declares the requested guarantees."""
+        expectations = dict(required or {})
+        expectations.update(kwargs)
+        capabilities = self.capabilities
+        for name, expected in expectations.items():
+            if capabilities.get(name) != expected:
+                raise AdapterCapabilityError(name)
+
+    def set_resource_limits(self, limits: Optional[dict] = None, **kwargs: int) -> None:
+        """Configure positive integer limits for writes and graph queries."""
+        values = dict(limits or {})
+        values.update(kwargs)
+        allowed = {"maxVectorDimensions", "maxNodePayloadBytes", "maxBatchSize", "maxTraversalDepth", "maxNodesVisited", "maxResults"}
+        unknown = set(values) - allowed
+        if unknown:
+            raise PolypackValueError(f"unknown resource limit: {sorted(unknown)[0]}")
+        for name, value in values.items():
+            if value is not None and (not isinstance(value, int) or isinstance(value, bool) or value < 1):
+                raise PolypackValueError(f"{name} must be a positive integer")
+        self._resource_limits = {name: value for name, value in values.items() if value is not None}
+
+    @property
+    def resource_limit_config(self) -> dict:
+        return dict(self._resource_limits)
+
+    def register_node_type(
+        self,
+        node_type: str,
+        validate: Optional[Callable[[Node], Any]] = None,
+        required_fields: Optional[Iterable[str]] = None,
+        data_types: Optional[dict[str, str]] = None,
+    ) -> None:
+        if self._store_read_only:
+            raise PolypackStorageError("store was opened read-only")
+        _validate_id(node_type, "node type")
+        required = tuple(required_fields or ())
+        types = dict(data_types or {})
+        if len(set(required)) != len(required) or any(not isinstance(field, str) or not field for field in required):
+            raise PolypackValueError("required fields must be unique and non-empty")
+        if any(not isinstance(field, str) or not field or expected not in {"string", "number", "integer", "boolean", "object", "array"} for field, expected in types.items()):
+            raise PolypackValueError("invalid node data type definition")
+        previous = self._node_type_definitions.get(node_type)
+        self._node_type_definitions[node_type] = {
+            "validate": validate,
+            "requiredFields": required,
+            "dataTypes": types,
+        }
+        try:
+            for node in self._nodes.values():
+                if node["type"] == node_type:
+                    self._validate_node_schema(node)
+            self._persist_schema_metadata()
+        except Exception:
+            if previous is None:
+                self._node_type_definitions.pop(node_type, None)
+            else:
+                self._node_type_definitions[node_type] = previous
+            raise
+
+    def define_index(
+        self,
+        name: str,
+        fields: Optional[Iterable[str]] = None,
+        node_type: Optional[str] = None,
+        unique: bool = False,
+        sparse: bool = False,
+    ) -> None:
+        """Define a single or compound node-data index.
+
+        The Python engine keeps metadata and maintained candidate buckets,
+        while every indexed result still passes the complete query predicate.
+        """
+        if isinstance(name, dict):
+            definition = name
+            name = definition.get("name", "")
+            fields = definition.get("fields")
+            node_type = definition.get("nodeType")
+            unique = bool(definition.get("unique", False))
+            sparse = bool(definition.get("sparse", False))
+        if self._store_read_only:
+            raise PolypackStorageError("store was opened read-only")
+        field_list = list(fields or ())
+        if not isinstance(name, str) or not name or not field_list or any(not isinstance(field, str) or not field for field in field_list) or len(set(field_list)) != len(field_list):
+            raise PolypackValueError("index name and unique fields must not be empty")
+        previous = self._indexes.get(name)
+        self._indexes[name] = {"name": name, "fields": field_list, "nodeType": node_type, "unique": unique, "sparse": sparse}
+        self._secondary_index_data[name] = {}
+        try:
+            self._validate_all_indexes()
+            self._rebuild_secondary_indexes()
+            self._persist_index_metadata()
+        except Exception:
+            if previous is None:
+                self._indexes.pop(name, None)
+            else:
+                self._indexes[name] = previous
+            self._rebuild_secondary_indexes()
+            raise
+
+    def drop_index(self, name: str) -> bool:
+        if self._store_read_only:
+            raise PolypackStorageError("store was opened read-only")
+        previous = self._indexes.pop(name, None)
+        if previous is None:
+            return False
+        self._secondary_index_data.pop(name, None)
+        try:
+            self._persist_index_metadata()
+        except Exception:
+            self._indexes[name] = previous
+            self._rebuild_secondary_indexes()
+            raise
+        return True
+
+    @property
+    def indexes(self) -> list[dict]:
+        return [dict(definition, fields=list(definition["fields"])) for definition in self._indexes.values()]
+
+    def _index_key(self, node: Node, definition: dict) -> Optional[str]:
+        if definition["nodeType"] and node["type"] != definition["nodeType"]:
+            return None
+        values = [_patch_get(node.get("data") or {}, field) for field in definition["fields"]]
+        if definition["sparse"] and any(value is None for value in values):
+            return None
+        return repr(values)
+
+    def _add_secondary_index_entry(self, node: Node) -> None:
+        for name, definition in self._indexes.items():
+            key = self._index_key(node, definition)
+            if key is not None:
+                self._secondary_index_data.setdefault(name, {}).setdefault(key, set()).add(node["id"])
+
+    def _remove_secondary_index_entry(self, node: Node) -> None:
+        for name, definition in self._indexes.items():
+            key = self._index_key(node, definition)
+            if key is None:
+                continue
+            bucket = self._secondary_index_data.get(name, {}).get(key)
+            if bucket is not None:
+                bucket.discard(node["id"])
+                if not bucket:
+                    self._secondary_index_data[name].pop(key, None)
+
+    def _rebuild_secondary_indexes(self) -> None:
+        self._secondary_index_data = {name: {} for name in self._indexes}
+        for node in self._nodes.values():
+            self._add_secondary_index_entry(node)
+
+    def _validate_all_indexes(self) -> None:
+        for definition in self._indexes.values():
+            if not definition["unique"]:
+                continue
+            seen: dict[str, str] = {}
+            for node in self._nodes.values():
+                key = self._index_key(node, definition)
+                if key is None:
+                    continue
+                previous = seen.get(key)
+                if previous is not None and previous != node["id"]:
+                    raise UniqueConstraintError(f"unique index {definition['name']} conflicts with node {previous}")
+                seen[key] = node["id"]
+
+    def _record_query(self, duration_ms: float, scanned_records: int, index: Optional[str], indexes: Optional[Iterable[str]] = None) -> None:
+        self._query_count += 1
+        self._query_duration_ms += duration_ms
+        self._query_scanned_records += scanned_records
+        selected = list(indexes or (() if index is None else (index,)))
+        for name in selected:
+            self._query_index_usage[name] = self._query_index_usage.get(name, 0) + 1
+
+    def _validate_index_candidate(self, candidate: Node) -> None:
+        for definition in self._indexes.values():
+            if not definition["unique"]:
+                continue
+            key = self._index_key(candidate, definition)
+            if key is None:
+                continue
+            for existing_id in self._secondary_index_data.get(definition["name"], {}).get(key, set()):
+                if existing_id != candidate["id"]:
+                    raise UniqueConstraintError(f"unique index {definition['name']} conflicts with node {existing_id}")
+            for node in self._nodes.values():
+                if node["id"] == candidate["id"]:
+                    continue
+                if self._index_key(node, definition) == key:
+                    raise UniqueConstraintError(f"unique index {definition['name']} conflicts with node {node['id']}")
+
+    def _persist_index_metadata(self) -> None:
+        if self._store_directory is None:
+            return
+        if self._store_read_only:
+            raise PolypackStorageError("store was opened read-only")
+        target = self._store_directory / "indexes.json"
+        temporary = self._store_directory / "indexes.json.tmp"
+        temporary.write_text(json.dumps(self.indexes, sort_keys=True), encoding="utf-8")
+        os.replace(temporary, target)
+
+    def _load_index_metadata(self) -> None:
+        if self._store_directory is None:
+            return
+        source = self._store_directory / "indexes.json"
+        if not source.exists():
+            return
+        try:
+            definitions = json.loads(source.read_text(encoding="utf-8"))
+            self._indexes = {}
+            if not isinstance(definitions, list):
+                raise ValueError("index metadata must be an array")
+            seen_names: set[str] = set()
+            for definition in definitions:
+                if not isinstance(definition, dict):
+                    raise ValueError("index definition must be an object")
+                name = definition.get("name")
+                fields = definition.get("fields")
+                if not isinstance(name, str) or not name or name in seen_names:
+                    raise ValueError("index names must be unique and non-empty")
+                if not isinstance(fields, list) or not fields or any(not isinstance(field, str) or not field for field in fields) or len(set(fields)) != len(fields):
+                    raise ValueError("invalid index definition")
+                seen_names.add(name)
+                self._indexes[name] = {
+                    "name": name,
+                    "fields": fields,
+                    "nodeType": definition.get("nodeType"),
+                    "unique": bool(definition.get("unique", False)),
+                    "sparse": bool(definition.get("sparse", False)),
+                }
+            self._validate_all_indexes()
+            self._rebuild_secondary_indexes()
+        except (OSError, ValueError, TypeError, PolypackError) as exc:
+            raise PolypackStorageError(f"invalid index metadata: {exc}") from exc
+
+    def _persist_schema_metadata(self) -> None:
+        if self._store_directory is None:
+            return
+        if self._store_read_only:
+            raise PolypackStorageError("store was opened read-only")
+        metadata = {
+            "nodeTypes": [
+                {"nodeType": name, "requiredFields": list(definition["requiredFields"]), "dataTypes": dict(definition["dataTypes"])}
+                for name, definition in self._node_type_definitions.items()
+            ],
+            "edgeTypes": [
+                {
+                    "edgeType": name,
+                    "sourceTypes": sorted(definition["sourceTypes"]),
+                    "targetTypes": sorted(definition["targetTypes"]),
+                    "cardinality": definition["cardinality"],
+                    "requiredFields": list(definition["requiredFields"]),
+                    "dataTypes": dict(definition["dataTypes"]),
+                }
+                for name, definition in self._edge_type_definitions.items()
+            ],
+        }
+        target = self._store_directory / "schemas.json"
+        temporary = self._store_directory / "schemas.json.tmp"
+        temporary.write_text(json.dumps(metadata, sort_keys=True), encoding="utf-8")
+        os.replace(temporary, target)
+
+    def _load_schema_metadata(self) -> None:
+        if self._store_directory is None:
+            return
+        source = self._store_directory / "schemas.json"
+        if not source.exists():
+            return
+        try:
+            metadata = json.loads(source.read_text(encoding="utf-8"))
+            if not isinstance(metadata, dict) or not isinstance(metadata.get("nodeTypes"), list) or not isinstance(metadata.get("edgeTypes"), list):
+                raise ValueError("schema metadata must contain nodeTypes and edgeTypes arrays")
+            valid_types = {"string", "number", "integer", "boolean", "object", "array"}
+            nodes: dict[str, dict] = {}
+            edges: dict[str, dict] = {}
+            for definition in metadata["nodeTypes"]:
+                if not isinstance(definition, dict):
+                    raise ValueError("node type definition must be an object")
+                name = definition.get("nodeType")
+                required = definition.get("requiredFields", [])
+                types = definition.get("dataTypes", {})
+                if not isinstance(name, str) or not name or name in nodes or not isinstance(required, list) or len(set(required)) != len(required) or any(not isinstance(field, str) or not field for field in required) or not isinstance(types, dict) or any(not isinstance(field, str) or not field or expected not in valid_types for field, expected in types.items()):
+                    raise ValueError("invalid node type definition")
+                nodes[name] = {"validate": None, "requiredFields": tuple(required), "dataTypes": dict(types)}
+            for definition in metadata["edgeTypes"]:
+                if not isinstance(definition, dict):
+                    raise ValueError("edge type definition must be an object")
+                name = definition.get("edgeType")
+                required = definition.get("requiredFields", [])
+                types = definition.get("dataTypes", {})
+                cardinality = definition.get("cardinality")
+                if not isinstance(name, str) or not name or name in edges or not isinstance(required, list) or len(set(required)) != len(required) or any(not isinstance(field, str) or not field for field in required) or not isinstance(types, dict) or any(not isinstance(field, str) or not field or expected not in valid_types for field, expected in types.items()) or cardinality not in (None, "one-to-one", "one-to-many", "many-to-one", "many-to-many"):
+                    raise ValueError("invalid edge type definition")
+                source_types = definition.get("sourceTypes", [])
+                target_types = definition.get("targetTypes", [])
+                if not isinstance(source_types, list) or not isinstance(target_types, list) or any(not isinstance(value, str) or not value for value in source_types + target_types):
+                    raise ValueError("invalid edge type definition")
+                edges[name] = {"sourceTypes": frozenset(source_types), "targetTypes": frozenset(target_types), "validate": None, "cardinality": cardinality, "requiredFields": tuple(required), "dataTypes": dict(types)}
+            self._node_type_definitions = nodes
+            self._edge_type_definitions = edges
+        except (OSError, ValueError, TypeError) as exc:
+            raise PolypackStorageError(f"invalid schema metadata: {exc}") from exc
+
+    def register_edge_type(
+        self,
+        edge_type: str,
+        source_types: Optional[Iterable[str]] = None,
+        target_types: Optional[Iterable[str]] = None,
+        validate: Optional[Callable[[dict], Any]] = None,
+        cardinality: Optional[str] = None,
+        required_fields: Optional[Iterable[str]] = None,
+        data_types: Optional[dict[str, str]] = None,
+    ) -> None:
+        if self._store_read_only:
+            raise PolypackStorageError("store was opened read-only")
+        _validate_id(edge_type, "edge type")
+        if cardinality not in (None, "one-to-one", "one-to-many", "many-to-one", "many-to-many"):
+            raise PolypackValueError("invalid edge cardinality")
+        required = tuple(required_fields or ())
+        types = dict(data_types or {})
+        if len(set(required)) != len(required) or any(not isinstance(field, str) or not field for field in required):
+            raise PolypackValueError("required fields must be unique and non-empty")
+        if any(not isinstance(field, str) or not field or expected not in {"string", "number", "integer", "boolean", "object", "array"} for field, expected in types.items()):
+            raise PolypackValueError("invalid edge data type definition")
+        previous = self._edge_type_definitions.get(edge_type)
+        self._edge_type_definitions[edge_type] = {
+            "sourceTypes": frozenset(source_types or ()),
+            "targetTypes": frozenset(target_types or ()),
+            "validate": validate,
+            "cardinality": cardinality,
+            "requiredFields": required,
+            "dataTypes": types,
+        }
+        try:
+            for edges in self._edges.values():
+                for edge in edges.values():
+                    if edge["type"] == edge_type:
+                        self._validate_edge_schema(edge)
+            self._persist_schema_metadata()
+        except Exception:
+            if previous is None:
+                self._edge_type_definitions.pop(edge_type, None)
+            else:
+                self._edge_type_definitions[edge_type] = previous
+            raise
+
+    def _validate_node_schema(self, node: Node) -> None:
+        definition = self._node_type_definitions.get(node["type"])
+        if not definition:
+            return
+        for field_name in definition["requiredFields"]:
+            if _patch_get(node.get("data") or {}, field_name) is None:
+                raise PolypackValueError(f"node {node['id']} is missing required field {field_name}")
+        for field_name, expected in definition["dataTypes"].items():
+            value = _patch_get(node.get("data") or {}, field_name)
+            if value is None:
+                continue
+            valid = {
+                "string": isinstance(value, str),
+                "number": isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(float(value)),
+                "integer": isinstance(value, int) and not isinstance(value, bool),
+                "boolean": isinstance(value, bool),
+                "array": isinstance(value, list),
+                "object": isinstance(value, dict),
+            }.get(expected)
+            if valid is not True:
+                raise PolypackValueError(f"node {node['id']} field {field_name} must be {expected}")
+        validator = definition["validate"]
+        if validator is not None and validator(_copy_node(node)) is False:
+            raise PolypackValueError(f"node validator rejected {node['id']}")
+
+    def _validate_node_resource_limits(self, node: Node) -> None:
+        max_dimensions = self._resource_limits.get("maxVectorDimensions")
+        vector = node.get("vector")
+        if max_dimensions is not None and vector is not None and len(vector) > max_dimensions:
+            raise ResourceLimitError("maxVectorDimensions", max_dimensions)
+        max_payload = self._resource_limits.get("maxNodePayloadBytes")
+        if max_payload is not None:
+            payload = json.dumps(node.get("data") or {}, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+            if len(payload) > max_payload:
+                raise ResourceLimitError("maxNodePayloadBytes", max_payload)
+
+    def _validate_edge_schema(self, edge: dict) -> None:
+        definition = self._edge_type_definitions.get(edge["type"])
+        if not definition:
+            return
+        source = self._nodes.get(edge["source"])
+        target = self._nodes.get(edge["target"])
+        if source is None or target is None:
+            raise PolypackValueError(f"edge {edge['id']} references a missing endpoint")
+        if definition["sourceTypes"] and (source is None or source["type"] not in definition["sourceTypes"]):
+            raise PolypackValueError(f"edge source type is not permitted for {edge['type']}")
+        if definition["targetTypes"] and (target is None or target["type"] not in definition["targetTypes"]):
+            raise PolypackValueError(f"edge target type is not permitted for {edge['type']}")
+        for field_name in definition["requiredFields"]:
+            if _patch_get(edge.get("data") or {}, field_name) is None:
+                raise PolypackValueError(f"edge {edge['id']} is missing required field {field_name}")
+        for field_name, expected in definition["dataTypes"].items():
+            value = _patch_get(edge.get("data") or {}, field_name)
+            if value is None:
+                continue
+            valid = {
+                "string": isinstance(value, str),
+                "number": isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(float(value)),
+                "integer": isinstance(value, int) and not isinstance(value, bool),
+                "boolean": isinstance(value, bool),
+                "array": isinstance(value, list),
+                "object": isinstance(value, dict),
+            }.get(expected)
+            if valid is not True:
+                raise PolypackValueError(f"edge {edge['id']} field {field_name} must be {expected}")
+        cardinality = definition["cardinality"]
+        if cardinality and cardinality != "many-to-many":
+            outgoing = 0
+            incoming = 0
+            for edges in self._edges.values():
+                for candidate in edges.values():
+                    if candidate["id"] == edge["id"] or candidate["type"] != edge["type"]:
+                        continue
+                    outgoing += candidate["source"] == edge["source"]
+                    incoming += candidate["target"] == edge["target"]
+            violates = (
+                cardinality == "one-to-one" and (outgoing > 0 or incoming > 0)
+            ) or (
+                cardinality == "one-to-many" and incoming > 0
+            ) or (
+                cardinality == "many-to-one" and outgoing > 0
+            )
+            if violates:
+                raise PolypackValueError(f"edge cardinality {cardinality} would be exceeded")
+        validator = definition["validate"]
+        if validator is not None and validator(dict(edge, data=dict(edge.get("data") or {}))) is False:
+            raise PolypackValueError(f"edge validator rejected {edge['id']}")
 
     # ── context manager ──
+
+    def transaction(
+        self,
+        callback: Optional[Callable[["GraphTransaction"], Any]] = None,
+        actor: Optional[str] = None,
+        base_revision: Optional[int] = None,
+        metadata: Optional[dict] = None,
+        operation_id: Optional[str] = None,
+    ) -> "GraphTransaction":
+        """Create a checkpointed transaction, or execute a callback in one."""
+        tx = GraphTransaction(self, actor=actor, base_revision=base_revision, metadata=metadata, operation_id=operation_id)
+        if callback is not None:
+            with tx:
+                return callback(tx)
+        return tx
 
     def __enter__(self) -> "PolyGraph":
         return self
@@ -471,45 +1355,234 @@ class PolyGraph:
             "data": dict(node.get("data") or {}),
             "insertedAt": node["insertedAt"],
             "updatedAt": node["updatedAt"],
+            "revision": int(node.get("revision", 0)),
         }
+        previous = self._nodes.get(stored["id"])
+        if previous is not None:
+            stored["revision"] = int(previous.get("revision", 0)) + 1
         if node.get("activation") is not None:
             stored["activation"] = _validate_activation(node["activation"])
         if node.get("vector") is not None:
             stored["vector"] = _validate_vector(node["vector"])
         else:
             stored["vector"] = None
+        self._validate_node_resource_limits(stored)
+        self._validate_node_schema(stored)
+        self._validate_index_candidate(stored)
+        if previous is not None:
+            self._remove_secondary_index_entry(previous)
+        if stored["vector"] is None:
             self.vectors.remove(stored["id"])
         self._nodes[stored["id"]] = stored
+        self._dirty_node_ids.add(stored["id"])
+        self._dirty = True
         self._removed_node_ids.discard(stored["id"])
         if stored["vector"] is not None:
             self.vectors.add(stored["id"], stored["vector"])
+            self._dirty_vector_ids.add(stored["id"])
             self._removed_vector_ids.discard(stored["id"])
         else:
             self._removed_vector_ids.add(stored["id"])
+        self._add_secondary_index_entry(stored)
 
-    def update_node(self, id_: str, data: dict, vector: Any = None, activation: Optional[dict] = None) -> Optional[Node]:
+    def update_node(
+        self,
+        id_: str,
+        data: dict,
+        vector: Any = None,
+        activation: Optional[dict] = None,
+        expected_revision: Optional[int] = None,
+    ) -> Optional[Node]:
         """Shallow-merge `data` into a loaded node and optionally replace its vector or durable activation. Returns `None` if the node isn't loaded."""
         node = self._nodes.get(id_)
         if node is None:
             return None
-        node["data"].update(data or {})
+        if expected_revision is not None and int(node.get("revision", 0)) != expected_revision:
+            raise ConflictError(
+                f"record {id_} has revision {node.get('revision', 0)}, expected {expected_revision}"
+            )
+        candidate = _copy_node(node)
+        candidate["data"].update(data or {})
         if vector is not None:
-            node["vector"] = _validate_vector(vector)
-            self.vectors.add(id_, node["vector"])
-            self._removed_vector_ids.discard(id_)
+            candidate["vector"] = _validate_vector(vector)
         if activation is not None:
-            node["activation"] = _validate_activation(activation)
-        node["updatedAt"] = int(time.time() * 1000)
+            candidate["activation"] = _validate_activation(activation)
+        candidate["updatedAt"] = int(time.time() * 1000)
+        candidate["revision"] = int(node.get("revision", 0)) + 1
+        self._validate_node_resource_limits(candidate)
+        self._validate_node_schema(candidate)
+        self._validate_index_candidate(candidate)
+        self._remove_secondary_index_entry(node)
+        node.clear()
+        node.update(candidate)
+        self._add_secondary_index_entry(node)
+        self._dirty_node_ids.add(id_)
+        self._dirty = True
+        if vector is not None:
+            self.vectors.add(id_, node["vector"])
+            self._dirty_vector_ids.add(id_)
+            self._removed_vector_ids.discard(id_)
+        self._dirty = True
         return _copy_node(node)
 
     def get_node(self, id_: str) -> Optional[Node]:
         node = self._nodes.get(id_)
         return None if node is None else _copy_node(node)
 
+    def stats(self) -> dict:
+        """Return operational graph counters without a monitoring dependency."""
+        if self._store is None:
+            persisted_node_count = len(self._nodes)
+            edge_count = sum(len(edges) for edges in self._edges.values())
+            vector_count = self.vectors.size
+        else:
+            persisted_node_count = self._store.node_count()
+            edge_count = len(self._store.all_edges())
+            vector_count = len(self._store.all_vectors())
+        memory_estimate = len(repr(self._nodes).encode("utf-8")) + len(repr(self._edges).encode("utf-8"))
+        return {
+            "loadedNodeCount": len(self._nodes),
+            "persistedNodeCount": persisted_node_count,
+            "edgeCount": edge_count,
+            "vectorCount": vector_count,
+            "dirtyRecordCount": len(self._dirty_node_ids) + len(self._dirty_edge_ids) + len(self._dirty_vector_ids) + len(self._removed_node_ids) + len(self._removed_edge_ids) + len(self._removed_vector_ids),
+            "pendingPersistence": bool(self._dirty or self._dirty_node_ids or self._dirty_edge_ids or self._dirty_vector_ids or self._removed_node_ids or self._removed_edge_ids or self._removed_vector_ids),
+            "indexCount": len(self._indexes),
+            "memoryEstimateBytes": memory_estimate,
+            "queryCount": self._query_count,
+            "queryDurationMs": self._query_duration_ms,
+            "queryScannedRecords": self._query_scanned_records,
+            "queryIndexUsage": dict(self._query_index_usage),
+        }
+
+    def verify(self) -> dict:
+        """Verify persisted storage or the currently loaded in-memory graph."""
+        if self._store is not None:
+            report = dict(self._store.verify())
+            errors = list(report.get("errors", []))
+            try:
+                self._validate_all_indexes()
+            except UniqueConstraintError as exc:
+                errors.append(str(exc))
+            report["errors"] = errors
+            report["ok"] = not errors
+            return report
+
+        errors = []
+        node_ids = set(self._nodes)
+        edge_count = 0
+        for source, edges in self._edges.items():
+            for edge in edges.values():
+                edge_count += 1
+                if source not in node_ids:
+                    errors.append(f"edge {edge.get('id')} has missing source {source}")
+                if edge.get("target") not in node_ids:
+                    errors.append(f"edge {edge.get('id')} has missing target {edge.get('target')}")
+        for node_id, vector in self.vectors.entries():
+            if node_id not in node_ids:
+                errors.append(f"vector {node_id} has no node")
+            if any(not math.isfinite(float(value)) for value in vector):
+                errors.append(f"vector {node_id} contains a non-finite value")
+        try:
+            self._validate_all_indexes()
+        except UniqueConstraintError as exc:
+            errors.append(str(exc))
+        return {
+            "ok": not errors,
+            "errors": errors,
+            "nodeCount": len(node_ids),
+            "edgeCount": edge_count,
+            "vectorCount": self.vectors.size,
+            "mutationCount": 0,
+        }
+
+    def mutation_log(self) -> list[dict]:
+        """Return durable logical mutations from the attached store."""
+        if self._store is None:
+            return []
+        return list(self._store.mutation_log())
+
+    def mutation_log_since(self, sequence: int = 0) -> list[dict]:
+        """Return durable logical mutations after a sequence cursor."""
+        if self._store is None:
+            return []
+        return list(self._store.mutation_log_since(sequence))
+
+    def mutation_log_page(self, sequence: int = 0, limit: int = 1000) -> list[dict]:
+        """Return a bounded mutation-log page after a sequence cursor."""
+        if self._store is None:
+            return []
+        if not isinstance(limit, int) or limit < 0:
+            raise PolypackValueError("mutation log limit must be a non-negative integer")
+        return list(self._store.mutation_log_page(sequence, limit))
+
+    def latest_mutation_sequence(self) -> int:
+        """Return the latest acknowledged durable mutation cursor."""
+        if self._store is None:
+            return 0
+        return int(self._store.latest_mutation_sequence())
+
+    def patch_node(
+        self,
+        id_: str,
+        set: Optional[dict] = None,
+        unset: Optional[Iterable[str]] = None,
+        increment: Optional[dict] = None,
+        expected_revision: Optional[int] = None,
+        compare_and_set: Optional[dict] = None,
+    ) -> Optional[Node]:
+        """Apply dotted-path patch operations atomically to a node."""
+        node = self._nodes.get(id_)
+        if node is None:
+            return None
+        actual = int(node.get("revision", 0))
+        if expected_revision is not None and actual != expected_revision:
+            raise ConflictError(f"record {id_} has revision {actual}, expected {expected_revision}")
+
+        candidate = copy.deepcopy(node.get("data") or {})
+        for path, operation in (compare_and_set or {}).items():
+            if not isinstance(operation, dict) or "expected" not in operation or "value" not in operation:
+                raise PolypackValueError("compare_and_set entries require expected and value")
+            present = _patch_has(candidate, path)
+            current = _patch_get(candidate, path)
+            if (not present and operation["expected"] is not None) or (present and current != operation["expected"]):
+                raise ConflictError(f"compare-and-set failed for record {id_} at {path}")
+            _patch_set(candidate, path, operation["value"])
+        for path, value in (set or {}).items():
+            _patch_set(candidate, path, value)
+        for path in unset or ():
+            _patch_unset(candidate, path)
+        for path, delta in (increment or {}).items():
+            if not isinstance(delta, (int, float)) or not math.isfinite(float(delta)):
+                raise PolypackValueError("increment values must be finite numbers")
+            current = _patch_get(candidate, path)
+            if current is None:
+                current = 0
+            if not isinstance(current, (int, float)) or isinstance(current, bool) or not math.isfinite(float(current)):
+                raise PolypackValueError("increment targets must be numeric")
+            _patch_set(candidate, path, float(current) + float(delta))
+
+        candidate_node = _copy_node(node)
+        candidate_node["data"] = candidate
+        candidate_node["updatedAt"] = int(time.time() * 1000)
+        candidate_node["revision"] = actual + 1
+        self._validate_node_resource_limits(candidate_node)
+        self._validate_node_schema(candidate_node)
+        node.clear()
+        node.update(candidate_node)
+        self._dirty_node_ids.add(id_)
+        self._dirty = True
+        return _copy_node(node)
+
     def get_nodes(self, ids: Iterable[str]) -> list:
         return [self.get_node(i) for i in ids if self.get_node(i) is not None]
 
-    def remove_node(self, id_: str, _visited: Optional[set] = None) -> None:
+    def remove_node(
+        self,
+        id_: str,
+        _visited: Optional[set] = None,
+        expected_revision: Optional[int] = None,
+    ) -> None:
         """Remove `id_` and cascade through 'owned' edges. A target of an 'owned' edge is also
         removed unless another 'owned' source keeps it alive. Cyclic owned edges are detected
         so each node is only removed once; `_visited` is an internal recursion argument."""
@@ -520,14 +1593,22 @@ class PolyGraph:
         node = self._nodes.get(id_)
         if node is None:
             return
+        if expected_revision is not None and int(node.get("revision", 0)) != expected_revision:
+            raise ConflictError(
+                f"record {id_} has revision {node.get('revision', 0)}, expected {expected_revision}"
+            )
         for edge in list(self._edges.get(id_, {}).values()):
             if self._ownership(edge) == "owned" and not self._has_other_owned_source(edge["target"], id_):
                 self.remove_node(edge["target"], visited)
         self._cleanup_edges(id_)
+        self._remove_secondary_index_entry(node)
         del self._nodes[id_]
+        self._dirty_node_ids.discard(id_)
         self.vectors.remove(id_)
+        self._dirty_vector_ids.discard(id_)
         self._removed_node_ids.add(id_)
         self._removed_vector_ids.add(id_)
+        self._dirty = True
 
     # ── edge CRUD ──
 
@@ -539,27 +1620,36 @@ class PolyGraph:
         data: Optional[dict] = None,
         ownership: Optional[Ownership] = None,
         created_at: Optional[int] = None,
+        revision: int = 0,
+        id: Optional[str] = None,
     ) -> None:
         """Add one directed edge. A no-op if an edge with the same source/type/target already exists."""
         _validate_id(source, "edge source")
         _validate_id(edge_type, "edge type")
         _validate_id(target, "edge target")
-        key = _edge_key(source, edge_type, target)
+        key = id or _edge_key(source, edge_type, target)
+        _validate_id(key, "edge id")
         if key in self._edges.get(source, {}):
             return
         full = dict(data or {})
         if ownership is not None:
             full[_OWNERSHIP_KEY] = ownership
-        self._edges.setdefault(source, {})[key] = {
+        candidate = {
+            "id": key,
             "source": source,
             "type": edge_type,
             "target": target,
             "data": full,
             "createdAt": created_at if created_at is not None else 0,
+            "revision": int(revision),
         }
+        self._validate_edge_schema(candidate)
+        self._edges.setdefault(source, {})[key] = candidate
+        self._dirty_edge_ids.add(key)
         incoming = self._incoming.setdefault(target, {})
         incoming[source] = incoming.get(source, 0) + 1
         self._removed_edge_ids.discard(key)
+        self._dirty = True
 
     def get_edges(self, source: str, edge_type: Optional[str] = None) -> list:
         edges = self._edges.get(source, {})
@@ -568,6 +1658,56 @@ class PolyGraph:
             if edge_type is None or e["type"] == edge_type:
                 out.append(dict(e, data=dict(e.get("data") or {})))
         return out
+
+    def update_edge(
+        self,
+        id_: str,
+        data: Optional[dict] = None,
+        ownership: Optional[Ownership] = None,
+        expected_revision: Optional[int] = None,
+    ) -> Optional[dict]:
+        """Update an edge conditionally by its independent ID."""
+        for edges in self._edges.values():
+            edge = edges.get(id_)
+            if edge is None:
+                continue
+            actual = int(edge.get("revision", 0))
+            if expected_revision is not None and actual != expected_revision:
+                raise ConflictError(f"record {id_} has revision {actual}, expected {expected_revision}")
+            candidate = dict(edge, data=dict(edge.get("data") or {}), revision=actual + 1)
+            if data is not None:
+                candidate["data"] = dict(data)
+            if ownership is not None:
+                candidate.setdefault("data", {})[_OWNERSHIP_KEY] = ownership
+            self._validate_edge_schema(candidate)
+            edge.clear()
+            edge.update(candidate)
+            self._dirty_edge_ids.add(id_)
+            self._dirty = True
+            return dict(edge, data=dict(edge.get("data") or {}))
+        return None
+
+    def remove_edge(self, id_: str, expected_revision: Optional[int] = None) -> bool:
+        """Remove exactly one edge by independent ID, conditionally by revision."""
+        for source, edges in list(self._edges.items()):
+            edge = edges.get(id_)
+            if edge is None:
+                continue
+            actual = int(edge.get("revision", 0))
+            if expected_revision is not None and actual != expected_revision:
+                raise ConflictError(f"record {id_} has revision {actual}, expected {expected_revision}")
+            if self._ownership(edge) == "owned" and not self._has_other_owned_source(edge["target"], source):
+                self.remove_node(edge["target"])
+                return True
+            del edges[id_]
+            if not edges:
+                self._edges.pop(source, None)
+            self._decrement_incoming(edge["target"], source)
+            self._dirty_edge_ids.discard(id_)
+            self._removed_edge_ids.add(id_)
+            self._dirty = True
+            return True
+        return False
 
     def get_edge_targets(self, source: str, edge_type: str) -> list:
         return [e["target"] for e in self.get_edges(source, edge_type)]
@@ -602,7 +1742,9 @@ class PolyGraph:
             removed = self._edges.get(source, {}).pop(key, None)
             if removed is not None:
                 self._decrement_incoming(e["target"], source)
+                self._dirty_edge_ids.discard(key)
                 self._removed_edge_ids.add(key)
+                self._dirty = True
             if self._ownership(e) == "shared" and not self._has_incoming(e["target"], source):
                 if self._on_orphan:
                     self._on_orphan(e["target"])
@@ -611,9 +1753,29 @@ class PolyGraph:
 
     # ── queries ──
 
+    def snapshot(self) -> "GraphSnapshot":
+        """Capture a detached, queryable view of the currently loaded graph."""
+        return GraphSnapshot(self)
+
     def query(self) -> "GraphQuery":
         """Create a mutable `GraphQuery` over the currently loaded nodes."""
         return GraphQuery(self)
+
+    def query_persisted(self) -> "PersistedGraphQuery":
+        """Create a storage-level query over persisted nodes.
+
+        Results are filtered, ordered, and paginated inside the native store;
+        only the final result page crosses the Python boundary. Pending graph
+        mutations are saved before the query so persisted visibility matches
+        the rest of the binding's durable API.
+        """
+        if self._store is None:
+            raise PolypackStorageError("no store open; call open_store(path) first")
+        if self._dirty:
+            if self._store_read_only:
+                raise PolypackStorageError("store was opened read-only and has pending changes")
+            self.save()
+        return PersistedGraphQuery(self)
 
     def clear(self) -> None:
         """Clear in-memory state only — does not flush pending deletions or touch the attached store."""
@@ -624,20 +1786,97 @@ class PolyGraph:
         self._removed_node_ids.clear()
         self._removed_edge_ids.clear()
         self._removed_vector_ids.clear()
+        self._dirty_node_ids.clear()
+        self._dirty_edge_ids.clear()
+        self._dirty_vector_ids.clear()
+        self._dirty = False
+        if self._store is None:
+            self._secondary_index_data = {name: {} for name in self._indexes}
 
     # ── persistence (Rust storage state machine) ──
 
     @classmethod
-    def open(cls, directory: str) -> "PolyGraph":
+    def open(cls, directory: str, read_only: bool = False, compact_threshold: int = 10_000) -> "PolyGraph":
         """Open a directory-backed binary store and load its graph."""
         graph = cls()
-        graph.open_store(directory)
+        graph.open_store(directory, read_only=read_only, compact_threshold=compact_threshold)
         return graph
 
-    def open_store(self, directory: str) -> None:
+    @classmethod
+    def restore(cls, source: str, destination: str) -> "PolyGraph":
+        """Restore a directory backup into ``destination`` and open it."""
+        source_path = Path(source)
+        destination_path = Path(destination)
+        if not source_path.is_dir():
+            raise PolypackStorageError(f"backup source does not exist: {source}")
+        destination_path.mkdir(parents=True, exist_ok=True)
+        for name in ("snapshot.msgpack", "wal.msgpack", "mutations.jsonl", "indexes.json", "schemas.json"):
+            source_file = source_path / name
+            if source_file.exists():
+                shutil.copy2(source_file, destination_path / name)
+        return cls.open(str(destination_path))
+
+    def open_store(self, directory: str, read_only: bool = False, compact_threshold: int = 10_000) -> None:
         """Attach a directory-backed store and load any existing state."""
-        self._store = _NativeStore(DirectoryStorage(directory))
+        if not isinstance(compact_threshold, int) or compact_threshold < 1:
+            raise PolypackValueError("compact_threshold must be a positive integer")
+        had_pending_state = bool(
+            self._dirty
+            or self._nodes
+            or self._edges
+            or list(self.vectors.entries())
+            or self._removed_node_ids
+            or self._removed_edge_ids
+            or self._removed_vector_ids
+        )
+        pending_dirty_nodes = set(self._dirty_node_ids)
+        pending_dirty_edges = set(self._dirty_edge_ids)
+        pending_dirty_vectors = set(self._dirty_vector_ids)
+        self._dirty_node_ids.clear()
+        self._dirty_edge_ids.clear()
+        self._dirty_vector_ids.clear()
+        self._store = _NativeStore(DirectoryStorage(directory, read_only=read_only), compact_threshold)
+        self._store_directory = Path(directory)
+        self._store_read_only = read_only
+        self._dirty = False
+        self._load_index_metadata()
+        self._load_schema_metadata()
         self._load_from_store()
+        self._dirty_node_ids = pending_dirty_nodes if had_pending_state else set()
+        self._dirty_edge_ids = pending_dirty_edges if had_pending_state else set()
+        self._dirty_vector_ids = pending_dirty_vectors if had_pending_state else set()
+        self._dirty = had_pending_state
+        try:
+            self._validate_all_indexes()
+        except Exception:
+            self._store.close()
+            self._store = None
+            self._store_directory = None
+            self._store_read_only = False
+            raise
+
+    def checkpoint(self) -> None:
+        """Persist pending mutations and compact the WAL into a snapshot."""
+        if self._store is None:
+            raise PolypackStorageError("no store open; call open_store(path) first")
+        if self._store_read_only:
+            raise PolypackStorageError("store was opened read-only")
+        self.save()
+        self._store.compact()
+
+    def backup(self, destination: str) -> None:
+        """Create a consistent directory backup after checkpointing the store."""
+        if self._store is None or self._store_directory is None:
+            raise PolypackStorageError("no store open; call open_store(path) first")
+        if self._store_read_only:
+            raise PolypackStorageError("store was opened read-only")
+        self.checkpoint()
+        destination_path = Path(destination)
+        destination_path.mkdir(parents=True, exist_ok=True)
+        for name in ("snapshot.msgpack", "wal.msgpack", "mutations.jsonl", "indexes.json", "schemas.json"):
+            source_file = self._store_directory / name
+            if source_file.exists():
+                shutil.copy2(source_file, destination_path / name)
 
     def close_store(self) -> None:
         """Persist any unsaved changes, then compact and close the attached
@@ -646,9 +1885,12 @@ class PolyGraph:
         mutations made since the last explicit `save()` — including inside
         a `with PolyGraph.open(...) as g:` block — would be silently lost."""
         if self._store is not None:
-            self.save()
+            if not self._store_read_only and self._dirty:
+                self.save()
             self._store.close()
             self._store = None
+            self._store_directory = None
+            self._store_read_only = False
 
     def save(self) -> None:
         """Persist the full current graph state through the attached store.
@@ -659,23 +1901,36 @@ class PolyGraph:
         """
         if self._store is None:
             raise PolypackStorageError("no store open; call open_store(path) first")
-        nodes = []
-        for node in self._nodes.values():
-            nodes.append(_copy_node(node))
+        if not self._dirty:
+            return
+        nodes = [_copy_node(self._nodes[id_]) for id_ in self._dirty_node_ids if id_ in self._nodes]
+        edge_by_id = {
+            key: edge
+            for edge_map in self._edges.values()
+            for key, edge in edge_map.items()
+        }
         edges = []
-        for edge_map in self._edges.values():
-            for e in edge_map.values():
-                edges.append(
-                    {
-                        "id": _edge_key(e["source"], e["type"], e["target"]),
-                        "source": e["source"],
-                        "target": e["target"],
-                        "type": e["type"],
-                        "data": dict(e.get("data") or {}),
-                        "createdAt": e.get("createdAt", 0),
-                    }
-                )
-        vectors = [{"id": id_, "vector": vector} for id_, vector in self.vectors.entries()]
+        for id_ in self._dirty_edge_ids:
+            e = edge_by_id.get(id_)
+            if e is not None:
+                edges.append({
+                    "id": e["id"] if "id" in e else _edge_key(e["source"], e["type"], e["target"]),
+                    "source": e["source"],
+                    "target": e["target"],
+                    "type": e["type"],
+                    "data": dict(e.get("data") or {}),
+                    "createdAt": e.get("createdAt", 0),
+                    "revision": int(e.get("revision", 0)),
+                })
+        vector_by_id = dict(self.vectors.entries())
+        # `graph.vectors` is public and recovery/conformance callers may add
+        # vectors directly. If a node load tentatively marked a vector for
+        # deletion but the current index contains it, the current index wins.
+        for id_ in tuple(self._removed_vector_ids):
+            if id_ in vector_by_id:
+                self._dirty_vector_ids.add(id_)
+                self._removed_vector_ids.discard(id_)
+        vectors = [{"id": id_, "vector": vector_by_id[id_]} for id_ in self._dirty_vector_ids if id_ in vector_by_id]
         self._store.apply(
             put_nodes=nodes,
             delete_node_ids=list(self._removed_node_ids),
@@ -683,10 +1938,19 @@ class PolyGraph:
             delete_edge_ids=list(self._removed_edge_ids),
             put_vectors=vectors,
             delete_vector_ids=list(self._removed_vector_ids),
+            transaction_id=self._active_transaction.id if self._active_transaction is not None else None,
+            operation_id=self._active_transaction.operation_id if self._active_transaction is not None else None,
+            actor=self._active_transaction.actor if self._active_transaction is not None else None,
+            base_revision=self._active_transaction.base_revision if self._active_transaction is not None else None,
+            metadata=self._active_transaction.metadata if self._active_transaction is not None else None,
         )
         self._removed_node_ids.clear()
         self._removed_edge_ids.clear()
         self._removed_vector_ids.clear()
+        self._dirty_node_ids.clear()
+        self._dirty_edge_ids.clear()
+        self._dirty_vector_ids.clear()
+        self._dirty = False
 
     def _load_from_store(self) -> None:
         if self._store is None:
@@ -703,6 +1967,8 @@ class PolyGraph:
                 edge["target"],
                 data,
                 created_at=edge.get("createdAt"),
+                revision=edge.get("revision", 0),
+                id=edge.get("id"),
             )
         for id_, vector in self._store.all_vectors():
             if id_ not in self._nodes:
@@ -728,6 +1994,8 @@ class PolyGraph:
         now = int(time.time() * 1000)
         node["activation"] = _reinforce_activation(node.get("activation"), float(amount), now)
         node["updatedAt"] = now
+        self._dirty_node_ids.add(id_)
+        self._dirty = True
         return _copy_node(node)
 
     def reinforce_node_safe(self, id_: str, amount: float, reason: Optional[str] = None) -> Optional[Node]:
@@ -778,6 +2046,8 @@ class PolyGraph:
                 "lastMeaningfulActivation": now,
             }
             node["updatedAt"] = now
+            self._dirty_node_ids.add(node["id"])
+            self._dirty = True
 
     # ── ownership internals ──
 
@@ -817,6 +2087,7 @@ class PolyGraph:
             edges = self._edges.get(src, {})
             for key in [k for k, e in edges.items() if e["target"] == id_]:
                 del edges[key]
+                self._dirty_edge_ids.discard(key)
                 self._removed_edge_ids.add(key)
             if not edges:
                 self._edges.pop(src, None)
@@ -827,10 +2098,142 @@ class PolyGraph:
         if outgoing:
             for key, e in outgoing.items():
                 self._decrement_incoming(e["target"], id_)
+                self._dirty_edge_ids.discard(key)
                 self._removed_edge_ids.add(key)
 
 
 # ── Query builder ──
+
+
+class PersistedGraphQuery:
+    """Fluent query executed directly by the native persisted store.
+
+    This deliberately covers the storage-level query contract. Similarity,
+    joins, and traversal remain hot-graph operations until their corresponding
+    store indexes can execute without materialising records in Python.
+    """
+
+    def __init__(self, graph: PolyGraph) -> None:
+        self._graph = graph
+        self._node_types: Optional[list[str]] = None
+        self._attributes: dict[str, Any] = {}
+        self._ranges: dict[str, dict[str, float]] = {}
+        self._order: Optional[dict[str, str]] = None
+        self._offset: Optional[int] = None
+        self._limit: Optional[int] = None
+
+    def where_type(self, *types: str) -> "PersistedGraphQuery":
+        self._node_types = list(types)
+        return self
+
+    def where(self, field: str, value: Any) -> "PersistedGraphQuery":
+        self._attributes[field] = value
+        return self
+
+    def where_range(self, field: str, above: Optional[float] = None, below: Optional[float] = None) -> "PersistedGraphQuery":
+        if above is not None and not math.isfinite(float(above)):
+            raise PolypackValueError("range above must be finite")
+        if below is not None and not math.isfinite(float(below)):
+            raise PolypackValueError("range below must be finite")
+        entry: dict[str, float] = {}
+        if above is not None:
+            entry["above"] = float(above)
+        if below is not None:
+            entry["below"] = float(below)
+        self._ranges[field] = entry
+        return self
+
+    def order_by(self, field: str, direction: str = "asc") -> "PersistedGraphQuery":
+        if direction not in ("asc", "desc"):
+            raise PolypackValueError("direction must be 'asc' or 'desc'")
+        self._order = {"field": field, "direction": direction}
+        return self
+
+    def offset(self, n: int) -> "PersistedGraphQuery":
+        if not isinstance(n, int) or isinstance(n, bool) or n < 0:
+            raise PolypackValueError("offset must be a non-negative integer")
+        self._offset = n
+        return self
+
+    def limit(self, n: int) -> "PersistedGraphQuery":
+        if not isinstance(n, int) or isinstance(n, bool) or n < 0:
+            raise PolypackValueError("limit must be a non-negative integer")
+        self._limit = n
+        return self
+
+    def _query(self, paginate: bool = True) -> dict:
+        query: dict[str, Any] = {}
+        if self._node_types is not None:
+            query["nodeTypes"] = list(self._node_types)
+        if self._attributes:
+            query["attributes"] = dict(self._attributes)
+        if self._ranges:
+            query["attributeRanges"] = copy.deepcopy(self._ranges)
+        if self._order is not None:
+            query["orderBy"] = dict(self._order)
+        if paginate:
+            if self._offset is not None:
+                query["offset"] = self._offset
+            if self._limit is not None:
+                query["limit"] = self._limit
+        return query
+
+    def to_list(self) -> list:
+        return self._graph._store.query_nodes(self._query())
+
+    def ids(self) -> list[str]:
+        return [node["id"] for node in self.to_list()]
+
+    def count(self) -> int:
+        return self._graph._store.count_nodes(self._query(paginate=False))
+
+
+class GraphSnapshot:
+    """Read-only graph state captured at one point in time.
+
+    A snapshot copies nodes, edges, and index buckets so later graph writes do
+    not affect queries created from it. It intentionally exposes only reads
+    and query construction; mutations remain methods on :class:`PolyGraph`.
+    """
+
+    def __init__(self, graph: PolyGraph) -> None:
+        self._nodes = copy.deepcopy(graph._nodes)
+        self._edges = copy.deepcopy(graph._edges)
+        self._incoming = copy.deepcopy(graph._incoming)
+        self._indexes = copy.deepcopy(graph._indexes)
+        self._secondary_index_data = copy.deepcopy(graph._secondary_index_data)
+        self._resource_limits = dict(graph._resource_limits)
+
+    @property
+    def resource_limit_config(self) -> dict:
+        return dict(self._resource_limits)
+
+    def _record_query(self, duration_ms: float, scanned_records: int, index: Optional[str], indexes: Optional[Iterable[str]] = None) -> None:
+        # Query metrics belong to the live graph, not to this detached view.
+        return None
+
+    def query(self) -> "GraphQuery":
+        return GraphQuery(self)
+
+    def get_node(self, id_: str) -> Optional[Node]:
+        node = self._nodes.get(id_)
+        return None if node is None else _copy_node(node)
+
+    def get_nodes(self, ids: Optional[Iterable[str]] = None) -> list:
+        selected = self._nodes.keys() if ids is None else ids
+        return [self._copy_node_by_id(id_) for id_ in selected if id_ in self._nodes]
+
+    def _copy_node_by_id(self, id_: str) -> Node:
+        return _copy_node(self._nodes[id_])
+
+    def get_edges(self, source: Optional[str] = None, edge_type: Optional[str] = None) -> list:
+        maps = self._edges.items() if source is None else ((source, self._edges.get(source, {})),)
+        result = []
+        for _, edges in maps:
+            for edge in edges.values():
+                if edge_type is None or edge["type"] == edge_type:
+                    result.append(dict(edge, data=dict(edge.get("data") or {})))
+        return result
 
 
 class GraphQuery:
@@ -846,6 +2249,7 @@ class GraphQuery:
         self._similarity: Optional[dict] = None
         self._activation_above: Optional[float] = None
         self._activation_order: Optional[str] = None
+        self._limits = graph.resource_limit_config
 
     def where_type(self, *types: str) -> "GraphQuery":
         self._node_types = list(types)
@@ -897,6 +2301,9 @@ class GraphQuery:
         _validate_id(edge_type, "edge type")
         if not isinstance(depth, int) or depth < 0:
             raise PolypackValueError("depth must be a non-negative integer")
+        maximum = self._limits.get("maxTraversalDepth")
+        if maximum is not None and depth > maximum:
+            raise ResourceLimitError("maxTraversalDepth", maximum)
         self._traversal.append((edge_type, depth, direction))
         return self
 
@@ -911,6 +2318,50 @@ class GraphQuery:
             raise PolypackValueError("threshold must be finite")
         self._similarity = {"vector": q, "threshold": float(threshold), "top_k": top_k}
         return self
+
+    def explain(self) -> dict:
+        """Describe the query stages and a coarse execution-cost estimate."""
+        fields = {field for op, field, _ in self._attributes}
+        node_type = self._node_types[0] if self._node_types and len(self._node_types) == 1 else None
+        selected = self._selected_indexes()
+        stages = [*(f"property-index({definition['name']})" for definition in selected)] or ["record-scan"]
+        if len(selected) > 1:
+            stages.append(f"index-intersection({len(selected)})")
+        if self._node_types:
+            stages.append(f"type-filter({','.join(self._node_types)})")
+        if self._attributes:
+            stages.append("property-filter")
+        if self._joins:
+            stages.append(f"join(count={len(self._joins)})")
+        if self._traversal:
+            stages.append(f"traversal(depth={max(step[1] for step in self._traversal)})")
+        if self._order_by:
+            stages.append(f"order({self._order_by[0]},{self._order_by[1]})")
+        if self._limit is not None:
+            stages.append(f"limit({self._limit})")
+        loaded = len(self._graph._nodes)
+        return {
+            "index": selected[0]["name"] if selected else None,
+            "indexes": [definition["name"] for definition in selected],
+            "stages": stages,
+            "loadedRecords": loaded,
+            "estimatedCost": max(1, loaded * (0.25 / len(selected) if selected else 1)),
+        }
+
+    def _selected_indexes(self) -> list[dict]:
+        equality_fields = {field for op, field, _ in self._attributes if op == "eq"}
+        range_fields = {field for op, field, _ in self._attributes if op == "range"}
+        node_type = self._node_types[0] if self._node_types and len(self._node_types) == 1 else None
+        selected = []
+        for definition in self._graph._indexes.values():
+            if definition["nodeType"] and definition["nodeType"] != node_type:
+                continue
+            if all(field in equality_fields or field.removeprefix("data.") in equality_fields for field in definition["fields"]):
+                selected.append(definition)
+                continue
+            if len(definition["fields"]) == 1 and definition["fields"][0] in range_fields:
+                selected.append(definition)
+        return selected
 
     def _match(self, node: Node) -> bool:
         if self._node_types is not None and node["type"] not in self._node_types:
@@ -943,6 +2394,9 @@ class GraphQuery:
         """Breadth-first expansion; returns nodes in discovery order (seeds first)."""
         visited = list(seeds)
         seen = set(seeds)
+        maximum = self._limits.get("maxNodesVisited")
+        if maximum is not None and len(seen) > maximum:
+            raise ResourceLimitError("maxNodesVisited", maximum)
         frontier = list(seeds)
         for _ in range(depth):
             if not frontier:
@@ -955,6 +2409,8 @@ class GraphQuery:
                         if t not in seen:
                             seen.add(t)
                             visited.append(t)
+                            if maximum is not None and len(seen) > maximum:
+                                raise ResourceLimitError("maxNodesVisited", maximum)
                             nxt.append(t)
                 else:
                     sources = self._graph.get_edge_sources(node_id, edge_type)
@@ -962,6 +2418,8 @@ class GraphQuery:
                         if s not in seen:
                             seen.add(s)
                             visited.append(s)
+                            if maximum is not None and len(seen) > maximum:
+                                raise ResourceLimitError("maxNodesVisited", maximum)
                             nxt.append(s)
             frontier = nxt
         return visited
@@ -1008,27 +2466,37 @@ class GraphQuery:
             plan["limit"] = self._limit
         return plan
 
-    def _native_ids(self, plan: dict) -> Optional[list]:
-        """Run the plan through the Rust query executor; None on failure."""
+    def _native_ids(self, plan: dict, candidates: Optional[list[Node]] = None) -> Optional[list]:
+        """Run expensive plans through Rust; return None for hot simple plans."""
         if self._activation_above is not None or self._activation_order is not None:
             # The native executor doesn't understand activation filters — force
             # the pure-Python pipeline so results can't silently diverge.
             return None
+        # Crossing the Python/Rust boundary costs more than the local pipeline
+        # for ordinary filters/order/pagination. Native execution is reserved
+        # for similarity, joins, and traversal where the Rust executor can
+        # amortise the conversion cost over substantially more work.
+        if self._similarity is None and not self._joins and not self._traversal:
+            return None
         try:
-            nodes = [dict(n) for n in self._graph._nodes.values()]
+            nodes_source = candidates if candidates is not None and not self._joins and not self._traversal else self._graph._nodes.values()
+            needs_vectors = self._similarity is not None
+            nodes = [dict(n) if needs_vectors else {key: value for key, value in n.items() if key != "vector"} for n in nodes_source]
             edges = []
-            for edge_map in self._graph._edges.values():
-                for e in edge_map.values():
-                    edges.append(
-                        {
-                            "id": _edge_key(e["source"], e["type"], e["target"]),
-                            "source": e["source"],
-                            "target": e["target"],
-                            "type": e["type"],
-                            "data": dict(e.get("data") or {}),
-                            "createdAt": e.get("createdAt", 0),
-                        }
-                    )
+            if self._joins or self._traversal:
+                for edge_map in self._graph._edges.values():
+                    for e in edge_map.values():
+                        edges.append(
+                            {
+                                "id": e["id"] if "id" in e else _edge_key(e["source"], e["type"], e["target"]),
+                                "source": e["source"],
+                                "target": e["target"],
+                                "type": e["type"],
+                                "data": dict(e.get("data") or {}),
+                                "createdAt": e.get("createdAt", 0),
+                                "revision": int(e.get("revision", 0)),
+                            }
+                        )
             return list(_execute_query_plan(nodes, edges, plan))
         except (TypeError, PolypackValueError):
             # Expected fallback: e.g. a non-JSON-serialisable filter value.
@@ -1036,17 +2504,34 @@ class GraphQuery:
             return None
 
     def _collect(self) -> list:
+        started = time.perf_counter()
         plan = self._to_plan()
-        native_ids = self._native_ids(plan)
+        candidates = None if self._joins or self._traversal else self._indexed_candidates()
+        scanned_records = len(self._graph._nodes) if candidates is None else len(candidates)
+        native_ids = self._native_ids(plan, candidates)
         if native_ids is not None:
+            maximum = self._limits.get("maxNodesVisited")
+            if maximum is not None and len(native_ids) > maximum:
+                raise ResourceLimitError("maxNodesVisited", maximum)
             by_id = {n["id"]: n for n in self._graph._nodes.values()}
-            return [by_id[i] for i in native_ids if i in by_id]
+            results = [by_id[i] for i in native_ids if i in by_id]
+            maximum = self._limits.get("maxResults")
+            if maximum is not None and len(results) > maximum:
+                raise ResourceLimitError("maxResults", maximum)
+            explanation = self.explain()
+            self._graph._record_query((time.perf_counter() - started) * 1000, scanned_records, explanation["index"], explanation["indexes"])
+            return results
         # Fallback: pure-Python pipeline (only reached if the native path
         # failed, e.g. a non-JSON-serialisable filter value).
-        return self._collect_python(plan)
+        results = self._collect_python(plan, candidates)
+        explanation = self.explain()
+        self._graph._record_query((time.perf_counter() - started) * 1000, scanned_records, explanation["index"], explanation["indexes"])
+        return results
 
-    def _collect_python(self, plan: dict) -> list:
-        results = [n for n in self._graph._nodes.values() if self._match(n)]
+    def _collect_python(self, plan: dict, candidates: Optional[list[Node]] = None) -> list:
+        if candidates is None:
+            candidates = self._indexed_candidates()
+        results = [n for n in candidates if self._match(n)]
         if self._joins:
             results = [n for n in results if all(self._connected(n, et, d) for et, d in self._joins)]
         for edge_type, depth, direction in self._traversal:
@@ -1084,7 +2569,41 @@ class GraphQuery:
             results = results[self._offset :]
         if self._limit is not None:
             results = results[: self._limit]
+        maximum = self._limits.get("maxResults")
+        if maximum is not None and len(results) > maximum:
+            raise ResourceLimitError("maxResults", maximum)
         return results
+
+    def _indexed_candidates(self) -> list:
+        explanation = self.explain()
+        selected_indexes = self._selected_indexes()
+        if not selected_indexes:
+            return list(self._graph._nodes.values())
+        equalities = {field: value for op, field, value in self._attributes if op == "eq"}
+        candidate_sets = []
+        for definition in selected_indexes:
+            buckets = self._graph._secondary_index_data.get(definition["name"], {})
+            values = [equalities.get(field, equalities.get(field.removeprefix("data."))) for field in definition["fields"]]
+            if all(field in equalities or field.removeprefix("data.") in equalities for field in definition["fields"]):
+                candidate_sets.append(set(buckets.get(repr(values), set())))
+                continue
+            field = definition["fields"][0]
+            ranges = [(above, below) for op, name, (above, below) in self._attributes if op == "range" and name == field]
+            if len(definition["fields"]) == 1 and ranges:
+                above, below = ranges[-1]
+                ids = set()
+                for encoded, bucket in buckets.items():
+                    try:
+                        value = ast.literal_eval(encoded)[0]
+                    except (ValueError, SyntaxError, IndexError, TypeError):
+                        continue
+                    if isinstance(value, (int, float)) and not isinstance(value, bool) and (above is None or value > above) and (below is None or value < below):
+                        ids.update(bucket)
+                candidate_sets.append(ids)
+        if not candidate_sets:
+            return list(self._graph._nodes.values())
+        ids = set.intersection(*candidate_sets)
+        return [self._graph._nodes[id_] for id_ in ids if id_ in self._graph._nodes]
 
     def to_list(self) -> list:
         return [_copy_node(n) for n in self._collect()]

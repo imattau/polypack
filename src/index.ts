@@ -1,4 +1,12 @@
-export { PolyGraph } from './graph.js'
+export { PolyGraph, GraphSnapshot } from './graph.js'
+export { ConflictError } from './errors.js'
+export { UniqueConstraintError } from './index-errors.js'
+export { SchemaValidationError } from './schema-errors.js'
+export { MigrationError, MigrationRegistry } from './migrations.js'
+export { ReadOnlyStoreError, StoreLockError } from './persistence/lock-errors.js'
+export { ResourceLimitError } from './resource-errors.js'
+export { AdapterCapabilityError } from './capability-errors.js'
+export { QueryLimitError, QueryAbortedError } from './query-errors.js'
 export { VectorIndex, cosineSimilarity, euclideanSimilarity } from './vector-index.js'
 export { HNSWIndex } from './hnsw-index.js'
 export type { HNSWConfig } from './hnsw-index.js'
@@ -23,6 +31,25 @@ export type {
   EdgeTypes,
   DataTransform,
   NodeActivation,
+  WriteOptions,
+  NodePatch,
+  AdapterCapabilities,
+  GraphTransaction,
+  IndexDefinition,
+  QueryExplain,
+  GraphOperation,
+  MutationRecord,
+  VerificationReport,
+  GraphStats,
+  QueryResourceLimits,
+  QueryMetrics,
+  GraphResourceLimits,
+  TransactionOptions,
+  EdgeCardinality,
+  NodeTypeDefinition,
+  EdgeTypeDefinition,
+  PersistedSchemaDefinitions,
 } from './types.js'
+export type { MigrationDefinition, MigrationOptions, MigrationProgress, MigrationReport } from './migrations.js'
 export { defineEdges } from './types.js'
 export { yieldToUI, edgeId } from './utils.js'

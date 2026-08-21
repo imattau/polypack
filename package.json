@@ -1,6 +1,6 @@
 {
   "name": "@0xx0lostcause0xx0/polypack",
-  "version": "2.5.0",
+  "version": "3.0.0",
   "description": "Generic property graph engine with vector similarity search — extracted from scrollstr's PolyGraph",
   "keywords": [
     "graph",
@@ -78,6 +78,20 @@
     "bench:rust": "cargo run --release -p polypack-core --bin compare -- --out benchmarks/results/rust-all.json",
     "bench:compare": "tsx benchmarks/compare.ts",
     "bench:query": "tsx benchmarks/query-gate.ts",
+    "bench:database-core": "tsx benchmarks/database-core-ts.ts",
+    "bench:database-core:extended": "tsx benchmarks/database-core-extended.ts",
+    "bench:database-core:batches": "tsx benchmarks/database-core-batches.ts",
+    "bench:database-core:batches:rust": "cargo run --release --manifest-path crates/Cargo.toml -p polypack-graph --example database_core_batches",
+    "bench:database-core:batches:python": "PYTHONPATH=python python -m polypack.bench_batches",
+    "bench:database-core:batches:compare": "tsx benchmarks/database-core-batches-compare.ts",
+    "bench:database-core:queries": "tsx benchmarks/database-core-queries.ts",
+    "bench:database-core:queries:rust": "cargo run --release --manifest-path crates/Cargo.toml -p polypack-graph --example database_core_queries",
+    "bench:database-core:queries:python": "PYTHONPATH=python python -m polypack.bench_queries",
+    "bench:database-core:queries:compare": "tsx benchmarks/database-core-queries-compare.ts",
+    "bench:database-core:mixed": "tsx benchmarks/database-core-mixed.ts",
+    "bench:database-core:mixed:rust": "cargo run --release --manifest-path crates/Cargo.toml -p polypack-graph --example database_core_mixed",
+    "bench:database-core:mixed:python": "PYTHONPATH=python python -m polypack.bench_mixed",
+    "bench:database-core:mixed:compare": "tsx benchmarks/database-core-mixed-compare.ts",
     "bench:conformance": "npm run test:conformance"
   },
   "engines": {

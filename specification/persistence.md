@@ -1,6 +1,6 @@
 # Persistence specification
 
-Version: 1 (draft)
+Version: 2 (stable)
 
 ## 1. Model
 
@@ -18,6 +18,8 @@ A store directory contains two files:
 
 - `snapshot.msgpack` — MessagePack snapshot.
 - `wal.msgpack` — framed WAL entries.
+- `mutations.jsonl` — optional durable logical mutation records for audit,
+  replication, feeds, and incremental recovery.
 
 Files are treated as opaque byte streams; the storage adapter (filesystem,
 OPFS, memory) owns bytes only.
@@ -125,13 +127,44 @@ operations reject.
 - Old snapshots either migrate to the current version or fail with a precise
   version error; silent misinterpretation is prohibited.
 
-## 11. Conformance
+## 11. Logical mutation log
+
+The recovery WAL is an internal crash-recovery mechanism. An adapter may also
+persist acknowledged logical mutations with this shape:
+
+```text
+{
+  "operationId": string,
+  "sequence": unsigned integer,
+  "transactionId": string,
+  "actor"?: string,
+  "timestamp": integer millis,
+  "baseRevision"?: unsigned integer,
+  "operations": GraphOperation[],
+  "metadata"?: object
+}
+```
+
+Logical records are ordered by strictly increasing sequence and are appended
+only after the corresponding atomic graph commit succeeds. Reapplying the
+same operation ID is idempotent.
+
+The current Rust and Python directory implementations encode one JSON object
+per newline in `mutations.jsonl`. Each operation is represented as
+`{ "operationType": string, "payload": object }`. The recovery WAL remains
+MessagePack-framed and is not interchangeable with this logical log.
+
+Implementations expose cursor reads over records whose sequence is greater than
+the supplied cursor. Bounded page reads are recommended for replication and
+change-feed consumers so pending queues remain bounded.
+
+## 12. Conformance
 
 Recovery fixtures exercise: clean WAL, snapshot only, partial (truncated) WAL
 tail, and corrupt mid-stream frame. Acknowledged durable batches must survive
 forced termination in every case.
 
-## 12. Implementation status
+## 13. Implementation status
 
 - The TypeScript reference (`src/persistence/binary-store.ts` +
   `binary-format.ts`) is the current production implementation.
@@ -141,3 +174,27 @@ forced termination in every case.
   Rust stores read each other's files. Python (`NativeStore`) and Node native
   (`NativeStore`) bindings expose it; the TypeScript adapter remains pure-TS
   for now.
+
+## 14. Conformance status
+
+Version 2 is stable for the snapshot/WAL contract and logical mutation-log
+surface described above. The recovery fixtures in `fixtures/recovery` are
+executed by TypeScript, Rust, and Python. They cover snapshot-only stores,
+WAL-only stores, delete replay, clean WAL recovery, and truncated WAL tails;
+implementations must preserve acknowledged records and remove the recovered
+WAL after a successful restart.
+
+Direct Rust users can use `polypack_core::storage::FileStorage` for the same
+single-writer contract as the Node and Python directory adapters. It records
+process identity in `store.lock`, rejects a second writer, supports explicit
+read-only opens, and permits stale-lock recovery after the documented age
+threshold. Its `concurrentWriters` capability is explicitly `false`; deployments
+requiring multiple writers must provide external coordination.
+
+Physical format changes use `FormatMigrationRegistry` and
+`migrate_storage`. A migration must declare an artifact (`Snapshot` or `Wal`),
+an exact source version, a target version, and a byte transformation. Steps
+must form a contiguous path; missing or overshooting steps are rejected.
+Migration reports include bytes read/written and whether each artifact
+changed. Dry runs execute and validate transformations without writing the
+destination. Startup never invokes these callbacks implicitly.

@@ -65,7 +65,8 @@ export interface NativeHnswIndexBinding {
 export interface NativeBinding {
   NativeExactIndex: new (distance?: string) => NativeExactIndexBinding
   NativeHnswIndex: new (config?: NativeHnswConfig, levelSeed?: number) => NativeHnswIndexBinding
-  NativeStore: new (directory: string, compactThreshold?: number) => NativeStoreBinding
+  NativeStore: new (directory: string, compactThreshold?: number, readOnly?: boolean) => NativeStoreBinding
+  restoreStore(source: string, destination: string, compactThreshold?: number): NativeStoreBinding
   engineInfo(): EngineInfo
   executeQueryPlan(nodes: unknown[], edges: unknown[], plan: Record<string, unknown>): string[]
   aggregateQueryPlan(
@@ -104,11 +105,23 @@ export interface NativeStoreBinding {
   nodeCount(): number
   queryNodes(query: Record<string, unknown>): Array<Record<string, unknown>>
   countNodes(query: Record<string, unknown>): number
+  defineIndex(definition: Record<string, unknown>): void
+  dropIndex(name: string): boolean
+  indexDefinitions(): Array<Record<string, unknown>>
+  registerNodeType(definition: Record<string, unknown>): void
+  registerEdgeType(definition: Record<string, unknown>): void
   getEdgesBySources(sources: string[], edgeType?: string): Array<Record<string, unknown>>
   getEdgesByTargets(targets: string[], edgeType?: string): Array<Record<string, unknown>>
   getNode(id: string): Record<string, unknown> | undefined
   allEdges(): Array<Record<string, unknown>>
   allVectors(): Array<[string, number[]]>
   compact(): void
+  checkpoint(): void
+  verify(): Record<string, unknown>
+  capabilities(): Record<string, unknown>
+  stats(): Record<string, unknown>
+  mutationLogSince(sequence: string, limit?: number): Array<Record<string, unknown>>
+  latestMutationSequence(): string
+  backup(destination: string): void
   close(): void
 }

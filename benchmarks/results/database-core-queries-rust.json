@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "lang": "rust",
+  "count": 10000,
+  "dimensions": 32,
+  "iterations": 20,
+  "topK": 10,
+  "dataSeed": 42,
+  "querySeed": 43,
+  "graphQuery": {
+    "p50Ms": 0.346085,
+    "p95Ms": 0.474922,
+    "p99Ms": 2.515532,
+    "resultCount": 25
+  },
+  "hotQuery": {
+    "resultCount": 25
+  },
+  "exactVector": {
+    "p50Ms": 0.20393,
+    "p95Ms": 0.226159,
+    "p99Ms": 0.260582,
+    "resultCount": 10
+  },
+  "hnswVector": {
+    "p50Ms": 1.200875,
+    "p95Ms": 2.34335,
+    "p99Ms": 2.954607,
+    "resultCount": 10,
+    "recallAtK": 1.0
+  }
+}

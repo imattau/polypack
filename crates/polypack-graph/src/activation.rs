@@ -378,6 +378,7 @@ mod tests {
             vector: None,
             inserted_at: 1,
             updated_at: 1,
+            revision: 0,
             activation: None,
         }
     }

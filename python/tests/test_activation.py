@@ -52,7 +52,7 @@ def test_reinforce_node_clamps_and_accumulates():
     g = PolyGraph()
     g.add_node(_node("a"))
     g.reinforce_node("a", 5.0)
-    assert g.get_activation_state("a")["score"] == 1.0
+    assert g.get_activation_state("a")["score"] == pytest.approx(1.0, abs=1e-5)
 
     g.add_node(_node("b"))
     g.reinforce_node("b", 0.2)

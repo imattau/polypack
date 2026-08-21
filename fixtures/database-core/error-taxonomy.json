@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "name": "error-taxonomy",
+  "group": "database-core",
+  "cases": [
+    { "name": "invalid-node-id", "code": "invalid_argument" },
+    { "name": "dimension-mismatch", "code": "dimension_mismatch" },
+    { "name": "stale-write", "code": "conflict" },
+    { "name": "resource-limit", "code": "resource_limit" }
+  ]
+}

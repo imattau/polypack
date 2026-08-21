@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 1,
+  "name": "schema-and-unique-indexes",
+  "nodeType": {
+    "name": "person",
+    "requiredFields": ["name"],
+    "dataTypes": { "age": "integer" }
+  },
+  "index": {
+    "name": "person-external-id",
+    "nodeType": "person",
+    "fields": ["externalId"],
+    "unique": true
+  },
+  "validNode": {
+    "id": "person-1",
+    "type": "person",
+    "data": { "name": "Mary", "age": 40, "externalId": "ext-1" },
+    "insertedAt": 1,
+    "updatedAt": 1,
+    "revision": 0
+  },
+  "invalidNode": {
+    "id": "person-invalid",
+    "type": "person",
+    "data": { "age": "forty", "externalId": "ext-invalid" },
+    "insertedAt": 2,
+    "updatedAt": 2,
+    "revision": 0
+  },
+  "duplicateNode": {
+    "id": "person-duplicate",
+    "type": "person",
+    "data": { "name": "Another", "age": 41, "externalId": "ext-1" },
+    "insertedAt": 3,
+    "updatedAt": 3,
+    "revision": 0
+  },
+  "expect": { "nodeCount": 1, "presentId": "person-1" }
+}

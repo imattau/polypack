@@ -1,0 +1,16 @@
+{
+  "results": [
+    {
+      "lang": "rust",
+      "count": 20000,
+      "syncOps": 5000,
+      "writeMs": 390.35767999999996,
+      "writeOpsPerSec": 51235.06216145152,
+      "mutationCount": 40,
+      "mutationReplayMs": 18.032519,
+      "recoveryMs": 78.696113,
+      "syncSubmitMs": 8.860883,
+      "syncOpsPerSec": 564277.8490586096
+    }
+  ]
+}

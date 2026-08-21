@@ -63,6 +63,7 @@ impl PartialOrd for Candidate {
     }
 }
 
+#[derive(Clone)]
 struct LevelRng(u32);
 
 impl LevelRng {
@@ -80,6 +81,7 @@ impl LevelRng {
 
 /// Approximate, update-safe HNSW vector index. See the module docs for the
 /// remove/update semantics that differ from a naive HNSW implementation.
+#[derive(Clone)]
 pub struct HnswIndex {
     nodes: HashMap<String, Vec<f64>>,
     node_level: HashMap<String, u32>,

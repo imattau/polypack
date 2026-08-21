@@ -1,7 +1,13 @@
-import type { SerializedNode, SerializedEdge } from '../types.js'
+import type { SerializedNode, SerializedEdge, IndexDefinition, MutationRecord, VerificationReport, GraphStats, PersistedSchemaDefinitions } from '../types.js'
+import type { AdapterCapabilities } from '../types.js'
+import type { FileIO } from './file-io.js'
+
+/** Backwards-compatible adapter-module export for schema metadata. */
+export type { PersistedSchemaDefinitions } from '../types.js'
 
 /** Storage-level node predicates used by persisted queries. */
 export interface PersistedNodeQuery {
+  signal?: AbortSignal
   nodeTypes?: string[]
   attributes?: Record<string, unknown>
   attributeRanges?: Record<string, { above?: number; below?: number }>
@@ -12,6 +18,13 @@ export interface PersistedNodeQuery {
 
 /** One logical graph persistence commit. Implement atomically when supported. */
 export interface PersistenceChanges {
+  transactionId?: string
+  operationId?: string
+  actor?: string
+  baseRevision?: number
+  metadata?: Record<string, unknown>
+  indexDefinitions?: IndexDefinition[]
+  schemaDefinitions?: PersistedSchemaDefinitions
   putNodes: SerializedNode[]
   deleteNodeIds: string[]
   putEdges: SerializedEdge[]
@@ -22,6 +35,18 @@ export interface PersistenceChanges {
 
 /** Storage contract used by {@link PolyGraph}. Implement all writes atomically where possible. */
 export interface PersistenceAdapter {
+  /** Guarantees offered by this adapter. */
+  readonly capabilities?: AdapterCapabilities
+  getIndexDefinitions?(): Promise<IndexDefinition[]>
+  getSchemaDefinitions?(): Promise<PersistedSchemaDefinitions>
+  setSchemaDefinitions?(definitions: PersistedSchemaDefinitions): Promise<void>
+  getMutationsSince?(sequence: bigint): Promise<MutationRecord[]>
+  getMutationLogPage?(sequence: bigint, limit: number): Promise<MutationRecord[]>
+  latestMutationSequence?(): Promise<bigint>
+  checkpoint?(): Promise<void>
+  backup?(destination: FileIO): Promise<void>
+  verify?(): Promise<VerificationReport>
+  stats?(): Promise<Partial<GraphStats>>
   /** Optional atomic commit hook used in preference to individual bulk methods. */
   applyChanges?(changes: PersistenceChanges): Promise<void>
   putNode(node: SerializedNode): Promise<void>

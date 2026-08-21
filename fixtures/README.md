@@ -5,6 +5,18 @@ Language-neutral JSON fixtures consumed by the TypeScript conformance runner
 fixtures. Fixture files are the cross-language contract; they do not reference
 TypeScript implementation details.
 
+The current behavioural specification is version 2. The compatibility contract
+is version 2. Existing schema-version 1
+fixtures remain valid for compatibility; new fixtures should not rely on
+separator-derived edge IDs.
+
+The database-core contract is documented in
+[`specification/database-core.md`](../specification/database-core.md).
+
+The database-core and persistence specifications are stable at their current
+versions. Changes to their observable behavior require a fixture update and a
+versioned compatibility review.
+
 ## `conformance/` — graph behaviour
 
 Each file is one fixture:
@@ -69,6 +81,10 @@ or a finite number array. `insertedAt`/`updatedAt` are integer milliseconds.
 
 Query plans use `specification/query-plan.schema.json`.
 
+The exact-vector and HNSW fixtures are the vector compatibility gate. Exact
+searches require ordered equality; ANN searches declare their minimum overlap
+because graph topology and insertion order may differ between implementations.
+
 ## `recovery/` — persistence recovery
 
 Each fixture describes a store to build and the state expected after opening
@@ -96,3 +112,17 @@ WAL entry objects follow the kinds in `specification/persistence.md`
 `deleteVector`, `clearAll`). `corruptTailHex` simulates a crash mid-append; the
 trailing partial frame must be tolerated. The runner encodes these into bytes
 using its own format implementation — the fixture content is language-neutral.
+
+All three maintained implementations execute this recovery corpus. The
+database-core error categories are defined by
+[`database-core/error-taxonomy.json`](database-core/error-taxonomy.json) and
+must map to the stable codes in [`specification/errors.md`](../specification/errors.md).
+
+## `sync/` — protocol primitives
+
+The sync fixture defines a canonical ordered operation batch and checksums for
+the batch and retained operation identities. TypeScript, Rust, and Python
+validate it independently. It is intentionally transport-neutral; server
+storage, authorization, and conflict resolution are not part of the shared
+wire primitive. The native server implementations additionally test global
+cursor recovery, retention, and idempotent retries against this protocol.

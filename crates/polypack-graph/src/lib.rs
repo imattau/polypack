@@ -14,6 +14,7 @@ mod embedding;
 mod event;
 mod graph;
 mod lru;
+mod migration;
 mod persisted_query;
 mod query;
 
@@ -23,11 +24,14 @@ pub use embedding::{
     build_embedding_text, create_embedding, EmbeddingProvider, FeatureHashEmbedding, FeatureHashEmbeddingOptions,
 };
 pub use event::GraphChangeEvent;
-pub use graph::{Graph, GraphConfig};
-pub use persisted_query::PersistedGraphQuery;
+pub use graph::{EdgeTypeDefinition, Graph, GraphConfig, GraphResourceLimits, GraphStats, IndexDefinition, NodeTypeDefinition};
+pub use migration::{MigrationDefinition, MigrationOptions, MigrationProgress, MigrationRegistry, MigrationReport};
+pub use persisted_query::{PersistedGraphQuery, QueryExplain, QueryResourceLimits};
 pub use query::{AggregateOp, AggregateResult, GraphQuery, GroupedRow, OrderDirection};
 // `Direction` is a required parameter of `GraphQuery`/`PersistedGraphQuery`'s
 // `traverse`/`join`, so it must be nameable without adding `polypack-core` as
 // a separate direct dependency.
 pub use polypack_core::query::Direction;
 pub use polypack_core::{merge_activation, NodeActivation};
+pub use polypack_core::query_exec::GraphSnapshot;
+pub use polypack_core::storage::VerificationReport;

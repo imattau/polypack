@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "name": "sync-protocol",
+  "operations": [
+    {
+      "seq": 1,
+      "timestamp": 1700000000000,
+      "clientId": "writer-a",
+      "kind": "addNode",
+      "payload": { "id": "person-1", "type": "person" },
+      "operationId": "op-1",
+      "transactionId": "tx-1",
+      "baseRevision": 0
+    },
+    {
+      "seq": 2,
+      "timestamp": 1700000000001,
+      "clientId": "writer-a",
+      "kind": "updateNode",
+      "payload": { "id": "person-1", "data": { "name": "Ada" } },
+      "operationId": "op-2",
+      "transactionId": "tx-1",
+      "baseRevision": 0
+    }
+  ],
+  "operationIds": ["writer-a:op-1", "writer-a:op-2"],
+  "transactionIds": ["writer-a:tx-1"],
+  "checksum": "c202c42e",
+  "identityChecksum": "234cf880"
+}

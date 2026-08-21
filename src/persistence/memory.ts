@@ -1,9 +1,21 @@
-import type { SerializedNode, SerializedEdge } from '../types.js'
+import type { SerializedNode, SerializedEdge, IndexDefinition, MutationRecord } from '../types.js'
 import type { PersistenceAdapter, PersistenceChanges, PersistedNodeQuery } from './adapter.js'
-import { applyPersistedCountPagination, applyPersistedNodeQuery, matchesPersistedNode } from './query.js'
+import type { PersistedSchemaDefinitions } from '../types.js'
+import { applyPersistedCountPagination, applyPersistedNodeQuery, assertQueryActive, matchesPersistedNode, SecondaryIndexBuckets } from './query.js'
+import { mutationRecordFromChanges } from './mutation-log.js'
 
 /** Volatile persistence adapter for Node.js, tests, and temporary graphs. */
 export class MemoryAdapter implements PersistenceAdapter {
+  readonly capabilities = {
+    atomicBatches: true,
+    transactions: true,
+    fsync: false,
+    secondaryIndexes: true,
+    snapshots: true,
+    changeFeed: true,
+    concurrentWriters: false,
+    vectorSearch: 'exact' as const,
+  }
   private nodes = new Map<string, SerializedNode>()
   private edges = new Map<string, SerializedEdge>()
   private vectors = new Map<string, number[]>()
@@ -11,6 +23,11 @@ export class MemoryAdapter implements PersistenceAdapter {
   private edgesBySource = new Map<string, Set<string>>()
   private edgesByTarget = new Map<string, Set<string>>()
   private nodeOrder = new Map<string, true>()
+  private indexDefinitions: IndexDefinition[] = []
+  private secondaryIndexes = new SecondaryIndexBuckets()
+  private schemaDefinitions: PersistedSchemaDefinitions = { nodeTypes: [], edgeTypes: [] }
+  private mutations: MutationRecord[] = []
+  private nextMutation = 1n
   private readonly maxNodes: number | undefined
 
   /**
@@ -24,6 +41,14 @@ export class MemoryAdapter implements PersistenceAdapter {
     this.maxNodes = maxNodes
   }
 
+  async getSchemaDefinitions(): Promise<PersistedSchemaDefinitions> {
+    return structuredClone(this.schemaDefinitions)
+  }
+
+  async setSchemaDefinitions(definitions: PersistedSchemaDefinitions): Promise<void> {
+    this.schemaDefinitions = structuredClone(definitions)
+  }
+
   private touchNode(id: string): void {
     this.nodeOrder.delete(id)
     this.nodeOrder.set(id, true)
@@ -31,6 +56,7 @@ export class MemoryAdapter implements PersistenceAdapter {
 
   private indexNode(node: SerializedNode): void {
     const existing = this.nodes.get(node.id)
+    if (existing) this.secondaryIndexes.remove(existing)
     if (existing && existing.type !== node.type) this.unindexNode(node.id, existing.type)
     let ids = this.byType.get(node.type)
     if (!ids) {
@@ -38,10 +64,12 @@ export class MemoryAdapter implements PersistenceAdapter {
       this.byType.set(node.type, ids)
     }
     ids.add(node.id)
+    this.secondaryIndexes.add(node)
   }
 
   private unindexNode(id: string, type?: string): void {
     const node = this.nodes.get(id)
+    this.secondaryIndexes.remove(node)
     const ids = this.byType.get(type ?? node?.type ?? '')
     if (ids) {
       ids.delete(id)
@@ -92,6 +120,13 @@ export class MemoryAdapter implements PersistenceAdapter {
   }
 
   async applyChanges(changes: PersistenceChanges): Promise<void> {
+    if (changes.operationId && this.mutations.some(record => record.operationId === changes.operationId)) return
+    if (changes.indexDefinitions) {
+      this.indexDefinitions = changes.indexDefinitions.map(index => ({ ...index, fields: [...index.fields] }))
+      this.secondaryIndexes.setDefinitions(this.indexDefinitions)
+      this.secondaryIndexes.rebuild(this.nodes.values())
+    }
+    if (changes.schemaDefinitions) this.schemaDefinitions = structuredClone(changes.schemaDefinitions)
     for (const id of changes.deleteNodeIds) { this.unindexNode(id); this.nodes.delete(id); this.nodeOrder.delete(id) }
     for (const id of changes.deleteEdgeIds) { this.unindexEdge(id); this.edges.delete(id) }
     for (const id of changes.deleteVectorIds) this.vectors.delete(id)
@@ -99,18 +134,46 @@ export class MemoryAdapter implements PersistenceAdapter {
     for (const edge of changes.putEdges) { this.edges.set(edge.id, edge); this.indexEdge(edge) }
     for (const entry of changes.putVectors) this.vectors.set(entry.id, entry.vector)
     this.evictIfOverCap()
+    const record = mutationRecordFromChanges(changes, this.nextMutation)
+    if (record) {
+      this.mutations.push(record)
+      this.nextMutation++
+    }
+  }
+
+  async getIndexDefinitions(): Promise<IndexDefinition[]> {
+    return this.indexDefinitions.map(index => ({ ...index, fields: [...index.fields] }))
+  }
+
+  async getMutationsSince(sequence: bigint): Promise<MutationRecord[]> {
+    return this.mutations.filter(record => record.sequence > sequence).map(record => ({ ...record, operations: record.operations.map(operation => ({ ...operation, payload: structuredClone(operation.payload) })) }))
+  }
+
+  async getMutationLogPage(sequence: bigint, limit: number): Promise<MutationRecord[]> {
+    if (!Number.isInteger(limit) || limit < 0) throw new RangeError('mutation log page limit must be a non-negative integer')
+    return (await this.getMutationsSince(sequence)).slice(0, limit)
+  }
+
+  async latestMutationSequence(): Promise<bigint> {
+    return this.nextMutation - 1n
+  }
+
+  async stats() {
+    return {
+      persistedNodeCount: this.nodes.size,
+      edgeCount: this.edges.size,
+      vectorCount: this.vectors.size,
+      mutationCount: this.mutations.length,
+    }
   }
 
   async putNode(node: SerializedNode): Promise<void> {
-    this.indexNode(node)
-    this.nodes.set(node.id, node)
-    this.touchNode(node.id)
-    this.evictIfOverCap()
+    await this.applyChanges({ putNodes: [node], deleteNodeIds: [], putEdges: [], deleteEdgeIds: [], putVectors: [], deleteVectorIds: [] })
   }
 
   async bulkPutNodes(nodes: SerializedNode[]): Promise<void> {
-    for (const node of nodes) { this.indexNode(node); this.nodes.set(node.id, node); this.touchNode(node.id) }
-    this.evictIfOverCap()
+    if (nodes.length === 0) return
+    await this.applyChanges({ putNodes: nodes, deleteNodeIds: [], putEdges: [], deleteEdgeIds: [], putVectors: [], deleteVectorIds: [] })
   }
 
   async getNode(id: string): Promise<SerializedNode | undefined> {
@@ -122,13 +185,12 @@ export class MemoryAdapter implements PersistenceAdapter {
   }
 
   async deleteNode(id: string): Promise<void> {
-    this.unindexNode(id)
-    this.nodes.delete(id)
-    this.nodeOrder.delete(id)
+    await this.applyChanges({ putNodes: [], deleteNodeIds: [id], putEdges: [], deleteEdgeIds: [], putVectors: [], deleteVectorIds: [] })
   }
 
   async bulkDeleteNodes(ids: string[]): Promise<void> {
-    for (const id of ids) { this.unindexNode(id); this.nodes.delete(id); this.nodeOrder.delete(id) }
+    if (ids.length === 0) return
+    await this.applyChanges({ putNodes: [], deleteNodeIds: ids, putEdges: [], deleteEdgeIds: [], putVectors: [], deleteVectorIds: [] })
   }
 
   async allNodeIds(): Promise<string[]> {
@@ -136,7 +198,9 @@ export class MemoryAdapter implements PersistenceAdapter {
   }
 
   async queryNodes(query: PersistedNodeQuery): Promise<SerializedNode[]> {
-    const candidates = this.typeCandidateIds(query)
+    assertQueryActive(query.signal)
+    const indexed = this.secondaryIndexes.candidates(query)
+    const candidates = indexed.ids ? [...indexed.ids] : this.typeCandidateIds(query)
     const nodes = candidates
       ? candidates.map(id => this.nodes.get(id)).filter((n): n is SerializedNode => !!n)
       : [...this.nodes.values()]
@@ -144,6 +208,7 @@ export class MemoryAdapter implements PersistenceAdapter {
   }
 
   async countNodes(query: PersistedNodeQuery): Promise<number> {
+    assertQueryActive(query.signal)
     const isTypeOnly = !!query.nodeTypes && query.nodeTypes.length > 0 &&
       !query.attributes && !query.attributeRanges
     let count: number
@@ -155,8 +220,19 @@ export class MemoryAdapter implements PersistenceAdapter {
         count += this.byType.get(type)?.size ?? 0
       }
     } else {
+      const indexed = this.secondaryIndexes.candidates(query)
+      if (indexed.ids) {
+        count = 0
+        for (const id of indexed.ids) {
+          assertQueryActive(query.signal)
+          const node = this.nodes.get(id)
+          if (node && matchesPersistedNode(node, query)) count++
+        }
+        return applyPersistedCountPagination(count, query)
+      }
       count = 0
       for (const node of this.nodes.values()) {
+        assertQueryActive(query.signal)
         if (matchesPersistedNode(node, query)) count++
       }
     }
@@ -175,12 +251,12 @@ export class MemoryAdapter implements PersistenceAdapter {
   }
 
   async putEdge(edge: SerializedEdge): Promise<void> {
-    this.edges.set(edge.id, edge)
-    this.indexEdge(edge)
+    await this.applyChanges({ putNodes: [], deleteNodeIds: [], putEdges: [edge], deleteEdgeIds: [], putVectors: [], deleteVectorIds: [] })
   }
 
   async bulkPutEdges(edges: SerializedEdge[]): Promise<void> {
-    for (const edge of edges) { this.edges.set(edge.id, edge); this.indexEdge(edge) }
+    if (edges.length === 0) return
+    await this.applyChanges({ putNodes: [], deleteNodeIds: [], putEdges: edges, deleteEdgeIds: [], putVectors: [], deleteVectorIds: [] })
   }
 
   async getAllEdges(): Promise<SerializedEdge[]> {
@@ -222,24 +298,25 @@ export class MemoryAdapter implements PersistenceAdapter {
   }
 
   async deleteEdge(id: string): Promise<void> {
-    this.unindexEdge(id)
-    this.edges.delete(id)
+    await this.applyChanges({ putNodes: [], deleteNodeIds: [], putEdges: [], deleteEdgeIds: [id], putVectors: [], deleteVectorIds: [] })
   }
 
   async bulkDeleteEdges(ids: string[]): Promise<void> {
-    for (const id of ids) { this.unindexEdge(id); this.edges.delete(id) }
+    if (ids.length === 0) return
+    await this.applyChanges({ putNodes: [], deleteNodeIds: [], putEdges: [], deleteEdgeIds: ids, putVectors: [], deleteVectorIds: [] })
   }
 
   async putVector(id: string, vector: number[]): Promise<void> {
-    this.vectors.set(id, vector)
+    await this.applyChanges({ putNodes: [], deleteNodeIds: [], putEdges: [], deleteEdgeIds: [], putVectors: [{ id, vector }], deleteVectorIds: [] })
   }
 
   async bulkPutVectors(entries: Array<{ id: string; vector: number[] }>): Promise<void> {
-    for (const entry of entries) this.vectors.set(entry.id, entry.vector)
+    if (entries.length === 0) return
+    await this.applyChanges({ putNodes: [], deleteNodeIds: [], putEdges: [], deleteEdgeIds: [], putVectors: entries, deleteVectorIds: [] })
   }
 
   async deleteVector(id: string): Promise<void> {
-    this.vectors.delete(id)
+    await this.applyChanges({ putNodes: [], deleteNodeIds: [], putEdges: [], deleteEdgeIds: [], putVectors: [], deleteVectorIds: [id] })
   }
 
   async getVectors(ids: string[]): Promise<Array<{ id: string; vector: number[] }>> {
@@ -262,6 +339,7 @@ export class MemoryAdapter implements PersistenceAdapter {
     this.byType.clear()
     this.edgesBySource.clear()
     this.edgesByTarget.clear()
+    this.secondaryIndexes.rebuild([])
   }
 
   async close(): Promise<void> {

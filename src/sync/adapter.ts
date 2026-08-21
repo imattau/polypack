@@ -1,7 +1,6 @@
 import type { PersistenceAdapter, PersistenceChanges, PersistedNodeQuery } from '../persistence/adapter.js'
 import { applyPersistedNodeQuery } from '../persistence/query.js'
-import type { SerializedNode, SerializedEdge } from '../types.js'
-import { edgeId } from '../utils.js'
+import type { SerializedNode, SerializedEdge, MutationRecord } from '../types.js'
 import { OpLog } from './oplog.js'
 
 export type OpCallback = (op: import('./types').SyncOp) => void
@@ -15,24 +14,32 @@ export class SyncAdapter implements PersistenceAdapter {
   private inner: PersistenceAdapter
   onOp: OpCallback | null = null
 
+  get capabilities() {
+    return this.inner.capabilities
+  }
+
   constructor(inner: PersistenceAdapter, clientId: string) {
     this.inner = inner
     this.oplog = new OpLog(clientId)
   }
 
-  private record(kind: import('./types').SyncOp['kind'], payload: Record<string, unknown>) {
-    const op = this.oplog.append(kind, payload)
+  private record(
+    kind: import('./types').SyncOp['kind'],
+    payload: Record<string, unknown>,
+    identity?: { transactionId?: string; operationId?: string },
+  ) {
+    const op = this.oplog.append(kind, payload, identity)
     this.onOp?.(op)
   }
 
-  private validateEdge(edge: SerializedEdge): void {
-    if (edge.id !== edgeId(edge.source, edge.type, edge.target)) {
-      throw new Error(`Invalid edge ID: ${edge.id}`)
+  private validateEdgeRecord(edge: SerializedEdge): void {
+    if (!edge.id || !edge.source || !edge.type || !edge.target) {
+      throw new TypeError('Edge id, source, type, and target must not be empty')
     }
   }
 
   async applyChanges(changes: PersistenceChanges): Promise<void> {
-    for (const edge of changes.putEdges) this.validateEdge(edge)
+    for (const edge of changes.putEdges) this.validateEdgeRecord(edge)
     if (this.inner.applyChanges) {
       await this.inner.applyChanges(changes)
     } else {
@@ -43,17 +50,44 @@ export class SyncAdapter implements PersistenceAdapter {
       await this.inner.bulkPutEdges(changes.putEdges)
       await this.inner.bulkPutVectors(changes.putVectors)
     }
-    for (const id of changes.deleteNodeIds) this.record('removeNode', { id })
+    const transactionId = changes.transactionId
+    const operationId = changes.operationId
+    const identity = (suffix: string) => transactionId || operationId ? {
+      transactionId,
+      operationId: operationId ? `${operationId}:${suffix}` : undefined,
+    } : undefined
+    for (const id of changes.deleteNodeIds) this.record('removeNode', { id }, identity(`delete-node:${id}`))
     for (const id of changes.deleteEdgeIds) {
-      const [source, type, ...rest] = id.split('::')
-      this.record('removeEdges', { source, type: type ?? '', target: rest.join('::') })
+      this.record('removeEdges', this.edgeRemovalPayload(id), identity(`delete-edge:${id}`))
     }
     for (const node of changes.putNodes) {
-      this.record('addNode', node as unknown as Record<string, unknown>)
+      this.record('addNode', node as unknown as Record<string, unknown>, identity(`put-node:${node.id}`))
     }
     for (const edge of changes.putEdges) {
-      this.record('addEdge', edge as unknown as Record<string, unknown>)
+      this.record('addEdge', edge as unknown as Record<string, unknown>, identity(`put-edge:${edge.id}`))
     }
+  }
+
+  async getIndexDefinitions() {
+    return this.inner.getIndexDefinitions ? this.inner.getIndexDefinitions() : []
+  }
+
+  async getMutationsSince(sequence: bigint): Promise<MutationRecord[]> {
+    return this.inner.getMutationsSince ? this.inner.getMutationsSince(sequence) : []
+  }
+
+  async latestMutationSequence(): Promise<bigint> {
+    return this.inner.latestMutationSequence ? this.inner.latestMutationSequence() : 0n
+  }
+
+  async getMutationLogPage(sequence: bigint, limit: number) {
+    if (this.inner.getMutationLogPage) return this.inner.getMutationLogPage(sequence, limit)
+    const records = this.inner.getMutationsSince ? await this.inner.getMutationsSince(sequence) : []
+    return records.slice(0, limit)
+  }
+
+  async stats() {
+    return this.inner.stats ? this.inner.stats() : {}
   }
 
   async putNode(node: SerializedNode): Promise<void> {
@@ -104,13 +138,13 @@ export class SyncAdapter implements PersistenceAdapter {
   }
 
   async putEdge(edge: SerializedEdge): Promise<void> {
-    this.validateEdge(edge)
+    this.validateEdgeRecord(edge)
     await this.inner.putEdge(edge)
     this.record('addEdge', edge as unknown as Record<string, unknown>)
   }
 
   async bulkPutEdges(edges: SerializedEdge[]): Promise<void> {
-    for (const edge of edges) this.validateEdge(edge)
+    for (const edge of edges) this.validateEdgeRecord(edge)
     await this.inner.bulkPutEdges(edges)
     for (const edge of edges) {
       this.record('addEdge', edge as unknown as Record<string, unknown>)
@@ -139,16 +173,20 @@ export class SyncAdapter implements PersistenceAdapter {
 
   async deleteEdge(id: string): Promise<void> {
     await this.inner.deleteEdge(id)
-    const [source, type, ...rest] = id.split('::')
-    this.record('removeEdges', { source, type: type ?? '', target: rest.join('::') })
+    this.record('removeEdges', this.edgeRemovalPayload(id))
   }
 
   async bulkDeleteEdges(ids: string[]): Promise<void> {
     await this.inner.bulkDeleteEdges(ids)
     for (const id of ids) {
-      const [source, type, ...rest] = id.split('::')
-      this.record('removeEdges', { source, type: type ?? '', target: rest.join('::') })
+      this.record('removeEdges', this.edgeRemovalPayload(id))
     }
+  }
+
+  private edgeRemovalPayload(id: string): Record<string, unknown> {
+    const parts = id.split('::')
+    if (parts.length >= 3) return { id, source: parts[0], type: parts[1], target: parts.slice(2).join('::') }
+    return { id }
   }
 
   async putVector(id: string, vector: number[]): Promise<void> {

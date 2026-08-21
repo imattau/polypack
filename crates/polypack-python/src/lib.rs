@@ -7,7 +7,7 @@ use polypack_core::hnsw::{HnswConfig, HnswIndex as CoreHnswIndex};
 use polypack_core::vector::{DistanceFn, ExactIndex as CoreExactIndex};
 use pyo3::exceptions::{PyException, PyNotImplementedError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyList, PyTuple};
+use pyo3::types::{PyDict, PyList, PyTuple};
 
 pyo3::create_exception!(polypack, PolypackError, PyException, "Base polypack error");
 pyo3::create_exception!(polypack, PolypackValueError, PolypackError, "Invalid argument");
@@ -16,12 +16,16 @@ pyo3::create_exception!(polypack, PolypackClosedError, PolypackError, "Operation
 pyo3::create_exception!(polypack, PolypackVersionError, PolypackError, "Unsupported format version");
 pyo3::create_exception!(polypack, PolypackCorruptDataError, PolypackError, "Corrupt data");
 pyo3::create_exception!(polypack, PolypackStorageError, PolypackError, "Storage failure");
+pyo3::create_exception!(polypack, ConflictError, PolypackError, "Optimistic concurrency conflict");
+pyo3::create_exception!(polypack, ResourceLimitError, PolypackError, "Resource limit exceeded");
 
 fn to_pyerr(e: CoreError) -> PyErr {
     match e {
         CoreError::InvalidArgument(m) => PolypackValueError::new_err(m),
         CoreError::DimensionMismatch { .. } => PolypackDimensionError::new_err(e.to_string()),
         CoreError::RangeOutOfBounds(m) => PolypackValueError::new_err(m),
+        CoreError::Conflict { .. } => ConflictError::new_err(e.to_string()),
+        CoreError::ResourceLimit { .. } => ResourceLimitError::new_err(e.to_string()),
         CoreError::Closed => PolypackClosedError::new_err(e.to_string()),
         CoreError::FormatVersion(v) => PolypackVersionError::new_err(v.to_string()),
         CoreError::CorruptData(m) => PolypackCorruptDataError::new_err(m),
@@ -349,13 +353,16 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("PolypackVersionError", m.py().get_type::<PolypackVersionError>())?;
     m.add("PolypackCorruptDataError", m.py().get_type::<PolypackCorruptDataError>())?;
     m.add("PolypackStorageError", m.py().get_type::<PolypackStorageError>())?;
+    m.add("ConflictError", m.py().get_type::<ConflictError>())?;
+    m.add("ResourceLimitError", m.py().get_type::<ResourceLimitError>())?;
     Ok(())
 }
 
 // ── Storage / NativeStore ──
 
 use polypack_core::storage::{
-    Durability, NodeQuery, Store as CoreStore, StoreConfig, Storage,
+    AdapterCapabilities, Durability, NodeQuery, Store as CoreStore, StoreConfig, Storage,
+    VectorSearchCapability,
 };
 use std::sync::Mutex;
 
@@ -415,6 +422,40 @@ impl Storage for PythonStorage {
             result
                 .extract()
                 .map_err(|e| CoreError::Storage(e.to_string()))
+        })
+    }
+
+    fn capabilities(&self) -> AdapterCapabilities {
+        Python::with_gil(|py| {
+            let obj = self.0.bind(py);
+            let Ok(value) = obj.getattr("capabilities") else { return AdapterCapabilities::default() };
+            let get_bool = |key: &str| {
+                value
+                    .get_item(key)
+                    .ok()
+                    .and_then(|item| item.extract::<bool>().ok())
+                    .unwrap_or(false)
+            };
+            let vector_search = match value
+                .get_item("vectorSearch")
+                .ok()
+                .and_then(|item| item.extract::<String>().ok())
+                .as_deref()
+            {
+                Some("exact") => VectorSearchCapability::Exact,
+                Some("ann") => VectorSearchCapability::Ann,
+                _ => VectorSearchCapability::None,
+            };
+            AdapterCapabilities {
+                atomic_batches: get_bool("atomicBatches"),
+                transactions: get_bool("transactions"),
+                fsync: get_bool("fsync"),
+                secondary_indexes: get_bool("secondaryIndexes"),
+                snapshots: get_bool("snapshots"),
+                change_feed: get_bool("changeFeed"),
+                concurrent_writers: get_bool("concurrentWriters"),
+                vector_search,
+            }
         })
     }
 }
@@ -515,7 +556,74 @@ impl NativeStore {
         }
     }
 
-    #[pyo3(signature = (put_nodes=vec![], delete_node_ids=vec![], put_edges=vec![], delete_edge_ids=vec![], put_vectors=vec![], delete_vector_ids=vec![]))]
+    fn capabilities(&self, py: Python<'_>) -> PyResult<Py<PyDict>> {
+        let caps = self.inner.lock().unwrap().capabilities();
+        let out = PyDict::new(py);
+        out.set_item("atomicBatches", caps.atomic_batches)?;
+        out.set_item("transactions", caps.transactions)?;
+        out.set_item("fsync", caps.fsync)?;
+        out.set_item("secondaryIndexes", caps.secondary_indexes)?;
+        out.set_item("snapshots", caps.snapshots)?;
+        out.set_item("changeFeed", caps.change_feed)?;
+        out.set_item("concurrentWriters", caps.concurrent_writers)?;
+        let vector_search = match caps.vector_search {
+            polypack_core::storage::VectorSearchCapability::None => "none",
+            polypack_core::storage::VectorSearchCapability::Exact => "exact",
+            polypack_core::storage::VectorSearchCapability::Ann => "ann",
+        };
+        out.set_item("vectorSearch", vector_search)?;
+        Ok(out.unbind())
+    }
+
+    fn verify(&self, py: Python<'_>) -> PyResult<Py<PyDict>> {
+        let report = self.inner.lock().unwrap().verify().map_err(to_pyerr)?;
+        let out = PyDict::new(py);
+        out.set_item("ok", report.ok)?;
+        out.set_item("errors", report.errors)?;
+        out.set_item("nodeCount", report.node_count)?;
+        out.set_item("edgeCount", report.edge_count)?;
+        out.set_item("vectorCount", report.vector_count)?;
+        out.set_item("mutationCount", report.mutation_count)?;
+        Ok(out.unbind())
+    }
+
+    fn mutation_log(&self, py: Python<'_>) -> PyResult<Py<PyList>> {
+        let records = self.inner.lock().unwrap().mutation_log().map_err(to_pyerr)?;
+        let list = PyList::empty(py);
+        for record in records {
+            let json = serde_json::to_value(record).map_err(|e| PolypackStorageError::new_err(e.to_string()))?;
+            list.append(json_to_py(py, &json)?)?;
+        }
+        Ok(list.unbind())
+    }
+
+    #[pyo3(signature = (sequence=0))]
+    fn mutation_log_since(&self, py: Python<'_>, sequence: u64) -> PyResult<Py<PyList>> {
+        let records = self.inner.lock().unwrap().mutation_log_since(sequence).map_err(to_pyerr)?;
+        let list = PyList::empty(py);
+        for record in records {
+            let json = serde_json::to_value(record).map_err(|e| PolypackStorageError::new_err(e.to_string()))?;
+            list.append(json_to_py(py, &json)?)?;
+        }
+        Ok(list.unbind())
+    }
+
+    fn mutation_log_page(&self, py: Python<'_>, sequence: u64, limit: usize) -> PyResult<Py<PyList>> {
+        let records = self.inner.lock().unwrap().mutation_log_page(sequence, limit).map_err(to_pyerr)?;
+        let list = PyList::empty(py);
+        for record in records {
+            let json = serde_json::to_value(record).map_err(|e| PolypackStorageError::new_err(e.to_string()))?;
+            list.append(json_to_py(py, &json)?)?;
+        }
+        Ok(list.unbind())
+    }
+
+    fn latest_mutation_sequence(&self) -> PyResult<u64> {
+        self.inner.lock().unwrap().latest_mutation_sequence().map_err(to_pyerr)
+    }
+
+    #[pyo3(signature = (put_nodes=vec![], delete_node_ids=vec![], put_edges=vec![], delete_edge_ids=vec![], put_vectors=vec![], delete_vector_ids=vec![], operation_id=None, transaction_id=None, actor=None, base_revision=None, metadata=None))]
+    #[allow(clippy::too_many_arguments)]
     fn apply(
         &self,
         put_nodes: Vec<Bound<'_, PyAny>>,
@@ -524,6 +632,11 @@ impl NativeStore {
         delete_edge_ids: Vec<String>,
         put_vectors: Vec<Bound<'_, PyAny>>,
         delete_vector_ids: Vec<String>,
+        operation_id: Option<String>,
+        transaction_id: Option<String>,
+        actor: Option<String>,
+        base_revision: Option<u64>,
+        metadata: Option<Bound<'_, PyAny>>,
     ) -> PyResult<()> {
         let mut batch = polypack_core::model::ChangeBatch {
             delete_node_ids,
@@ -541,7 +654,15 @@ impl NativeStore {
             let entry: polypack_core::model::VectorEntry = py_to_polypack(&v)?;
             batch.put_vectors.push(entry);
         }
-        self.inner.lock().unwrap().apply(&batch).map_err(to_pyerr)
+        let metadata = metadata.map(|value| py_to_json(&value)).transpose()?;
+        self.inner.lock().unwrap().apply_with_identity(
+            &batch,
+            operation_id.as_deref(),
+            transaction_id.as_deref(),
+            actor.as_deref(),
+            base_revision,
+            metadata,
+        ).map_err(to_pyerr)
     }
 
     fn all_node_ids(&self) -> PyResult<Vec<String>> {

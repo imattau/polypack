@@ -113,7 +113,12 @@ describe('PolyGraph activation', () => {
       score: 1, importance: 0.5, reinforcementCount: 1, lastMeaningfulActivation: now - DAY,
     }))
     // Decayed to 0.5, then +0.5 → 1.0, re-anchored to now.
-    graph.reinforceNode('n1', 0.5)
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(now)
+    try {
+      graph.reinforceNode('n1', 0.5)
+    } finally {
+      clock.mockRestore()
+    }
     const state = graph.getActivationState('n1')!
     expect(state.score).toBeCloseTo(1, 5)
     expect(state.lastMeaningfulActivation).toBe(now)

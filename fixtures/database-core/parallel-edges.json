@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "name": "parallel-edge-identities",
+  "nodes": [
+    { "id": "a", "type": "record", "data": {}, "insertedAt": 1, "updatedAt": 1, "revision": 0 },
+    { "id": "b", "type": "record", "data": {}, "insertedAt": 1, "updatedAt": 1, "revision": 0 }
+  ],
+  "edges": [
+    { "id": "claim-1", "source": "a", "type": "RELATED", "target": "b", "data": { "source": "registry" }, "revision": 0 },
+    { "id": "claim-2", "source": "a", "type": "RELATED", "target": "b", "data": { "source": "archive" }, "revision": 0 }
+  ],
+  "update": { "id": "claim-1", "data": { "source": "registry", "confidence": 0.9 }, "expectedRevision": 0 },
+  "remove": { "id": "claim-2", "expectedRevision": 0 },
+  "expect": { "edgeIds": ["claim-1"], "revision": 1, "confidence": 0.9 }
+}

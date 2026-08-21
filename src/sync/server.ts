@@ -1,8 +1,27 @@
-import type { SyncMessage, SyncOp } from './types.js'
+import type { SyncConflictResult, SyncContext, SyncError, SyncMessage, SyncOp } from './types.js'
+import { SYNC_PROTOCOL_VERSION } from './types.js'
+import type { SyncLogStats, SyncOperationLog } from './log.js'
+import { syncChecksum } from './checksum.js'
+
+export interface SyncServerOptions {
+  protocolVersion?: number
+  maxOps?: number
+  authorize?: (operation: SyncOp, context: SyncContext) => Promise<boolean> | boolean
+  conflict?: (operation: SyncOp, context: SyncContext) => Promise<SyncConflictResult> | SyncConflictResult
+  clientMetadata?: (client: SyncServerClient) => Record<string, unknown> | undefined
+  operationLog?: SyncOperationLog
+  maxBatchOps?: number
+  /** Maximum number of operations queued for durable processing. */
+  maxPendingOps?: number
+}
 
 export type SyncServerClient = {
   send: (msg: SyncMessage) => void
   clientId?: string
+}
+
+export interface SyncSubscriptionOptions {
+  filter?: (operation: SyncOp, context: SyncContext) => boolean
 }
 
 /**
@@ -12,12 +31,49 @@ export type SyncServerClient = {
 export class SyncServer {
   private opLog: SyncOp[] = []
   private seenOps = new Set<string>()
+  private seenOperationIds = new Set<string>()
+  private seenTransactionIds = new Set<string>()
   private clients: SyncServerClient[] = []
+  private clientFilters = new Map<SyncServerClient, SyncSubscriptionOptions['filter']>()
+  private baseCursor = 0
+  private readonly options: SyncServerOptions & { protocolVersion: number; maxOps: number; maxBatchOps: number; maxPendingOps: number }
+  private readyPromise: Promise<void> | null = null
+  private durableQueue: Promise<void> = Promise.resolve()
+  private durableErrors: unknown[] = []
+  private pendingOps = 0
   onOp?: (op: SyncOp) => void
 
+  constructor(options: SyncServerOptions = {}) {
+    this.options = { ...options, protocolVersion: options.protocolVersion ?? SYNC_PROTOCOL_VERSION, maxOps: options.maxOps ?? Number.POSITIVE_INFINITY, maxBatchOps: options.maxBatchOps ?? Number.POSITIVE_INFINITY, maxPendingOps: options.maxPendingOps ?? Number.POSITIVE_INFINITY }
+    if ((this.options.maxOps !== Number.POSITIVE_INFINITY && !Number.isInteger(this.options.maxOps)) || this.options.maxOps < 1) throw new RangeError('maxOps must be a positive integer or Infinity')
+    if ((this.options.maxBatchOps !== Number.POSITIVE_INFINITY && !Number.isInteger(this.options.maxBatchOps)) || this.options.maxBatchOps < 1) throw new RangeError('maxBatchOps must be a positive integer or Infinity')
+    if ((this.options.maxPendingOps !== Number.POSITIVE_INFINITY && !Number.isInteger(this.options.maxPendingOps)) || this.options.maxPendingOps < 1) throw new RangeError('maxPendingOps must be a positive integer or Infinity')
+  }
+
+  /** Load durable server history before accepting requests. */
+  async ready(): Promise<void> {
+    if (!this.options.operationLog) return
+    if (!this.readyPromise) {
+      this.readyPromise = this.options.operationLog.load().then(state => {
+        this.baseCursor = state.baseCursor
+        this.opLog = state.ops.slice(-this.options.maxOps)
+        this.baseCursor += state.ops.length - this.opLog.length
+        this.seenOps = new Set(this.opLog.map(op => `${op.clientId}:${op.seq}`))
+        this.seenOperationIds = new Set(state.operationIds ?? [])
+        this.seenTransactionIds = new Set(state.transactionIds ?? [])
+        for (const op of this.opLog) {
+          if (op.operationId) this.seenOperationIds.add(`${op.clientId}:${op.operationId}`)
+          if (op.transactionId) this.seenTransactionIds.add(`${op.clientId}:${op.transactionId}`)
+        }
+      })
+    }
+    await this.readyPromise
+  }
+
   /** Register a client transport. Returns a function to handle incoming messages. */
-  addClient(handle: SyncServerClient): (msg: SyncMessage) => void {
+  addClient(handle: SyncServerClient, options: SyncSubscriptionOptions = {}): (msg: SyncMessage) => void {
     this.clients.push(handle)
+    this.clientFilters.set(handle, options.filter)
     return (msg: SyncMessage) => this.handleMessage(msg, handle)
   }
 
@@ -26,31 +82,143 @@ export class SyncServer {
     const index = this.clients.indexOf(handle)
     if (index === -1) return false
     this.clients.splice(index, 1)
+    this.clientFilters.delete(handle)
     return true
   }
 
   private handleMessage(msg: SyncMessage, sender: SyncServerClient): void {
+    if (msg.protocolVersion !== undefined && msg.protocolVersion !== this.options.protocolVersion) {
+      sender.send({ type: 'ack', clientId: msg.clientId, fromSeq: msg.fromSeq, ops: [], protocolVersion: this.options.protocolVersion, errors: [{ code: 'protocol_version', message: `Unsupported sync protocol version ${msg.protocolVersion}` }] })
+      return
+    }
     if (msg.type === 'request-snapshot') {
-      const cursorIsValid = msg.fromSeq >= 0 && msg.fromSeq <= this.opLog.length
-      const requestedCursor = cursorIsValid ? msg.fromSeq : 0
-      sender.send({
-        type: requestedCursor === 0 ? 'snapshot' : 'delta',
-        clientId: 'server',
-        fromSeq: requestedCursor,
-        ops: this.opLog.slice(requestedCursor),
-      })
+      if (this.options.operationLog) {
+        void this.ready().then(() => this.sendSnapshot(msg, sender))
+        return
+      }
+      this.sendSnapshot(msg, sender)
       return
     }
     if (msg.type === 'delta') {
-      const broadcastCursor = this.opLog.length
+      if (msg.ops.length > this.options.maxBatchOps) {
+        sender.send({ type: 'ack', clientId: msg.clientId, fromSeq: msg.fromSeq, ops: [], protocolVersion: this.options.protocolVersion, errors: [{ code: 'batch_too_large', message: `Batch contains ${msg.ops.length} operations; maximum is ${this.options.maxBatchOps}` }] })
+        return
+      }
+      if (this.options.authorize || this.options.conflict) {
+        void this.authorizeAndProcess(msg, sender)
+        return
+      }
+      this.processDelta(msg, sender)
+    }
+  }
+
+  private sendSnapshot(msg: SyncMessage, sender: SyncServerClient): void {
+    const cursorIsValid = msg.fromSeq >= this.baseCursor && msg.fromSeq <= this.cursor
+    const requestedCursor = cursorIsValid ? msg.fromSeq : 0
+    const offset = requestedCursor === 0 ? 0 : requestedCursor - this.baseCursor
+    const available = this.opLog.slice(offset)
+    const page = available.slice(0, this.options.maxBatchOps)
+    const filter = this.clientFilters.get(sender)
+    const context: SyncContext = { clientId: sender.clientId ?? msg.clientId, protocolVersion: this.options.protocolVersion, metadata: this.options.clientMetadata?.(sender) }
+    const ops = filter ? page.filter(op => filter(op, context)) : page
+    sender.send({
+      type: requestedCursor === 0 ? 'snapshot' : 'delta',
+      clientId: 'server',
+      fromSeq: requestedCursor,
+      // An expired cursor falls back to the retained history boundary. The
+      // returned cursor must remain global so the client can resume after the
+      // page without replaying or skipping operations.
+      cursor: (requestedCursor === 0 ? this.baseCursor : requestedCursor) + page.length,
+      more: page.length < available.length,
+      ops,
+      checksum: syncChecksum(ops),
+      protocolVersion: this.options.protocolVersion,
+      errors: cursorIsValid ? undefined : [{ code: 'cursor_expired', message: 'Requested cursor is no longer available' }],
+    })
+  }
+
+  private async authorizeAndProcess(msg: SyncMessage, sender: SyncServerClient): Promise<void> {
+    const accepted: SyncOp[] = []
+    const errors: SyncError[] = []
+    const context: SyncContext = { clientId: msg.clientId, protocolVersion: msg.protocolVersion ?? this.options.protocolVersion, metadata: this.options.clientMetadata?.(sender) }
+    const groups = new Map<string, SyncOp[]>()
+    msg.ops.forEach((op, index) => {
+      const key = op.transactionId ? `tx:${op.clientId}:${op.transactionId}` : `op:${index}`
+      const group = groups.get(key) ?? []
+      group.push(op)
+      groups.set(key, group)
+    })
+    for (const group of groups.values()) {
+      const groupErrors: SyncError[] = []
+      for (const op of group) {
+        if (this.options.authorize && !(await this.options.authorize(op, context))) {
+          groupErrors.push({ code: 'unauthorized', message: `Operation ${op.operationId ?? `${op.clientId}:${op.seq}`} was not authorized`, operationId: op.operationId })
+          continue
+        }
+        if (this.options.conflict) {
+          const result = await this.options.conflict(op, context)
+          const rejected = result === false || (typeof result === 'object' && !result.ok)
+          if (rejected) {
+            const message = typeof result === 'object' && result.message ? result.message : `Operation ${op.operationId ?? `${op.clientId}:${op.seq}`} conflicts with current state`
+            groupErrors.push({ code: 'conflict', message, operationId: op.operationId })
+          }
+        }
+      }
+      if (groupErrors.length > 0) errors.push(...groupErrors)
+      else accepted.push(...group)
+    }
+    this.processDelta({ ...msg, ops: accepted }, sender, errors)
+  }
+
+  private processDelta(msg: SyncMessage, sender: SyncServerClient, errors: SyncError[] = []): void {
+    if (this.options.operationLog) {
+      if (this.pendingOps + msg.ops.length > this.options.maxPendingOps) {
+        sender.send({ type: 'ack', clientId: msg.clientId, fromSeq: msg.fromSeq, ops: [], protocolVersion: this.options.protocolVersion, errors: [{ code: 'pending_too_large', message: `Durable sync queue is full; maximum pending operations is ${this.options.maxPendingOps}` }] })
+        return
+      }
+      this.pendingOps += msg.ops.length
+      const run = this.durableQueue.then(async () => {
+        try {
+          await this.processDurableDelta(msg, sender, errors)
+        } finally {
+          this.pendingOps -= msg.ops.length
+        }
+      })
+      this.durableQueue = run.catch(error => {
+        this.durableErrors.push(error)
+        sender.send({
+          type: 'ack',
+          clientId: msg.clientId,
+          fromSeq: msg.fromSeq,
+          ops: [],
+          protocolVersion: this.options.protocolVersion,
+          errors: [{ code: 'persistence_error', message: error instanceof Error ? error.message : String(error) }],
+        })
+      })
+      return
+    }
+    this.processInMemoryDelta(msg, sender, errors)
+  }
+
+  private processInMemoryDelta(msg: SyncMessage, sender: SyncServerClient, errors: SyncError[] = []): void {
+      const broadcastCursor = this.cursor
       const accepted: SyncOp[] = []
+      const acceptedTransactions = new Set<string>()
       for (const op of msg.ops) {
         const key = `${op.clientId}:${op.seq}`
-        if (this.seenOps.has(key)) continue
+        const operationKey = op.operationId ? `${op.clientId}:${op.operationId}` : undefined
+        const transactionKey = op.transactionId ? `${op.clientId}:${op.transactionId}` : undefined
+        if (this.seenOps.has(key) || (operationKey && this.seenOperationIds.has(operationKey)) || (transactionKey && this.seenTransactionIds.has(transactionKey) && !acceptedTransactions.has(transactionKey))) continue
         this.seenOps.add(key)
+        if (operationKey) this.seenOperationIds.add(operationKey)
+        if (transactionKey) { this.seenTransactionIds.add(transactionKey); acceptedTransactions.add(transactionKey) }
         this.opLog.push(op)
         accepted.push(op)
         this.onOp?.(op)
+        while (this.opLog.length > this.options.maxOps) {
+          this.forgetOperation(this.opLog.shift()!)
+          this.baseCursor++
+        }
       }
       const acknowledgedSeq = msg.ops.reduce((max, op) => Math.max(max, op.seq), msg.fromSeq)
       sender.send({
@@ -58,18 +226,97 @@ export class SyncServer {
         clientId: msg.clientId,
         fromSeq: acknowledgedSeq,
         ops: [],
+        protocolVersion: this.options.protocolVersion,
+        errors: errors.length ? errors : undefined,
       })
       // Broadcast to all OTHER clients
       for (const client of accepted.length === 0 ? [] : this.clients) {
         if (client === sender) continue
+        const filter = this.clientFilters.get(client)
+        const context: SyncContext = { clientId: client.clientId ?? 'unknown', protocolVersion: this.options.protocolVersion }
+        const visible = filter ? accepted.filter(op => filter(op, context)) : accepted
+        if (visible.length === 0) continue
         client.send({
           type: 'delta',
           clientId: 'server',
           fromSeq: broadcastCursor,
-          ops: accepted,
+          cursor: this.cursor,
+          ops: visible,
+          checksum: syncChecksum(visible),
+          protocolVersion: this.options.protocolVersion,
         })
       }
+  }
+
+  private async processDurableDelta(msg: SyncMessage, sender: SyncServerClient, errors: SyncError[] = []): Promise<void> {
+    await this.ready()
+    const broadcastCursor = this.cursor
+    const accepted: SyncOp[] = []
+    const acceptedTransactions = new Set<string>()
+    for (const op of msg.ops) {
+      const key = `${op.clientId}:${op.seq}`
+      const operationKey = op.operationId ? `${op.clientId}:${op.operationId}` : undefined
+      const transactionKey = op.transactionId ? `${op.clientId}:${op.transactionId}` : undefined
+      if (this.seenOps.has(key) || (operationKey && this.seenOperationIds.has(operationKey)) || (transactionKey && this.seenTransactionIds.has(transactionKey) && !acceptedTransactions.has(transactionKey))) continue
+      accepted.push(op)
+      if (transactionKey) acceptedTransactions.add(transactionKey)
     }
+    const log = this.options.operationLog!
+    if (accepted.length > 0) {
+      if (log.appendBatch) await log.appendBatch(accepted)
+      else for (const op of accepted) await log.append(op)
+    }
+    for (const op of accepted) {
+      const key = `${op.clientId}:${op.seq}`
+      const operationKey = op.operationId ? `${op.clientId}:${op.operationId}` : undefined
+      const transactionKey = op.transactionId ? `${op.clientId}:${op.transactionId}` : undefined
+      this.seenOps.add(key)
+      if (operationKey) this.seenOperationIds.add(operationKey)
+      if (transactionKey) this.seenTransactionIds.add(transactionKey)
+      this.opLog.push(op)
+      this.onOp?.(op)
+      while (this.opLog.length > this.options.maxOps) {
+        this.forgetOperation(this.opLog.shift()!)
+        this.baseCursor++
+      }
+    }
+    if (log.compact && this.baseCursor > 0) await log.compact(this.baseCursor)
+    const acknowledgedSeq = msg.ops.reduce((max, op) => Math.max(max, op.seq), msg.fromSeq)
+    sender.send({ type: 'ack', clientId: msg.clientId, fromSeq: acknowledgedSeq, ops: [], protocolVersion: this.options.protocolVersion, errors: errors.length ? errors : undefined })
+    for (const client of accepted.length === 0 ? [] : this.clients) {
+      if (client === sender) continue
+      const filter = this.clientFilters.get(client)
+      const context: SyncContext = { clientId: client.clientId ?? 'unknown', protocolVersion: this.options.protocolVersion }
+      const visible = filter ? accepted.filter(op => filter(op, context)) : accepted
+      if (visible.length === 0) continue
+      client.send({ type: 'delta', clientId: 'server', fromSeq: broadcastCursor, cursor: this.cursor, ops: visible, checksum: syncChecksum(visible), protocolVersion: this.options.protocolVersion })
+    }
+  }
+
+  /** Wait until durable submissions accepted so far have reached the operation log. */
+  async flush(): Promise<void> {
+    await this.ready()
+    await this.durableQueue
+    const error = this.durableErrors.shift()
+    if (error !== undefined) throw error
+  }
+
+  /** Inspect cursor retention and deduplication state for accepted operations. */
+  async logStats(): Promise<SyncLogStats> {
+    await this.flush()
+    if (this.options.operationLog?.stats) return this.options.operationLog.stats()
+    const operationIds = new Set(this.opLog.flatMap(op => op.operationId ? [`${op.clientId}:${op.operationId}`] : []))
+    const transactionIds = new Set(this.opLog.flatMap(op => op.transactionId ? [`${op.clientId}:${op.transactionId}`] : []))
+    return { baseCursor: this.baseCursor, cursor: this.cursor, operationCount: this.opLog.length, operationIdentityCount: operationIds.size, transactionIdentityCount: transactionIds.size }
+  }
+
+  private forgetOperation(op: SyncOp): void {
+    // Only the seq-keyed entry is bounded by the ring buffer. `operationId`
+    // (like `transactionId`, which was already never removed here) must stay
+    // recognized forever so a delayed retry after compaction is still deduped
+    // instead of being re-accepted and re-broadcast as a duplicate mutation.
+    // Matches the Rust and Python sync implementations.
+    this.seenOps.delete(`${op.clientId}:${op.seq}`)
   }
 
   /** Every operation the server has accepted, in order. */
@@ -79,6 +326,6 @@ export class SyncServer {
 
   /** Cursor immediately after the latest accepted server operation. */
   get cursor(): number {
-    return this.opLog.length
+    return this.baseCursor + this.opLog.length
   }
 }

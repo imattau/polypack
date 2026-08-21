@@ -1,0 +1,16 @@
+{
+  "results": [
+    {
+      "lang": "python",
+      "count": 20000,
+      "syncOps": 5000,
+      "writeMs": 4423.476772382855,
+      "writeOpsPerSec": 4521.330398944612,
+      "mutationCount": 41,
+      "mutationReplayMs": 2180.9214018285275,
+      "recoveryMs": 1402.5369142182171,
+      "syncSubmitMs": 16.567951068282127,
+      "syncOpsPerSec": 301787.4678282975
+    }
+  ]
+}

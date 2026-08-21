@@ -368,6 +368,7 @@ mod tests {
             vector: None,
             inserted_at: 1,
             updated_at: 1,
+            revision: 0,
             activation: None,
         }
     }
@@ -380,6 +381,7 @@ mod tests {
             edge_type: edge_type.into(),
             data: None,
             created_at: 1,
+            revision: 0,
         }
     }
 

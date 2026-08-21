@@ -392,9 +392,17 @@ export interface NativeChangeBatch {
 export class NativeStore {
   private inner: NativeStoreBinding
 
-  constructor(directory: string, compactThreshold?: number) {
+  constructor(directory: string, compactThreshold?: number, readOnly = false) {
     assertAvailable()
-    this.inner = new native.NativeStore(directory, compactThreshold)
+    this.inner = new native.NativeStore(directory, compactThreshold, readOnly)
+  }
+
+  /** Restore and validate a native store from a directory backup. */
+  static restore(source: string, destination: string, compactThreshold?: number): NativeStore {
+    assertAvailable()
+    const restored = Object.create(NativeStore.prototype) as NativeStore
+    restored.inner = callNative(() => native.restoreStore(source, destination, compactThreshold))
+    return restored
   }
 
   apply(changes: NativeChangeBatch): void {
@@ -413,6 +421,31 @@ export class NativeStore {
   /** Query persisted nodes with a `PersistedNodeQuery`-shaped object. */
   queryNodes(query: Record<string, unknown>): Array<Record<string, unknown>> {
     return callNative(() => this.inner.queryNodes(query))
+  }
+
+  /** Define or replace a persisted node-data index. */
+  defineIndex(definition: Record<string, unknown>): void {
+    callNative(() => this.inner.defineIndex(definition))
+  }
+
+  /** Drop a persisted node-data index. */
+  dropIndex(name: string): boolean {
+    return callNative(() => this.inner.dropIndex(name))
+  }
+
+  /** Return persisted index definitions. */
+  indexDefinitions(): Array<Record<string, unknown>> {
+    return callNative(() => this.inner.indexDefinitions())
+  }
+
+  /** Register or replace a node-type schema definition. */
+  registerNodeType(definition: Record<string, unknown>): void {
+    callNative(() => this.inner.registerNodeType(definition))
+  }
+
+  /** Register or replace an edge-type schema definition. */
+  registerEdgeType(definition: Record<string, unknown>): void {
+    callNative(() => this.inner.registerEdgeType(definition))
   }
 
   /** Count persisted nodes matching a `PersistedNodeQuery`-shaped object. */
@@ -444,6 +477,85 @@ export class NativeStore {
 
   compact(): void {
     callNative(() => this.inner.compact())
+  }
+
+  /** Force a durable checkpoint and compact the recovery WAL. */
+  checkpoint(): void {
+    callNative(() => this.inner.checkpoint())
+  }
+
+  /** Validate persisted framing, records, references, vectors, and indexes. */
+  verify(): {
+    ok: boolean
+    errors: string[]
+    nodeCount: number
+    edgeCount: number
+    vectorCount: number
+    mutationCount: number
+  } {
+    return callNative(() => this.inner.verify()) as {
+      ok: boolean
+      errors: string[]
+      nodeCount: number
+      edgeCount: number
+      vectorCount: number
+      mutationCount: number
+    }
+  }
+
+  /** Report the guarantees provided by the native filesystem adapter. */
+  capabilities(): {
+    atomicBatches: boolean
+    transactions: boolean
+    fsync: boolean
+    secondaryIndexes: boolean
+    snapshots: boolean
+    changeFeed: boolean
+    concurrentWriters: boolean
+    vectorSearch: 'none' | 'exact' | 'ann'
+  } {
+    return callNative(() => this.inner.capabilities()) as {
+      atomicBatches: boolean
+      transactions: boolean
+      fsync: boolean
+      secondaryIndexes: boolean
+      snapshots: boolean
+      changeFeed: boolean
+      concurrentWriters: boolean
+      vectorSearch: 'none' | 'exact' | 'ann'
+    }
+  }
+
+  /** Return operational counters for the native persistence store. */
+  stats(): {
+    persistedNodeCount: number
+    edgeCount: number
+    vectorCount: number
+    mutationCount: number
+    walBytes: number
+  } {
+    return callNative(() => this.inner.stats()) as {
+      persistedNodeCount: number
+      edgeCount: number
+      vectorCount: number
+      mutationCount: number
+      walBytes: number
+    }
+  }
+
+  /** Read durable logical mutations after a sequence cursor. */
+  mutationLogSince(sequence: bigint, limit?: number): Array<Record<string, unknown>> {
+    return callNative(() => this.inner.mutationLogSince(sequence.toString(), limit))
+  }
+
+  /** Return the highest durable logical mutation sequence. */
+  latestMutationSequence(): bigint {
+    return BigInt(callNative(() => this.inner.latestMutationSequence()))
+  }
+
+  /** Create a consistent checkpointed directory backup. */
+  backup(destination: string): void {
+    callNative(() => this.inner.backup(destination))
   }
 
   close(): void {

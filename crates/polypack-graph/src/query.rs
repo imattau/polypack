@@ -8,15 +8,26 @@
 //! `GraphQuery` directly ports TS's reference algorithm (there is nothing to
 //! bridge to or fall back from).
 
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+use std::time::Instant;
 
 use polypack_core::activation::{activation_score_of, DEFAULT_ACTIVATION};
 use polypack_core::query::Direction;
 use polypack_core::vector::cosine;
-use polypack_core::Node;
+use polypack_core::{Node, PolypackError, Result};
 
 use crate::edge::EdgeEntry;
-use crate::graph::now_millis;
+use crate::graph::{now_millis, IndexDefinition, QueryMetrics};
+use crate::persisted_query::QueryExplain;
+
+fn query_field_value(attributes: &HashMap<String, serde_json::Value>, field: &str) -> serde_json::Value {
+    attributes
+        .get(field)
+        .or_else(|| attributes.get(field.strip_prefix("data.").unwrap_or(field)))
+        .cloned()
+        .unwrap_or(serde_json::Value::Null)
+}
 
 /// A `join` predicate closure: `Some` to filter by the connected node,
 /// `None` to require only that a connection exists.
@@ -98,6 +109,9 @@ pub struct GraphQuery<'a> {
     nodes: &'a HashMap<String, Node>,
     edges: &'a HashMap<String, HashMap<String, EdgeEntry>>,
     node_to_edge: &'a HashMap<String, HashSet<String>>,
+    indexes: &'a HashMap<String, IndexDefinition>,
+    secondary_indexes: &'a HashMap<String, HashMap<String, HashSet<String>>>,
+    metrics: &'a RefCell<QueryMetrics>,
 
     node_types: Option<Vec<String>>,
     attributes: HashMap<String, serde_json::Value>,
@@ -120,11 +134,17 @@ impl<'a> GraphQuery<'a> {
         nodes: &'a HashMap<String, Node>,
         edges: &'a HashMap<String, HashMap<String, EdgeEntry>>,
         node_to_edge: &'a HashMap<String, HashSet<String>>,
+        indexes: &'a HashMap<String, IndexDefinition>,
+        secondary_indexes: &'a HashMap<String, HashMap<String, HashSet<String>>>,
+        metrics: &'a RefCell<QueryMetrics>,
     ) -> Self {
         Self {
             nodes,
             edges,
             node_to_edge,
+            indexes,
+            secondary_indexes,
+            metrics,
             node_types: None,
             attributes: HashMap::new(),
             attribute_ranges: HashMap::new(),
@@ -217,6 +237,73 @@ impl<'a> GraphQuery<'a> {
     pub fn similar_to(mut self, vector: Vec<f64>, threshold: f64, top_k: Option<usize>) -> Self {
         self.similarity = Some(SimilaritySpec { vector, threshold, top_k });
         self
+    }
+
+    /// Describe the hot-query stages without materializing results.
+    pub fn explain(&self) -> QueryExplain {
+        let selected = self.selected_indexes();
+        let indexes: Vec<String> = selected.iter().map(|definition| definition.name.clone()).collect();
+        let index = indexes.first().cloned().or_else(|| self.node_types.as_ref().filter(|types| !types.is_empty()).map(|_| "type-index".to_string()));
+        let mut stages: Vec<String> = if indexes.is_empty() {
+            vec![if index.as_deref() == Some("type-index") { "type-index".to_string() } else { "record-scan".to_string() }]
+        } else {
+            indexes.iter().map(|name| format!("property-index({name})")).collect()
+        };
+        if indexes.len() > 1 {
+            stages.push(format!("index-intersection({})", indexes.len()));
+        }
+        if let Some(types) = &self.node_types {
+            if !types.is_empty() {
+                stages.push(format!("type-filter({})", types.join(",")));
+            }
+        }
+        if !self.attributes.is_empty() || !self.attribute_ranges.is_empty() {
+            stages.push("property-filter".to_string());
+        }
+        if !self.join_filters.is_empty() {
+            stages.push(format!("join(count={})", self.join_filters.len()));
+        }
+        if !self.traversal_steps.is_empty() {
+            let depth = self.traversal_steps.iter().map(|step| step.depth).max().unwrap_or(0);
+            stages.push(format!("traversal(depth={depth})"));
+        }
+        if let Some((field, direction)) = &self.order_by {
+            stages.push(format!("order({field},{direction:?})").to_lowercase());
+        }
+        if let Some(limit) = self.limit {
+            stages.push(format!("limit({limit})"));
+        }
+        let loaded_records = self.nodes.len();
+        QueryExplain {
+            index,
+            indexes,
+            stages,
+            loaded_records,
+            estimated_cost: (loaded_records as f64 * if selected.is_empty() { 1.0 } else { 0.25 / selected.len() as f64 }).max(1.0),
+        }
+    }
+
+    /// Materialize results while enforcing traversal and result limits.
+    pub fn to_array_limited(&self, limits: &crate::QueryResourceLimits) -> Result<Vec<Node>> {
+        for step in &self.traversal_steps {
+            if let Some(max_depth) = limits.max_traversal_depth {
+                if step.depth > max_depth {
+                    return Err(PolypackError::ResourceLimit { name: "maxTraversalDepth".into(), limit: max_depth });
+                }
+            }
+        }
+        let results = self.to_array();
+        if let Some(max_nodes) = limits.max_nodes_visited {
+            if results.len() > max_nodes {
+                return Err(PolypackError::ResourceLimit { name: "maxNodesVisited".into(), limit: max_nodes });
+            }
+        }
+        if let Some(max_results) = limits.max_results {
+            if results.len() > max_results {
+                return Err(PolypackError::ResourceLimit { name: "maxResults".into(), limit: max_results });
+            }
+        }
+        Ok(results)
     }
 
     /// Constrain results to nodes connected via `edge_type`. Unlike
@@ -349,10 +436,47 @@ impl<'a> GraphQuery<'a> {
             return ids.iter().filter_map(|id| self.nodes.get(id)).collect();
         }
 
+        let selected = self.selected_indexes();
+        if !selected.is_empty() {
+            let mut candidate_sets = Vec::new();
+            for index in selected {
+                if index.fields.iter().all(|field| self.attributes.contains_key(field) || self.attributes.contains_key(field.strip_prefix("data.").unwrap_or(field))) {
+                    let values = index.fields.iter().map(|field| query_field_value(&self.attributes, field)).collect::<Vec<_>>();
+                    let key = serde_json::to_string(&values).expect("JSON index key serialization cannot fail");
+                    candidate_sets.push(self.secondary_indexes.get(&index.name).and_then(|buckets| buckets.get(&key)).cloned().unwrap_or_default());
+                } else if index.fields.len() == 1 {
+                    let field = &index.fields[0];
+                    let range = &self.attribute_ranges[field];
+                    let ids: HashSet<String> = self.secondary_indexes.get(&index.name).into_iter().flat_map(|buckets| buckets.iter()).filter_map(|(encoded, bucket)| {
+                        let values = serde_json::from_str::<Vec<serde_json::Value>>(encoded).ok()?;
+                        let value = values.first()?.as_f64()?;
+                        if range.above.is_some_and(|above| value <= above) || range.below.is_some_and(|below| value >= below) { return None; }
+                        Some(bucket.iter().cloned())
+                    }).flatten().collect();
+                    candidate_sets.push(ids);
+                }
+            }
+            if let Some((first, rest)) = candidate_sets.split_first() {
+                let ids = rest.iter().fold(first.clone(), |mut ids, candidate| { ids.retain(|id| candidate.contains(id)); ids });
+                return ids.iter().filter_map(|id| self.nodes.get(id)).collect();
+            }
+        }
+
         match &self.node_types {
             Some(types) => self.nodes.values().filter(|n| types.iter().any(|t| t == &n.node_type)).collect(),
             None => self.nodes.values().collect(),
         }
+    }
+
+    fn selected_indexes(&self) -> Vec<&IndexDefinition> {
+        let mut selected: Vec<&IndexDefinition> = self.indexes.values().filter(|definition| {
+            let compatible_type = self.node_types.as_ref().is_none_or(|types| definition.node_type.as_ref().is_none_or(|node_type| types.len() == 1 && types[0] == *node_type));
+            let equality = !definition.fields.is_empty() && definition.fields.iter().all(|field| self.attributes.contains_key(field) || self.attributes.contains_key(field.strip_prefix("data.").unwrap_or(field)));
+            let range = definition.fields.len() == 1 && self.attribute_ranges.contains_key(&definition.fields[0]);
+            compatible_type && (equality || range)
+        }).collect();
+        selected.sort_by(|left, right| left.name.cmp(&right.name));
+        selected
     }
 
     fn bfs(&self, seeds: &[String], step: &TraversalStep) -> HashSet<String> {
@@ -418,8 +542,12 @@ impl<'a> GraphQuery<'a> {
     /// Materialize matched nodes as detached snapshots (cloned out of the
     /// graph's hot working set). Mirrors `GraphQuery.toArray`.
     pub fn to_array(&self) -> Vec<Node> {
-        let mut results: Vec<&Node> = self.source_nodes().into_iter().filter(|n| self.matches(n)).collect();
+        let started = Instant::now();
+        let source = self.source_nodes();
+        let scanned_records = source.len();
+        let mut results: Vec<&Node> = source.into_iter().filter(|n| self.matches(n)).collect();
         if results.is_empty() {
+            self.record_metrics(started, scanned_records);
             return Vec::new();
         }
 
@@ -479,7 +607,20 @@ impl<'a> GraphQuery<'a> {
             results.truncate(limit);
         }
 
-        results.into_iter().cloned().collect()
+        let output = results.into_iter().cloned().collect();
+        self.record_metrics(started, scanned_records);
+        output
+    }
+
+    fn record_metrics(&self, started: Instant, scanned_records: usize) {
+        let selected = self.selected_indexes();
+        let mut metrics = self.metrics.borrow_mut();
+        metrics.count += 1;
+        metrics.duration_ms += started.elapsed().as_secs_f64() * 1000.0;
+        metrics.scanned_records += scanned_records;
+        for index in selected {
+            *metrics.index_usage.entry(index.name.clone()).or_default() += 1;
+        }
     }
 
     pub fn first(&self) -> Option<Node> {
@@ -681,18 +822,21 @@ mod tests {
         for (k, v) in data {
             map.insert((*k).to_string(), v.clone());
         }
-        Node { id: id.to_string(), node_type: node_type.to_string(), data: map, vector: None, inserted_at: 1, updated_at: 1, activation: None }
+        Node { id: id.to_string(), node_type: node_type.to_string(), data: map, vector: None, inserted_at: 1, updated_at: 1, revision: 0, activation: None }
     }
 
     struct Fixture {
         nodes: HashMap<String, Node>,
         edges: HashMap<String, HashMap<String, EdgeEntry>>,
         node_to_edge: HashMap<String, HashSet<String>>,
+        indexes: HashMap<String, IndexDefinition>,
+        secondary_indexes: HashMap<String, HashMap<String, HashSet<String>>>,
+        metrics: RefCell<QueryMetrics>,
     }
 
     impl Fixture {
         fn new() -> Self {
-            Self { nodes: HashMap::new(), edges: HashMap::new(), node_to_edge: HashMap::new() }
+            Self { nodes: HashMap::new(), edges: HashMap::new(), node_to_edge: HashMap::new(), indexes: HashMap::new(), secondary_indexes: HashMap::new(), metrics: RefCell::new(QueryMetrics::default()) }
         }
 
         fn add(&mut self, node: Node) -> &mut Self {
@@ -705,6 +849,8 @@ mod tests {
             self.edges.entry(source.to_string()).or_default().insert(
                 inner,
                 EdgeEntry {
+                    id: format!("{source}::{edge_type}::{target}"),
+                    revision: 0,
                     target: target.to_string(),
                     edge_type: edge_type.to_string(),
                     data: None,
@@ -716,7 +862,7 @@ mod tests {
         }
 
         fn query(&self) -> GraphQuery<'_> {
-            GraphQuery::new(&self.nodes, &self.edges, &self.node_to_edge)
+            GraphQuery::new(&self.nodes, &self.edges, &self.node_to_edge, &self.indexes, &self.secondary_indexes, &self.metrics)
         }
     }
 

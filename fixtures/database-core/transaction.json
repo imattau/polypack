@@ -1,0 +1,60 @@
+{
+  "schemaVersion": 1,
+  "name": "transaction-read-your-writes",
+  "setup": {
+    "nodes": [
+      {
+        "id": "person-1",
+        "type": "person",
+        "data": { "count": 1 },
+        "insertedAt": 1,
+        "updatedAt": 1,
+        "revision": 0
+      }
+    ]
+  },
+  "transaction": {
+    "patch": {
+      "id": "person-1",
+      "increment": { "data.count": 1 },
+      "expectedRevision": 0
+    },
+    "addNode": {
+      "id": "person-2",
+      "type": "person",
+      "data": { "count": 0 },
+      "insertedAt": 2,
+      "updatedAt": 2,
+      "revision": 0
+    },
+    "addEdge": {
+      "source": "person-1",
+      "type": "RELATED_TO",
+      "target": "person-2"
+    },
+    "readYourWrites": { "id": "person-1", "count": 2 }
+  },
+  "rollback": {
+    "patch": {
+      "id": "person-1",
+      "set": { "data.count": 99 },
+      "expectedRevision": 1
+    },
+    "addNode": {
+      "id": "temporary",
+      "type": "person",
+      "data": {},
+      "insertedAt": 3,
+      "updatedAt": 3,
+      "revision": 0
+    }
+  },
+  "expect": {
+    "nodeCount": 2,
+    "person1Count": 2,
+    "person1Revision": 1,
+    "edgeTargets": ["person-2"],
+    "rollbackCount": 2,
+    "rollbackRevision": 1
+  }
+}

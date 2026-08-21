@@ -115,17 +115,52 @@ export interface NativeChangeBatch {
  * TypeScript `BinaryStoreAdapter`.
  */
 export class NativeStore {
-  constructor(directory: string, compactThreshold?: number)
+  constructor(directory: string, compactThreshold?: number, readOnly?: boolean)
+  static restore(source: string, destination: string, compactThreshold?: number): NativeStore
   apply(changes: NativeChangeBatch): void
   nodeIds(): string[]
   nodeCount(): number
   queryNodes(query: Record<string, unknown>): Array<Record<string, unknown>>
   countNodes(query: Record<string, unknown>): number
+  defineIndex(definition: Record<string, unknown>): void
+  dropIndex(name: string): boolean
+  indexDefinitions(): Array<Record<string, unknown>>
+  registerNodeType(definition: Record<string, unknown>): void
+  registerEdgeType(definition: Record<string, unknown>): void
   getEdgesBySources(sources: string[], edgeType?: string): Array<Record<string, unknown>>
   getEdgesByTargets(targets: string[], edgeType?: string): Array<Record<string, unknown>>
   getNode(id: string): Record<string, unknown> | undefined
   allEdges(): Array<Record<string, unknown>>
   allVectors(): Array<[string, number[]]>
   compact(): void
+  checkpoint(): void
+  verify(): {
+    ok: boolean
+    errors: string[]
+    nodeCount: number
+    edgeCount: number
+    vectorCount: number
+    mutationCount: number
+  }
+  capabilities(): {
+    atomicBatches: boolean
+    transactions: boolean
+    fsync: boolean
+    secondaryIndexes: boolean
+    snapshots: boolean
+    changeFeed: boolean
+    concurrentWriters: boolean
+    vectorSearch: 'none' | 'exact' | 'ann'
+  }
+  stats(): {
+    persistedNodeCount: number
+    edgeCount: number
+    vectorCount: number
+    mutationCount: number
+    walBytes: number
+  }
+  mutationLogSince(sequence: bigint, limit?: number): Array<Record<string, unknown>>
+  latestMutationSequence(): bigint
+  backup(destination: string): void
   close(): void
 }

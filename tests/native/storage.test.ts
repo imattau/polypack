@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll } from 'vitest'
-import { mkdtempSync, rmSync, readdirSync } from 'node:fs'
+import { mkdtempSync, rmSync, readdirSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { NativeStore, isNativeAvailable } from '../../packages/node-native/src/index'
@@ -33,6 +33,14 @@ describe('NativeStore', () => {
     const dir = tempDir('roundtrip')
     try {
       const store = new NativeStore(dir)
+      expect(store.capabilities()).toMatchObject({
+        atomicBatches: true,
+        fsync: true,
+        snapshots: true,
+        concurrentWriters: false,
+        vectorSearch: 'exact',
+      })
+      store.defineIndex({ name: 'title', fields: ['title'], nodeType: 'doc', unique: true })
       store.apply({
         putNodes: [
           { ...node('n1'), vector: [0.1, 0.2, 0.3] },
@@ -43,6 +51,7 @@ describe('NativeStore', () => {
       store.close()
 
       const reopened = new NativeStore(dir)
+      expect(reopened.indexDefinitions()).toHaveLength(1)
       expect(reopened.nodeIds().sort()).toEqual(['n1', 'n2'])
       expect(reopened.getNode('n1')).toMatchObject({ vector: [0.1, 0.2, 0.3] })
       expect(reopened.allEdges()).toHaveLength(1)
@@ -59,6 +68,56 @@ describe('NativeStore', () => {
       const store = new NativeStore(dir)
       store.close()
       expect(() => store.nodeIds()).toThrow(/closed/)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('supports read-only opening without a writer lock', () => {
+    if (!available) return
+    const dir = tempDir('read-only')
+    try {
+      const writer = new NativeStore(dir)
+      writer.apply({ putNodes: [node('read-only-node')] })
+      writer.close()
+      const reader = new NativeStore(dir, undefined, true)
+      expect(reader.nodeIds()).toEqual(['read-only-node'])
+      expect(() => reader.apply({ putNodes: [node('blocked')] })).toThrow(/read-only/)
+      reader.close()
+      const reopened = new NativeStore(dir)
+      expect(reopened.nodeIds()).toEqual(['read-only-node'])
+      reopened.close()
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('rejects a second writer for the same directory', () => {
+    if (!available) return
+    const dir = tempDir('lock')
+    try {
+      const first = new NativeStore(dir)
+      expect(() => new NativeStore(dir)).toThrow(/already locked/)
+      first.close()
+      const reopened = new NativeStore(dir)
+      reopened.close()
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('recovers an abandoned stale lock', () => {
+    if (!available) return
+    const dir = tempDir('stale-lock')
+    try {
+      writeFileSync(join(dir, 'store.lock'), JSON.stringify({
+        pid: 999999,
+        startedAt: Date.now() - 25 * 60 * 60 * 1000,
+        token: 'abandoned',
+      }))
+      const store = new NativeStore(dir)
+      expect(store.nodeIds()).toEqual([])
+      store.close()
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }
@@ -115,6 +174,84 @@ describe('cross-language byte compatibility', () => {
       expect(files).toContain('snapshot.msgpack')
     } finally {
       rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('checkpoints and verifies durable state', () => {
+    if (!available) return
+    const dir = tempDir('verify')
+    try {
+      const store = new NativeStore(dir)
+      expect(store.stats()).toMatchObject({ persistedNodeCount: 0, edgeCount: 0, vectorCount: 0 })
+      store.apply({
+        putNodes: [node('n1'), node('n2')],
+        putEdges: [{ id: 'n1::LINKS::n2', source: 'n1', target: 'n2', type: 'LINKS', data: null, createdAt: 1 }],
+      })
+      expect(store.stats()).toMatchObject({ persistedNodeCount: 2, edgeCount: 1, vectorCount: 0, mutationCount: 1 })
+      expect(store.latestMutationSequence()).toBe(1n)
+      expect(store.mutationLogSince(0n, 1)).toHaveLength(1)
+      expect(store.mutationLogSince(1n)).toEqual([])
+      expect(store.verify()).toMatchObject({ ok: true, nodeCount: 0, edgeCount: 0 })
+      store.checkpoint()
+      expect(store.verify()).toMatchObject({ ok: true, nodeCount: 2, edgeCount: 1 })
+      store.close()
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('enforces persisted-query resource limits', () => {
+    if (!available) return
+    const dir = tempDir('query-limits')
+    try {
+      const store = new NativeStore(dir)
+      store.apply({ putNodes: [node('a'), node('b')] })
+      expect(() => store.queryNodes({ maxNodesVisited: 1 })).toThrow(/resource_limit/)
+      expect(() => store.queryNodes({ maxResultSize: 1 })).toThrow(/resource_limit/)
+      store.close()
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('enforces native schema hooks before persistence', () => {
+    if (!available) return
+    const dir = tempDir('schema')
+    try {
+      const store = new NativeStore(dir)
+      store.registerNodeType({ nodeType: 'person', requiredFields: ['name'], dataTypes: { age: 'integer' } })
+      store.registerEdgeType({ edgeType: 'PARENT_OF', sourceTypes: ['person'], targetTypes: ['person'], cardinality: 'many-to-many' })
+      expect(() => store.apply({ putNodes: [{ ...node('p1'), type: 'person', data: { age: 1 } }] })).toThrow(/required field name/)
+      store.apply({ putNodes: [{ ...node('p1'), type: 'person', data: { name: 'A', age: 1 } }] })
+      expect(() => store.apply({ putEdges: [{ id: 'e1', source: 'p1', target: 'missing', type: 'PARENT_OF', data: null, createdAt: 1 }] })).toThrow(/target node is missing/)
+      store.close()
+      const reopened = new NativeStore(dir)
+      expect(() => reopened.apply({ putNodes: [{ ...node('p2'), type: 'person', data: { name: 'B', age: 'wrong' } }] })).toThrow(/must be integer/)
+      reopened.close()
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('creates a restorable directory backup', () => {
+    if (!available) return
+    const dir = tempDir('backup-source')
+    const backup = tempDir('backup-destination')
+    const restoredDir = tempDir('backup-restored')
+    try {
+      const store = new NativeStore(dir)
+      store.apply({ putNodes: [node('backup-node')] })
+      store.backup(backup)
+      store.close()
+
+      const restored = NativeStore.restore(backup, restoredDir)
+      expect(restored.nodeIds()).toEqual(['backup-node'])
+      expect(restored.verify()).toMatchObject({ ok: true, nodeCount: 1 })
+      restored.close()
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+      rmSync(backup, { recursive: true, force: true })
+      rmSync(restoredDir, { recursive: true, force: true })
     }
   })
 })

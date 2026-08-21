@@ -5,6 +5,7 @@ export class OpLog {
   private ops: SyncOp[] = []
   private nextSeq = 1
   readonly clientId: string
+  onChange?: () => void
 
   constructor(clientId: string, existing?: SyncOp[]) {
     this.clientId = clientId
@@ -15,15 +16,18 @@ export class OpLog {
   }
 
   /** Record a new op, stamping it with the next sequence number, this client's id, and the current time. */
-  append(kind: SyncOp['kind'], payload: Record<string, unknown>): SyncOp {
+  append(kind: SyncOp['kind'], payload: Record<string, unknown>, options: Pick<SyncOp, 'transactionId' | 'operationId' | 'baseRevision'> = {}): SyncOp {
     const op: SyncOp = {
       seq: this.nextSeq++,
       clientId: this.clientId,
       timestamp: Date.now(),
       kind,
       payload,
+      ...options,
     }
+    op.operationId ??= `${this.clientId}:${op.seq}`
     this.ops.push(op)
+    this.onChange?.()
     return op
   }
 
@@ -42,5 +46,13 @@ export class OpLog {
 
   get size(): number {
     return this.ops.length
+  }
+
+  /** Drop acknowledged history while retaining all later operations. */
+  dropThrough(sequence: number): void {
+    const firstPending = this.ops.findIndex(op => op.seq > sequence)
+    if (firstPending === -1) this.ops = []
+    else if (firstPending > 0) this.ops = this.ops.slice(firstPending)
+    this.onChange?.()
   }
 }

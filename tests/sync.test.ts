@@ -6,16 +6,29 @@ import { SyncAdapter } from '../src/sync/adapter'
 import { SyncServer } from '../src/sync/server'
 import { SyncClient } from '../src/sync/client'
 import { MemoryTransport } from '../src/sync/transport'
-import type { SyncMessage } from '../src/sync/types'
+import type { SyncMessage, SyncOp } from '../src/sync/types'
 import type { SyncTransport } from '../src/sync/transport'
+import { syncChecksum } from '../src/sync/checksum'
+import { validateSyncBatch, validateSyncOperation } from '../src/sync/protocol'
+import { FileSyncOperationLog } from '../src/sync/log'
+import { MemoryFileIO } from '../src/persistence/file-io'
 
 describe('OpLog', () => {
+  it('validates the shared sync protocol fixture', async () => {
+    const fixture = (await import('../fixtures/sync/protocol.json')).default
+    expect(validateSyncBatch(fixture.operations)).toBe(syncChecksum(fixture.operations))
+    fixture.operations.forEach(validateSyncOperation)
+    expect(() => validateSyncOperation({ ...fixture.operations[0], seq: 0 })).toThrow(TypeError)
+  })
+
   it('appends ops with increasing sequence numbers', () => {
     const log = new OpLog('client-1')
     const op1 = log.append('addNode', { id: 'a' })
     const op2 = log.append('addNode', { id: 'b' })
     expect(op1.seq).toBe(1)
     expect(op2.seq).toBe(2)
+    expect(op1.operationId).toBe('client-1:1')
+    expect(op2.operationId).toBe('client-1:2')
     expect(log.size).toBe(2)
   })
 
@@ -38,6 +51,28 @@ describe('OpLog', () => {
     expect(log2.latestSeq).toBe(2)
     const op3 = log2.append('addNode', { id: 'c' })
     expect(op3.seq).toBe(3)
+  })
+
+  it('checksums bigint payloads without throwing', () => {
+    const op: SyncOp = { seq: 1, timestamp: 1, clientId: 'c1', kind: 'addNode', payload: { value: 1n } }
+    expect(syncChecksum([op])).toBe(syncChecksum([op]))
+  })
+})
+
+describe('durable sync log', () => {
+  it('serializes concurrent appends without losing operations', async () => {
+    const log = new FileSyncOperationLog(new MemoryFileIO())
+    const operations = Array.from({ length: 20 }, (_, index) => ({
+      seq: index + 1,
+      timestamp: 1,
+      clientId: 'client',
+      kind: 'addNode' as const,
+      payload: { id: `node-${index}` },
+    }))
+    await Promise.all(operations.map(operation => log.append(operation)))
+    const state = await log.load()
+    expect(state.ops).toHaveLength(20)
+    expect(new Set(state.ops.map(operation => operation.payload.id)).size).toBe(20)
   })
 })
 
@@ -64,6 +99,16 @@ describe('SyncAdapter', () => {
     expect(adapter.oplog.size).toBe(0)
     await adapter.applyChanges(changes)
     expect(adapter.oplog.all.map(op => op.kind)).toEqual(['addNode'])
+  })
+
+  it('preserves committed transaction identity in adapter sync operations', async () => {
+    const adapter = new SyncAdapter(new MemoryAdapter(), 'identity-client')
+    await adapter.applyChanges({
+      transactionId: 'tx-1', operationId: 'commit-1',
+      putNodes: [{ id: 'a', type: 't', data: {}, vector: null, insertedAt: 1, updatedAt: 1 }],
+      deleteNodeIds: [], putEdges: [], deleteEdgeIds: [], putVectors: [], deleteVectorIds: [],
+    })
+    expect(adapter.oplog.all[0]).toMatchObject({ transactionId: 'tx-1', operationId: 'commit-1:put-node:a' })
   })
 
   it('records node mutations in the op log', async () => {
@@ -99,14 +144,13 @@ describe('SyncAdapter', () => {
     expect(removeOps[0].payload.source).toBe('a')
   })
 
-  it('rejects edge records whose IDs cannot be reconstructed safely', async () => {
+  it('accepts independent edge IDs and rejects malformed edge records', async () => {
     const adapter = new SyncAdapter(new MemoryAdapter(), 'c1')
+    await adapter.putEdge({ id: 'claim-1', source: 'a', target: 'b', type: 'R', data: null, createdAt: 1 })
+    expect(adapter.oplog.all[0].payload.id).toBe('claim-1')
     await expect(adapter.putEdge({
-      id: 'wrong', source: 'a', target: 'b', type: 'R', data: null, createdAt: 1,
-    })).rejects.toThrow('Invalid edge ID')
-    await expect(adapter.putEdge({
-      id: 'a::part::R::b', source: 'a::part', target: 'b', type: 'R', data: null, createdAt: 1,
-    })).rejects.toThrow(RangeError)
+      id: '', source: 'a', target: 'b', type: 'R', data: null, createdAt: 1,
+    })).rejects.toThrow(TypeError)
   })
 
   it('wraps inner adapter transparently', async () => {
@@ -143,6 +187,53 @@ describe('SyncServer + SyncClient', () => {
     cleanup()
   })
 
+  it('preserves transaction identity on every operation in a transaction', async () => {
+    const sent: SyncMessage[] = []
+    const graph = new PolyGraph()
+    const client = new SyncClient({
+      graph,
+      clientId: 'transaction-client',
+      autoFlush: false,
+      retryMs: 0,
+      transport: { send: message => sent.push(message), close: () => undefined, onMessage: null },
+    })
+
+    await graph.transaction(tx => {
+      tx.addNode({ id: 'a', type: 't', data: {}, insertedAt: 1, updatedAt: 1 })
+      tx.addNode({ id: 'b', type: 't', data: {}, insertedAt: 1, updatedAt: 1 })
+    })
+
+    const pending = client.pendingOps
+    expect(pending).toHaveLength(2)
+    expect(pending[0].transactionId).toBeTruthy()
+    expect(pending[1].transactionId).toBe(pending[0].transactionId)
+    expect(pending[0].operationId).not.toBe(pending[1].operationId)
+    client.flush()
+    expect(sent[0].ops.map(op => op.transactionId)).toEqual([pending[0].transactionId, pending[1].transactionId])
+    client.disconnect()
+  })
+
+  it('coalesces auto-flush transaction events into one message', async () => {
+    const sent: SyncMessage[] = []
+    const graph = new PolyGraph()
+    const client = new SyncClient({
+      graph,
+      clientId: 'coalesced-transaction',
+      retryMs: 0,
+      transport: { send: message => sent.push(message), close: () => undefined, onMessage: null },
+    })
+    await graph.transaction(tx => {
+      tx.addNode({ id: 'a', type: 't', data: {}, insertedAt: 1, updatedAt: 1 })
+      tx.addNode({ id: 'b', type: 't', data: {}, insertedAt: 1, updatedAt: 1 })
+    })
+    await new Promise(resolve => queueMicrotask(resolve))
+
+    expect(sent).toHaveLength(1)
+    expect(sent[0].ops).toHaveLength(2)
+    expect(sent[0].ops[0].transactionId).toBe(sent[0].ops[1].transactionId)
+    client.disconnect()
+  })
+
   it('deduplicates retried operations while acknowledging every delivery', () => {
     const server = new SyncServer()
     const acknowledgements: SyncMessage[] = []
@@ -160,6 +251,46 @@ describe('SyncServer + SyncClient', () => {
     expect(broadcasts).toHaveLength(1)
     expect(acknowledgements).toHaveLength(2)
     expect(acknowledgements[1]).toMatchObject({ type: 'ack', clientId: 'sender', fromSeq: 1 })
+  })
+
+  it('deduplicates logical operations by operation ID across sequence changes', () => {
+    const server = new SyncServer()
+    const acknowledgements: SyncMessage[] = []
+    const receive = server.addClient({ clientId: 'sender', send: message => acknowledgements.push(message) })
+    const operation = (seq: number): SyncOp => ({
+      seq, timestamp: 1, clientId: 'sender', operationId: 'logical-1', kind: 'addNode',
+      payload: { id: 'logical', type: 't', data: {}, insertedAt: 1, updatedAt: 1 },
+    })
+    receive({ type: 'delta', clientId: 'sender', fromSeq: 0, ops: [operation(1)] })
+    receive({ type: 'delta', clientId: 'sender', fromSeq: 1, ops: [operation(2)] })
+
+    expect(server.ops).toHaveLength(1)
+    expect(acknowledgements[1]).toMatchObject({ type: 'ack', fromSeq: 2 })
+  })
+
+  it('does not deduplicate equal operation IDs from different clients', () => {
+    const server = new SyncServer()
+    const receiveA = server.addClient({ clientId: 'a', send: () => undefined })
+    const receiveB = server.addClient({ clientId: 'b', send: () => undefined })
+    const op = (clientId: string, seq: number): SyncOp => ({
+      seq, timestamp: 1, clientId, operationId: 'same-local-id', kind: 'addNode',
+      payload: { id: `${clientId}-node`, type: 't', data: {}, insertedAt: 1, updatedAt: 1 },
+    })
+    receiveA({ type: 'delta', clientId: 'a', fromSeq: 0, ops: [op('a', 1)] })
+    receiveB({ type: 'delta', clientId: 'b', fromSeq: 0, ops: [op('b', 1)] })
+    expect(server.ops).toHaveLength(2)
+  })
+
+  it('bounds deduplication memory with operation-log compaction', () => {
+    const server = new SyncServer({ maxOps: 1 })
+    const receive = server.addClient({ clientId: 'compact-client', send: () => undefined })
+    const op = (seq: number): SyncOp => ({
+      seq, timestamp: 1, clientId: 'compact-client', operationId: `op-${seq}`, kind: 'addNode',
+      payload: { id: `node-${seq}`, type: 't', data: {}, insertedAt: 1, updatedAt: 1 },
+    })
+    receive({ type: 'delta', clientId: 'compact-client', fromSeq: 0, ops: [op(1)] })
+    receive({ type: 'delta', clientId: 'compact-client', fromSeq: 1, ops: [op(2)] })
+    expect(server.ops.map(item => item.operationId)).toEqual(['op-2'])
   })
 
   it('retries an unacknowledged operation until an acknowledgement arrives', async () => {
@@ -184,6 +315,24 @@ describe('SyncServer + SyncClient', () => {
 
     expect(sends).toBe(2)
     expect(client.pendingOps).toHaveLength(0)
+    client.disconnect()
+  })
+
+  it('bounds retained acknowledged client operations', () => {
+    const sent: SyncMessage[] = []
+    const graph = new PolyGraph()
+    const client = new SyncClient({
+      graph, clientId: 'retained-client', autoFlush: false, retryMs: 0, maxRetainedOps: 1,
+      transport: { send: message => sent.push(message), close: () => undefined, onMessage: null },
+    })
+    graph.addNode({ id: 'a', type: 't', data: {}, insertedAt: 1, updatedAt: 1 })
+    graph.addNode({ id: 'b', type: 't', data: {}, insertedAt: 1, updatedAt: 1 })
+    client.flush()
+    sent[0].ops.length
+    client.handleMessage({ type: 'ack', clientId: 'retained-client', fromSeq: 2, ops: [] })
+
+    expect(client.pendingOps).toHaveLength(0)
+    expect(client.oplog.size).toBe(1)
     client.disconnect()
   })
 
@@ -503,6 +652,24 @@ describe('SyncServer + SyncClient', () => {
     cb()
   })
 
+  it('encodes edge updates distinctly from edge additions', () => {
+    const graph = new PolyGraph()
+    graph.addNode({ id: 'a', type: 't', data: {}, insertedAt: 1, updatedAt: 1 })
+    graph.addNode({ id: 'b', type: 't', data: {}, insertedAt: 1, updatedAt: 1 })
+    graph.addEdge({ id: 'claim', source: 'a', target: 'b', type: 'REL', data: { state: 'new' }, createdAt: 1 })
+    const sent: SyncMessage[] = []
+    const client = new SyncClient({
+      graph,
+      transport: { send: message => sent.push(message), close: () => undefined, onMessage: null },
+      autoFlush: false,
+      clientId: 'edge-updater',
+    })
+    graph.updateEdge('claim', { state: 'reviewed' }, { expectedRevision: 0 })
+    client.flush()
+    expect(sent[0].ops.at(-1)?.kind).toBe('updateEdge')
+    client.disconnect()
+  })
+
   it('server onOp callback fires for each received op', async () => {
     const received: string[] = []
     const server = new SyncServer()
@@ -517,5 +684,224 @@ describe('SyncServer + SyncClient', () => {
 
     expect(received).toEqual(['addNode'])
     cleanup()
+  })
+
+  it('supports authorization hooks and reports rejected operations', async () => {
+    const responses: SyncMessage[] = []
+    const server = new SyncServer({ authorize: async op => op.payload.allowed === true })
+    const sender = { clientId: 'authorized-client', send: (message: SyncMessage) => responses.push(message) }
+    const receive = server.addClient(sender)
+    receive({
+      type: 'delta', clientId: 'authorized-client', fromSeq: 0, ops: [
+        { seq: 1, timestamp: 1, clientId: 'authorized-client', kind: 'addNode', payload: { id: 'denied' } },
+        { seq: 2, timestamp: 1, clientId: 'authorized-client', kind: 'addNode', payload: { id: 'accepted', allowed: true } },
+      ],
+    })
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(server.ops.map(op => op.payload.id)).toEqual(['accepted'])
+    expect(responses[0].errors?.[0].code).toBe('unauthorized')
+  })
+
+  it('rejects an entire transaction when one operation is unauthorized', async () => {
+    const responses: SyncMessage[] = []
+    const server = new SyncServer({ authorize: op => op.payload.allowed === true })
+    const receive = server.addClient({ clientId: 'transaction-client', send: message => responses.push(message) })
+    receive({
+      type: 'delta', clientId: 'transaction-client', fromSeq: 0, ops: [
+        { seq: 1, timestamp: 1, clientId: 'transaction-client', transactionId: 'tx-1', kind: 'addNode', payload: { id: 'a', allowed: true } },
+        { seq: 2, timestamp: 1, clientId: 'transaction-client', transactionId: 'tx-1', kind: 'addNode', payload: { id: 'b' } },
+      ],
+    })
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(server.ops).toHaveLength(0)
+    expect(responses[0].errors).toMatchObject([{ code: 'unauthorized' }])
+  })
+
+  it('reports base-revision conflicts through the server hook', async () => {
+    const responses: SyncMessage[] = []
+    const errors: string[] = []
+    const server = new SyncServer({
+      conflict: op => op.baseRevision === 2 ? { ok: true } : { ok: false, message: 'stale revision' },
+    })
+    const client = new SyncClient({
+      graph: new PolyGraph(),
+      transport: { send: () => undefined, close: () => undefined, onMessage: null },
+      clientId: 'conflict-client',
+      onError: error => errors.push(error.code),
+    })
+    const sender = { clientId: 'conflict-client', send: (message: SyncMessage) => { responses.push(message); client.handleMessage(message) } }
+    const receive = server.addClient(sender)
+    receive({
+      type: 'delta', clientId: 'conflict-client', fromSeq: 0, ops: [
+        { seq: 1, timestamp: 1, clientId: 'conflict-client', kind: 'updateNode', baseRevision: 1, payload: { id: 'n' } },
+      ],
+    })
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(server.ops).toHaveLength(0)
+    expect(responses[0].errors).toMatchObject([{ code: 'conflict', message: 'stale revision' }])
+    expect(errors).toEqual(['conflict'])
+    client.disconnect()
+  })
+
+  it('filters subscriptions and expires cursors after bounded compaction', () => {
+    const server = new SyncServer({ maxOps: 1 })
+    const received: SyncMessage[] = []
+    const sender = { clientId: 'sender', send: () => undefined }
+    const receiver = { clientId: 'receiver', send: (message: SyncMessage) => received.push(message) }
+    const send = server.addClient(sender)
+    server.addClient(receiver, { filter: op => op.kind === 'addNode' })
+    const op = (seq: number, kind: SyncOp['kind']) => ({ seq, timestamp: 1, clientId: 'sender', kind, payload: { id: `${kind}-${seq}` } })
+    send({ type: 'delta', clientId: 'sender', fromSeq: 0, ops: [op(1, 'addNode'), op(2, 'removeNode')] })
+    expect(server.cursor).toBe(2)
+    expect(received[0].ops.map(item => item.kind)).toEqual(['addNode'])
+
+    const recovery: SyncMessage[] = []
+    server.addClient({ clientId: 'recovery', send: message => recovery.push(message) })({ type: 'request-snapshot', clientId: 'recovery', fromSeq: 0, ops: [] })
+    expect(recovery[0].errors?.[0].code).toBe('cursor_expired')
+  })
+
+  it('applies subscription filters to recovery snapshots while advancing the global cursor', () => {
+    const server = new SyncServer()
+    const send = server.addClient({ clientId: 'sender', send: () => undefined })
+    const recovery: SyncMessage[] = []
+    const request = server.addClient({ clientId: 'filtered', send: message => recovery.push(message) }, { filter: op => op.kind === 'addNode' })
+    send({ type: 'delta', clientId: 'sender', fromSeq: 0, ops: [
+      { seq: 1, timestamp: 1, clientId: 'sender', kind: 'addNode', payload: { id: 'visible' } },
+      { seq: 2, timestamp: 1, clientId: 'sender', kind: 'removeNode', payload: { id: 'hidden' } },
+    ] })
+    request({ type: 'request-snapshot', clientId: 'filtered', fromSeq: 0, ops: [] })
+
+    expect(recovery[0].ops.map(item => item.kind)).toEqual(['addNode'])
+    expect(recovery[0].cursor).toBe(2)
+    expect(recovery[0].checksum).toBeDefined()
+  })
+
+  it('advances filtered clients using the global server cursor', () => {
+    const server = new SyncServer()
+    const graph = new PolyGraph()
+    const client = new SyncClient({
+      graph,
+      clientId: 'filtered-client',
+      retryMs: 0,
+      transport: { send: () => undefined, close: () => undefined, onMessage: null },
+    })
+    const sender = { clientId: 'sender', send: () => undefined }
+    const received: SyncMessage[] = []
+    const receiver = { clientId: 'filtered-client', send: (message: SyncMessage) => received.push(message) }
+    const send = server.addClient(sender)
+    server.addClient(receiver, { filter: op => op.kind === 'addNode' })
+
+    send({ type: 'delta', clientId: 'sender', fromSeq: 0, ops: [
+      { seq: 1, timestamp: 1, clientId: 'sender', kind: 'addNode', payload: { id: 'visible', type: 't', data: {}, insertedAt: 1, updatedAt: 1 } },
+      { seq: 2, timestamp: 1, clientId: 'sender', kind: 'removeNode', payload: { id: 'hidden' } },
+    ] })
+    client.handleMessage(received[0])
+
+    expect(received[0].cursor).toBe(2)
+    expect(client.syncCursor).toBe(2)
+    client.disconnect()
+  })
+
+  it('returns a global cursor when an expired cursor starts recovery after compaction', () => {
+    const server = new SyncServer({ maxOps: 2 })
+    const receive = server.addClient({ clientId: 'writer', send: () => undefined })
+    receive({ type: 'delta', clientId: 'writer', fromSeq: 0, ops: [
+      { seq: 1, timestamp: 1, clientId: 'writer', kind: 'addNode', payload: { id: 'one' } },
+      { seq: 2, timestamp: 2, clientId: 'writer', kind: 'addNode', payload: { id: 'two' } },
+      { seq: 3, timestamp: 3, clientId: 'writer', kind: 'addNode', payload: { id: 'three' } },
+    ] })
+
+    const recovery: SyncMessage[] = []
+    const request = server.addClient({ clientId: 'recovery', send: message => recovery.push(message) })
+    request({ type: 'request-snapshot', clientId: 'recovery', fromSeq: 0, ops: [] })
+
+    expect(recovery[0]).toMatchObject({ type: 'snapshot', fromSeq: 0, cursor: 3, more: false })
+    expect(recovery[0].errors?.[0].code).toBe('cursor_expired')
+    expect(recovery[0].ops.map(op => op.seq)).toEqual([2, 3])
+  })
+
+  it('passes client metadata to recovery subscription filters', () => {
+    const server = new SyncServer({
+      clientMetadata: client => ({ tier: client.clientId === 'premium' ? 'premium' : 'basic' }),
+    })
+    const receive = server.addClient({ clientId: 'writer', send: () => undefined })
+    receive({ type: 'delta', clientId: 'writer', fromSeq: 0, ops: [
+      { seq: 1, timestamp: 1, clientId: 'writer', kind: 'addNode', payload: { id: 'one' } },
+    ] })
+
+    const recovery: SyncMessage[] = []
+    const request = server.addClient(
+      { clientId: 'premium', send: message => recovery.push(message) },
+      { filter: (_operation, context) => context.metadata?.tier === 'premium' },
+    )
+    request({ type: 'request-snapshot', clientId: 'premium', fromSeq: 0, ops: [] })
+
+    expect(recovery[0].ops).toHaveLength(1)
+  })
+
+  it('bounds sync batches and splits client flushes', async () => {
+    const responses: SyncMessage[] = []
+    const server = new SyncServer({ maxBatchOps: 1 })
+    const receive = server.addClient({ clientId: 'bounded', send: message => responses.push(message) })
+    receive({ type: 'delta', clientId: 'bounded', fromSeq: 0, ops: [
+      { seq: 1, timestamp: 1, clientId: 'bounded', kind: 'addNode', payload: { id: 'a' } },
+      { seq: 2, timestamp: 1, clientId: 'bounded', kind: 'addNode', payload: { id: 'b' } },
+    ], protocolVersion: 1 })
+    expect(responses[0].errors?.[0].code).toBe('batch_too_large')
+
+    const sent: SyncMessage[] = []
+    const graph = new PolyGraph()
+    const client = new SyncClient({
+      graph,
+      clientId: 'split',
+      autoFlush: false,
+      maxOpsPerMessage: 1,
+      transport: { send: message => sent.push(message), close: () => undefined, onMessage: null },
+    })
+    graph.addNode({ id: 'a', type: 't', data: {}, insertedAt: 1, updatedAt: 1 })
+    graph.addNode({ id: 'b', type: 't', data: {}, insertedAt: 1, updatedAt: 1 })
+    client.flush()
+    expect(sent).toHaveLength(1)
+    expect(sent[0].ops).toHaveLength(1)
+    client.disconnect()
+  })
+
+  it('paginates oversized server recovery snapshots', () => {
+    const server = new SyncServer({ maxBatchOps: 1 })
+    const sent: SyncMessage[] = []
+    const sender = { clientId: 'sender', send: () => undefined }
+    const request = server.addClient(sender)
+    request({ type: 'delta', clientId: 'sender', fromSeq: 0, ops: [
+      { seq: 1, timestamp: 1, clientId: 'sender', kind: 'addNode', payload: { id: 'a' } },
+    ] })
+    request({ type: 'delta', clientId: 'sender', fromSeq: 1, ops: [
+      { seq: 2, timestamp: 1, clientId: 'sender', kind: 'addNode', payload: { id: 'b' } },
+    ] })
+    const recovery = server.addClient({ clientId: 'recovery', send: message => sent.push(message) })
+
+    recovery({ type: 'request-snapshot', clientId: 'recovery', fromSeq: 0, ops: [] })
+    expect(sent[0]).toMatchObject({ type: 'snapshot', cursor: 1, more: true })
+    expect(sent[0].ops).toHaveLength(1)
+
+    recovery({ type: 'request-snapshot', clientId: 'recovery', fromSeq: sent[0].cursor, ops: [] })
+    expect(sent[1]).toMatchObject({ type: 'delta', cursor: 2, more: false })
+    expect(sent[1].ops[0].payload).toMatchObject({ id: 'b' })
+  })
+
+  it('detects corrupted server deltas and requests recovery', () => {
+    const requested: SyncMessage[] = []
+    const client = new SyncClient({
+      graph: new PolyGraph(),
+      clientId: 'checksum-client',
+      onError: error => expect(error.code).toBe('checksum_mismatch'),
+      transport: { send: message => requested.push(message), close: () => undefined, onMessage: null },
+    })
+    client.handleMessage({
+      type: 'delta', clientId: 'server', fromSeq: 0,
+      ops: [{ seq: 1, timestamp: 1, clientId: 'server', kind: 'addNode', payload: { id: 'n' } }],
+      checksum: 'corrupt', protocolVersion: 1,
+    })
+    expect(requested[0]).toMatchObject({ type: 'request-snapshot', fromSeq: 0 })
+    client.disconnect()
   })
 })

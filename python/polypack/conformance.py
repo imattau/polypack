@@ -22,6 +22,7 @@ from . import (
     PolypackDimensionError,
     PolypackError,
     PolypackValueError,
+    ConflictError,
 )
 
 # Resolve fixtures from the source tree, or from POLYPACK_FIXTURES when running
@@ -46,6 +47,8 @@ def _map_error_code(err: Exception) -> str:
         if "dimension" in message.lower():
             return "dimension_mismatch"
         return "invalid_argument" if "must not be empty" in message or "must contain" in message else "range_out_of_bounds"
+    if isinstance(err, ConflictError):
+        return "conflict"
     if isinstance(err, PolypackClosedError):
         return "closed"
     return "storage"
@@ -142,7 +145,10 @@ def run_fixture(fixture: dict, index: Optional[Any] = None) -> None:
             if kind == "addNode":
                 graph.add_node(_to_graph_node(op["node"]))
             elif kind == "updateNode":
-                graph.update_node(op["id"], op.get("data") or {}, op.get("vector"))
+                graph.update_node(op["id"], op.get("data") or {}, op.get("vector"), expected_revision=op.get("expectedRevision"))
+            elif kind == "patchNode":
+                patch = op.get("patch") or {}
+                graph.patch_node(op["id"], set=patch.get("set"), unset=patch.get("unset"), increment=patch.get("increment"), compare_and_set=patch.get("compareAndSet"), expected_revision=op.get("expectedRevision"))
             elif kind == "addEdge":
                 graph.add_edge(op["source"], op["type"], op["target"], op.get("data"), op.get("ownership"))
             elif kind == "removeNode":
@@ -193,6 +199,10 @@ def _assert_expectations(graph: PolyGraph, recorder: Optional[_Recorder], hnsw: 
             raise ConformanceError(f"nodeVector: node {id_} has no vector")
         if node["vector"] != list(vector):
             raise ConformanceError(f"nodeVector[{id_}] mismatch")
+    for id_, revision in (expect.get("nodeRevision") or {}).items():
+        node = graph.get_node(id_)
+        if node is None or int(node.get("revision", 0)) != revision:
+            raise ConformanceError(f"nodeRevision[{id_}] mismatch")
     for spec in expect.get("edgeTargets", []):
         got = sorted(graph.get_edge_targets(spec["source"], spec["type"]))
         want = sorted(spec["targets"])
