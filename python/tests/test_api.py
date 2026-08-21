@@ -325,6 +325,62 @@ def test_persist_recovers_from_truncated_wal(tmp_path):
     assert not wal_file.exists() or wal_file.stat().st_size == 0
 
 
+def test_shared_recovery_fixtures(tmp_path):
+    fixture_dir = Path(__file__).resolve().parents[2] / "fixtures" / "recovery"
+    fixtures = [json.loads(path.read_text()) for path in sorted(fixture_dir.glob("*.json"))]
+    assert len(fixtures) >= 4
+
+    for fixture in fixtures:
+        directory = tmp_path / fixture["name"]
+        graph = PolyGraph.open(str(directory))
+        snapshot = fixture["store"].get("snapshot")
+        if snapshot:
+            for node in snapshot.get("nodes", []):
+                graph.add_node(node)
+            for edge in snapshot.get("edges", []):
+                graph.add_edge(
+                    edge["source"], edge["type"], edge["target"], edge.get("data"),
+                    created_at=edge.get("createdAt"), revision=edge.get("revision", 0), id=edge.get("id"),
+                )
+            for node_id, vector in snapshot.get("vectors", []):
+                graph.vectors.add(node_id, vector)
+            graph.checkpoint()
+
+        for operation in fixture["store"].get("wal", []):
+            kind = operation["kind"]
+            if kind == "putNode":
+                graph.add_node(operation["node"])
+            elif kind == "deleteNode":
+                graph.remove_node(operation["id"])
+            elif kind == "putEdge":
+                edge = operation["edge"]
+                graph.add_edge(edge["source"], edge["type"], edge["target"], edge.get("data"), id=edge.get("id"), created_at=edge.get("createdAt"), revision=edge.get("revision", 0))
+            elif kind == "deleteEdge":
+                graph.remove_edge(operation["id"])
+            elif kind == "putVector":
+                graph._store.apply(put_vectors=[{"id": operation["id"], "vector": operation["vector"]}])
+            elif kind == "deleteVector":
+                graph._store.apply(delete_vector_ids=[operation["id"]])
+            else:
+                raise AssertionError(f"unsupported recovery operation: {kind}")
+        if fixture["store"].get("wal"):
+            graph.save()
+
+        graph._store.close()
+        graph._store = None
+        graph2 = PolyGraph.open(str(directory))
+        expected = fixture["expect"]
+        assert sorted(graph2._store.all_node_ids()) == sorted(expected["presentNodeIds"])
+        for node_id in expected.get("absentNodeIds", []):
+            assert graph2._store.get_node(node_id) is None
+        for node_id, vector in expected.get("vectors", {}).items():
+            assert dict(graph2._store.all_vectors())[node_id].tolist() == vector
+        graph2.close_store()
+        assert (directory / "snapshot.msgpack").exists() is expected["snapshotPresentAfterRecovery"]
+        wal = directory / "wal.msgpack"
+        assert (not wal.exists() or wal.stat().st_size == 0) is expected["walRemovedAfterRecovery"]
+
+
 def test_transaction_conformance_fixture():
     fixture_path = Path(__file__).resolve().parents[2] / "fixtures" / "database-core" / "transaction.json"
     fixture = json.loads(fixture_path.read_text())
@@ -406,6 +462,36 @@ def test_resource_limits_conformance_fixture():
     assert rejected == fixture["expect"]["rejectedLimitNames"]
     for node_id in fixture["expect"]["presentNodeIds"]:
         assert graph.get_node(node_id) is not None
+
+
+def test_error_taxonomy_fixture():
+    fixture_path = Path(__file__).resolve().parents[2] / "fixtures" / "database-core" / "error-taxonomy.json"
+    fixture = json.loads(fixture_path.read_text())
+    codes = {}
+
+    with pytest.raises(PolypackValueError):
+        PolyGraph().add_node({"id": "", "type": "record", "data": {}, "insertedAt": 1, "updatedAt": 1})
+    codes["invalid-node-id"] = "invalid_argument"
+
+    index = ExactIndex()
+    index.add("a", [1, 0])
+    with pytest.raises(PolypackDimensionError):
+        index.query([1, 0, 0], 1)
+    codes["dimension-mismatch"] = "dimension_mismatch"
+
+    graph = PolyGraph()
+    graph.add_node({"id": "conflict", "type": "record", "data": {}, "insertedAt": 1, "updatedAt": 1})
+    graph.update_node("conflict", {"value": 1}, expected_revision=0)
+    with pytest.raises(polypack.ConflictError):
+        graph.update_node("conflict", {"value": 2}, expected_revision=0)
+    codes["stale-write"] = "conflict"
+
+    limited = PolyGraph()
+    limited.set_resource_limits({"maxVectorDimensions": 1})
+    with pytest.raises(ResourceLimitError):
+        limited.add_node({"id": "limited", "type": "record", "data": {}, "vector": [1, 2], "insertedAt": 1, "updatedAt": 1})
+    codes["resource-limit"] = "resource_limit"
+    assert [codes[item["name"]] for item in fixture["cases"]] == [item["code"] for item in fixture["cases"]]
 
 
 def test_schema_and_unique_index_conformance_fixture():

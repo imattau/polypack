@@ -1,6 +1,7 @@
 //! Database-core conformance cases shared with the TypeScript and Python runners.
 
 use polypack_core::{InMemoryStorage, Node, PolypackError, StoreConfig};
+use polypack_core::vector::{DistanceFn, ExactIndex};
 use polypack_graph::{Graph, GraphConfig, MigrationDefinition, MigrationOptions};
 use serde_json::{Map, Value};
 use std::path::PathBuf;
@@ -216,4 +217,50 @@ fn resource_limits_fixture_passes() {
     for id in fixture["expect"]["presentNodeIds"].as_array().unwrap().iter().map(|value| value.as_str().unwrap()) {
         assert!(graph.get_node(id).is_some());
     }
+}
+
+#[test]
+fn error_taxonomy_fixture_passes() {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../fixtures/database-core/error-taxonomy.json");
+    let fixture: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    let cases = fixture["cases"].as_array().unwrap();
+    let mut codes = Map::new();
+
+    let invalid = Node {
+        id: String::new(),
+        node_type: "record".into(),
+        data: Map::new(),
+        vector: None,
+        inserted_at: 1,
+        updated_at: 1,
+        revision: 0,
+        activation: None,
+    };
+    assert!(matches!(polypack_core::model::validate_node(&invalid), Err(PolypackError::InvalidArgument(_))));
+    codes.insert("invalid-node-id".into(), Value::String("invalid_argument".into()));
+
+    let mut index = ExactIndex::new(DistanceFn::Cosine);
+    index.add("a", &[1.0, 0.0]).unwrap();
+    assert!(matches!(index.query(&[1.0, 0.0, 0.0], 1, 0.0), Err(PolypackError::DimensionMismatch { .. })));
+    codes.insert("dimension-mismatch".into(), Value::String("dimension_mismatch".into()));
+
+    let mut graph = Graph::open(Box::new(InMemoryStorage::new()), StoreConfig::default(), GraphConfig::default()).unwrap();
+    graph.add_node(Node { id: "conflict".into(), node_type: "record".into(), data: Map::new(), vector: None, inserted_at: 1, updated_at: 1, revision: 0, activation: None }).unwrap();
+    graph.update_node_if_revision("conflict", 0, Map::from_iter([(String::from("value"), Value::from(1))]), None, None).unwrap();
+    assert!(matches!(graph.update_node_if_revision("conflict", 0, Map::new(), None, None), Err(PolypackError::Conflict { .. })));
+    codes.insert("stale-write".into(), Value::String("conflict".into()));
+
+    let mut limited = Graph::open(
+        Box::new(InMemoryStorage::new()),
+        StoreConfig::default(),
+        GraphConfig { resource_limits: polypack_graph::GraphResourceLimits { max_vector_dimensions: Some(1), ..Default::default() }, ..GraphConfig::default() },
+    ).unwrap();
+    let wide = Node { id: "limited".into(), node_type: "record".into(), data: Map::new(), vector: Some(vec![1.0, 2.0]), inserted_at: 1, updated_at: 1, revision: 0, activation: None };
+    assert!(matches!(limited.add_node(wide), Err(PolypackError::ResourceLimit { .. })));
+    codes.insert("resource-limit".into(), Value::String("resource_limit".into()));
+
+    let expected: Vec<Value> = cases.iter().map(|case| case["code"].clone()).collect();
+    let actual: Vec<Value> = cases.iter().map(|case| codes[case["name"].as_str().unwrap()].clone()).collect();
+    assert_eq!(actual, expected);
 }

@@ -7,6 +7,12 @@ The shared fixtures under `fixtures/conformance` are the behavioural source of
 truth for portable graph, edge, ownership, traversal, pagination, aggregation,
 and vector-index semantics.
 
+Persistence recovery scenarios under `fixtures/recovery` are also executed by
+the TypeScript, Rust, and Python native stores. The shared
+`fixtures/database-core/error-taxonomy.json` fixture defines the stable error
+codes expected for representative validation, dimension, conflict, and
+resource-limit failures.
+
 ## Compatibility levels
 
 | Level | Contract | TypeScript | Rust | Python |
@@ -24,10 +30,17 @@ ordering and implementation-specific diagnostic text.
 ## CI conformance entry points
 
 - TypeScript runs `tests/conformance/conformance.test.ts`.
+- TypeScript runs `tests/conformance/recovery.test.ts` for the shared recovery
+  corpus and `tests/database-core.test.ts` for database-core fixtures,
+  including the error taxonomy.
 - Rust runs `polypack-core/tests/query_conformance.rs` and the graph crate's
-  unit and persistence tests.
+  unit and persistence tests, including
+  `polypack-core/tests/recovery_conformance.rs` and the database-core error
+  taxonomy test.
 - Python runs `python/tests/test_conformance.py` against the same fixture
-  directory, plus its complete API and persistence suite.
+  directory, plus its complete API and persistence suite, where
+  `test_shared_recovery_fixtures` and `test_error_taxonomy_fixture` cover the
+  shared persistence and error fixtures.
 - Database-core fixtures under `fixtures/database-core` are also shared across
   the language-specific suites. The secondary-index fixture covers candidate
   intersection, selected-index explain output, and stable query results.

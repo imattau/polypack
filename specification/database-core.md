@@ -1,10 +1,16 @@
 # Database core specification
 
-Version: 1 (draft)
+Version: 1 (stable)
 
 This document defines the first portable database-core contract. Language
 implementations may expose idiomatic APIs, but observable behavior must match
 these rules.
+
+This contract is stable for the current compatibility level. The executable
+fixtures in `fixtures/conformance` and `fixtures/database-core` are normative
+for the observable behavior described here; implementations may use
+language-specific APIs internally, but must preserve the documented results
+and error categories.
 
 ## Transactions
 
@@ -76,3 +82,10 @@ Adapters must expose their guarantees through `AdapterCapabilities`. A graph
 must not infer transaction or durability guarantees from the adapter class.
 Unsupported guarantees produce typed capability errors or use an explicitly
 documented fallback that preserves the advertised semantics.
+
+## Conformance status
+
+The current TypeScript, Rust, and Python implementations pass the shared
+transaction, revision/patch, edge-identity, schema/index, snapshot, migration,
+resource-limit, and durable-mutation fixtures. Persistence recovery is covered
+by the shared corpus in `fixtures/recovery`.

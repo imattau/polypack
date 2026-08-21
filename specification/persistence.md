@@ -1,6 +1,6 @@
 # Persistence specification
 
-Version: 2 (draft)
+Version: 2 (stable)
 
 ## 1. Model
 
@@ -174,3 +174,12 @@ forced termination in every case.
   Rust stores read each other's files. Python (`NativeStore`) and Node native
   (`NativeStore`) bindings expose it; the TypeScript adapter remains pure-TS
   for now.
+
+## 14. Conformance status
+
+Version 2 is stable for the snapshot/WAL contract and logical mutation-log
+surface described above. The recovery fixtures in `fixtures/recovery` are
+executed by TypeScript, Rust, and Python. They cover snapshot-only stores,
+WAL-only stores, delete replay, clean WAL recovery, and truncated WAL tails;
+implementations must preserve acknowledged records and remove the recovered
+WAL after a successful restart.

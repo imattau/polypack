@@ -12,6 +12,10 @@ separator-derived edge IDs.
 The database-core contract is documented in
 [`specification/database-core.md`](../specification/database-core.md).
 
+The database-core and persistence specifications are stable at their current
+versions. Changes to their observable behavior require a fixture update and a
+versioned compatibility review.
+
 ## `conformance/` — graph behaviour
 
 Each file is one fixture:
@@ -103,3 +107,8 @@ WAL entry objects follow the kinds in `specification/persistence.md`
 `deleteVector`, `clearAll`). `corruptTailHex` simulates a crash mid-append; the
 trailing partial frame must be tolerated. The runner encodes these into bytes
 using its own format implementation — the fixture content is language-neutral.
+
+All three maintained implementations execute this recovery corpus. The
+database-core error categories are defined by
+[`database-core/error-taxonomy.json`](database-core/error-taxonomy.json) and
+must map to the stable codes in [`specification/errors.md`](../specification/errors.md).

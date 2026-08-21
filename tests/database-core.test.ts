@@ -1,9 +1,10 @@
 import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { AdapterCapabilityError, ConflictError, MemoryAdapter, PolyGraph } from '../src/index'
+import { AdapterCapabilityError, ConflictError, MemoryAdapter, PolyGraph, ResourceLimitError } from '../src/index'
 import { BinaryStoreAdapter } from '../src/persistence/binary-store'
 import { MemoryFileIO } from '../src/persistence/file-io'
+import { VectorIndex } from '../src/vector-index'
 
 const node = (id: string, data: Record<string, unknown> = {}) => ({
   id, type: 'record', data, insertedAt: 1, updatedAt: 1,
@@ -387,5 +388,28 @@ describe('database-core mutation API', () => {
     const unsafe = new MemoryAdapter()
     Object.defineProperty(unsafe, 'capabilities', { value: { ...unsafe.capabilities, transactions: false } })
     await expect(new PolyGraph(unsafe).transaction(() => undefined)).rejects.toBeInstanceOf(AdapterCapabilityError)
+  })
+
+  it('matches the shared error taxonomy fixture', () => {
+    const fixture = JSON.parse(readFileSync(join(process.cwd(), 'fixtures/database-core/error-taxonomy.json'), 'utf8')) as { cases: Array<{ name: string; code: string }> }
+    const codes: Record<string, string> = {}
+    try { new PolyGraph().addNode(node('')) } catch { codes['invalid-node-id'] = 'invalid_argument' }
+    try {
+      const index = new VectorIndex()
+      index.add('a', [1, 0])
+      index.query([1, 0, 0], 1)
+    } catch { codes['dimension-mismatch'] = 'dimension_mismatch' }
+    const graph = new PolyGraph()
+    graph.addNode(node('conflict'))
+    graph.updateNode('conflict', { value: 1 }, undefined, undefined, { expectedRevision: 0 })
+    try { graph.updateNode('conflict', { value: 2 }, undefined, undefined, { expectedRevision: 0 }) } catch (error) {
+      if (error instanceof ConflictError) codes['stale-write'] = 'conflict'
+    }
+    const limited = new PolyGraph()
+    limited.setResourceLimits({ maxVectorDimensions: 1 })
+    try { limited.addNode({ ...node('limited'), vector: new Float64Array([1, 2]) }) } catch (error) {
+      if (error instanceof ResourceLimitError) codes['resource-limit'] = 'resource_limit'
+    }
+    expect(fixture.cases.map(item => codes[item.name])).toEqual(fixture.cases.map(item => item.code))
   })
 })

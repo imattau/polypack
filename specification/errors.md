@@ -1,11 +1,16 @@
 # Error taxonomy
 
-Version: 1 (draft)
+Version: 1
 
 Every Polypack error carries a stable code so all languages can map errors to a
 common taxonomy. The TypeScript implementation throws `TypeError`, `RangeError`,
 `Error`, or a custom subclass; the mapping below names the code and the 
 condition.
+
+The fixture at `fixtures/database-core/error-taxonomy.json` is the normative
+cross-language smoke test for the stable codes. Implementations may expose
+language-specific exception classes, but must preserve these codes and their
+failure categories.
 
 ## Error codes
 
