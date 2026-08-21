@@ -1027,12 +1027,13 @@ class PolyGraph:
                     raise UniqueConstraintError(f"unique index {definition['name']} conflicts with node {previous}")
                 seen[key] = node["id"]
 
-    def _record_query(self, duration_ms: float, scanned_records: int, index: Optional[str]) -> None:
+    def _record_query(self, duration_ms: float, scanned_records: int, index: Optional[str], indexes: Optional[Iterable[str]] = None) -> None:
         self._query_count += 1
         self._query_duration_ms += duration_ms
         self._query_scanned_records += scanned_records
-        if index is not None:
-            self._query_index_usage[index] = self._query_index_usage.get(index, 0) + 1
+        selected = list(indexes or (() if index is None else (index,)))
+        for name in selected:
+            self._query_index_usage[name] = self._query_index_usage.get(name, 0) + 1
 
     def _validate_index_candidate(self, candidate: Node) -> None:
         for definition in self._indexes.values():
@@ -2005,7 +2006,7 @@ class GraphSnapshot:
     def resource_limit_config(self) -> dict:
         return dict(self._resource_limits)
 
-    def _record_query(self, duration_ms: float, scanned_records: int, index: Optional[str]) -> None:
+    def _record_query(self, duration_ms: float, scanned_records: int, index: Optional[str], indexes: Optional[Iterable[str]] = None) -> None:
         # Query metrics belong to the live graph, not to this detached view.
         return None
 
@@ -2120,13 +2121,10 @@ class GraphQuery:
         """Describe the query stages and a coarse execution-cost estimate."""
         fields = {field for op, field, _ in self._attributes}
         node_type = self._node_types[0] if self._node_types and len(self._node_types) == 1 else None
-        selected = next(
-            (definition for definition in self._graph._indexes.values()
-             if (not definition["nodeType"] or definition["nodeType"] == node_type)
-             and all(field in fields for field in definition["fields"])),
-            None,
-        )
-        stages = [f"property-index({selected['name']})" if selected else "record-scan"]
+        selected = self._selected_indexes()
+        stages = [*(f"property-index({definition['name']})" for definition in selected)] or ["record-scan"]
+        if len(selected) > 1:
+            stages.append(f"index-intersection({len(selected)})")
         if self._node_types:
             stages.append(f"type-filter({','.join(self._node_types)})")
         if self._attributes:
@@ -2141,11 +2139,27 @@ class GraphQuery:
             stages.append(f"limit({self._limit})")
         loaded = len(self._graph._nodes)
         return {
-            "index": selected["name"] if selected else None,
+            "index": selected[0]["name"] if selected else None,
+            "indexes": [definition["name"] for definition in selected],
             "stages": stages,
             "loadedRecords": loaded,
-            "estimatedCost": max(1, loaded * (0.25 if selected else 1)),
+            "estimatedCost": max(1, loaded * (0.25 / len(selected) if selected else 1)),
         }
+
+    def _selected_indexes(self) -> list[dict]:
+        equality_fields = {field for op, field, _ in self._attributes if op == "eq"}
+        range_fields = {field for op, field, _ in self._attributes if op == "range"}
+        node_type = self._node_types[0] if self._node_types and len(self._node_types) == 1 else None
+        selected = []
+        for definition in self._graph._indexes.values():
+            if definition["nodeType"] and definition["nodeType"] != node_type:
+                continue
+            if all(field in equality_fields or field.removeprefix("data.") in equality_fields for field in definition["fields"]):
+                selected.append(definition)
+                continue
+            if len(definition["fields"]) == 1 and definition["fields"][0] in range_fields:
+                selected.append(definition)
+        return selected
 
     def _match(self, node: Node) -> bool:
         if self._node_types is not None and node["type"] not in self._node_types:
@@ -2293,12 +2307,14 @@ class GraphQuery:
             maximum = self._limits.get("maxResults")
             if maximum is not None and len(results) > maximum:
                 raise ResourceLimitError("maxResults", maximum)
-            self._graph._record_query((time.perf_counter() - started) * 1000, scanned_records, self.explain()["index"])
+            explanation = self.explain()
+            self._graph._record_query((time.perf_counter() - started) * 1000, scanned_records, explanation["index"], explanation["indexes"])
             return results
         # Fallback: pure-Python pipeline (only reached if the native path
         # failed, e.g. a non-JSON-serialisable filter value).
         results = self._collect_python(plan)
-        self._graph._record_query((time.perf_counter() - started) * 1000, scanned_records, self.explain()["index"])
+        explanation = self.explain()
+        self._graph._record_query((time.perf_counter() - started) * 1000, scanned_records, explanation["index"], explanation["indexes"])
         return results
 
     def _collect_python(self, plan: dict) -> list:
@@ -2348,34 +2364,34 @@ class GraphQuery:
 
     def _indexed_candidates(self) -> list:
         explanation = self.explain()
-        selected = explanation["index"]
-        if selected is None or selected == "type-index":
+        selected_indexes = self._selected_indexes()
+        if not selected_indexes:
             return list(self._graph._nodes.values())
-        definition = self._graph._indexes[selected]
         equalities = {field: value for op, field, value in self._attributes if op == "eq"}
-        buckets = self._graph._secondary_index_data.get(selected, {})
-        if all(field in equalities for field in definition["fields"]):
-            expected = repr([equalities[field] for field in definition["fields"]])
-            ids = buckets.get(expected, set())
-            return [self._graph._nodes[id_] for id_ in ids if id_ in self._graph._nodes]
-        if len(definition["fields"]) == 1:
+        candidate_sets = []
+        for definition in selected_indexes:
+            buckets = self._graph._secondary_index_data.get(definition["name"], {})
+            values = [equalities.get(field, equalities.get(field.removeprefix("data."))) for field in definition["fields"]]
+            if all(field in equalities or field.removeprefix("data.") in equalities for field in definition["fields"]):
+                candidate_sets.append(set(buckets.get(repr(values), set())))
+                continue
             field = definition["fields"][0]
             ranges = [(above, below) for op, name, (above, below) in self._attributes if op == "range" and name == field]
-            if ranges:
+            if len(definition["fields"]) == 1 and ranges:
                 above, below = ranges[-1]
-                ids: set[str] = set()
+                ids = set()
                 for encoded, bucket in buckets.items():
                     try:
                         value = ast.literal_eval(encoded)[0]
                     except (ValueError, SyntaxError, IndexError, TypeError):
                         continue
-                    if not isinstance(value, (int, float)) or isinstance(value, bool):
-                        continue
-                    if (above is not None and value <= above) or (below is not None and value >= below):
-                        continue
-                    ids.update(bucket)
-                return [self._graph._nodes[id_] for id_ in ids if id_ in self._graph._nodes]
-        return list(self._graph._nodes.values())
+                    if isinstance(value, (int, float)) and not isinstance(value, bool) and (above is None or value > above) and (below is None or value < below):
+                        ids.update(bucket)
+                candidate_sets.append(ids)
+        if not candidate_sets:
+            return list(self._graph._nodes.values())
+        ids = set.intersection(*candidate_sets)
+        return [self._graph._nodes[id_] for id_ in ids if id_ in self._graph._nodes]
 
     def to_list(self) -> list:
         return [_copy_node(n) for n in self._collect()]

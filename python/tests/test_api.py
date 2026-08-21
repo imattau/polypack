@@ -107,6 +107,21 @@ def test_indexed_query_metrics_report_candidate_scan_count():
     assert stats["queryScannedRecords"] == 1
 
 
+def test_index_intersection_reports_and_uses_all_matching_indexes():
+    graph = PolyGraph()
+    graph.define_index("surname", ["surname"])
+    graph.define_index("birth-year", ["birthYear"])
+    for id_, surname, year in [("a", "Smith", 1980), ("b", "Smith", 1990), ("c", "Jones", 1980)]:
+        graph.add_node({"id": id_, "type": "person", "data": {"surname": surname, "birthYear": year}, "insertedAt": 1, "updatedAt": 1})
+
+    query = graph.query().where("surname", "Smith").where("birthYear", 1980)
+    explanation = query.explain()
+    assert explanation["indexes"] == ["surname", "birth-year"]
+    assert "index-intersection(2)" in explanation["stages"]
+    assert query.ids() == ["a"]
+    assert graph.stats()["queryIndexUsage"] == {"surname": 1, "birth-year": 1}
+
+
 def test_index_catalog_rolls_back_when_metadata_write_fails(tmp_path, monkeypatch):
     graph = PolyGraph.open(str(tmp_path))
     graph.define_index("email", ["email"])
@@ -370,6 +385,39 @@ def test_schema_and_unique_index_conformance_fixture():
         graph.add_node(fixture["duplicateNode"])
     assert graph.size == fixture["expect"]["nodeCount"]
     assert graph.get_node(fixture["expect"]["presentId"])["data"]["name"] == "Mary"
+
+
+def test_secondary_index_conformance_fixture():
+    fixture_path = Path(__file__).resolve().parents[2] / "fixtures" / "database-core" / "secondary-indexes.json"
+    fixture = json.loads(fixture_path.read_text())
+    graph = PolyGraph()
+    for index in fixture["indexes"]:
+        graph.define_index(index)
+    for node in fixture["nodes"]:
+        graph.add_node(node)
+    query = graph.query().where("surname", fixture["query"]["surname"]).where("birthYear", fixture["query"]["birthYear"])
+    explanation = query.explain()
+    assert query.ids() == fixture["expect"]["ids"]
+    assert sorted(explanation["indexes"]) == sorted(fixture["expect"]["indexes"])
+    assert fixture["expect"]["intersectionStage"] in explanation["stages"]
+
+
+def test_migration_conformance_fixture():
+    fixture_path = Path(__file__).resolve().parents[2] / "fixtures" / "database-core" / "migration.json"
+    fixture = json.loads(fixture_path.read_text())
+    graph = PolyGraph()
+    for node in fixture["nodes"]:
+        graph.add_node(node)
+    graph.migrations.register({
+        "from": fixture["from"],
+        "to": fixture["to"],
+        "migrateNode": lambda node: {**node, "data": {**node["data"], "displayName": node["data"]["name"]}},
+    })
+    report = graph.migrations.run(graph, fixture["from"], fixture["to"], {"batchSize": 1})
+    assert report["migrated"] == fixture["expect"]["migrated"]
+    assert sorted(graph.query().ids()) == fixture["expect"]["ids"]
+    for id_ in fixture["expect"]["ids"]:
+        assert graph.get_node(id_)["data"]["displayName"] == fixture["expect"]["displayNames"][id_]
 
 
 def test_parallel_edge_identity_conformance_fixture():

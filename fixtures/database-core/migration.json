@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "name": "application-migration",
+  "from": 1,
+  "to": 2,
+  "nodes": [
+    { "id": "person-1", "type": "person", "data": { "name": "Mary" }, "insertedAt": 1, "updatedAt": 1, "revision": 0 },
+    { "id": "person-2", "type": "person", "data": { "name": "John" }, "insertedAt": 1, "updatedAt": 1, "revision": 0 }
+  ],
+  "expect": { "migrated": 2, "ids": ["person-1", "person-2"], "displayNames": { "person-1": "Mary", "person-2": "John" } }
+}

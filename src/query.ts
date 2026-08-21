@@ -446,28 +446,32 @@ export class GraphQuery {
       ...Object.keys(this.opts.attributeRanges ?? {}),
     ])
     const nodeType = this.opts.nodeTypes?.length === 1 ? this.opts.nodeTypes[0] : undefined
-    const index = this.indexes.find(candidate =>
+    const selectedIndexes = this.indexes.filter(candidate =>
       (!candidate.nodeType || candidate.nodeType === nodeType) &&
       candidate.fields.every(field => fields.has(field) || fields.has(field.replace(/^data\./, ''))),
     )
-    const stages = [index ? `property-index(${index.name})` : 'record-scan']
+    const stages = selectedIndexes.length > 0
+      ? selectedIndexes.map(index => `property-index(${index.name})`)
+      : ['record-scan']
+    if (selectedIndexes.length > 1) stages.push(`index-intersection(${selectedIndexes.length})`)
     if (this.opts.nodeTypes?.length) stages.push(`type-filter(${this.opts.nodeTypes.join(',')})`)
     if (this.opts.afterSteps?.length) stages.push(`traversal(depth=${Math.max(...this.opts.afterSteps.map(step => step.depth))})`)
     if (this.opts.orderBy) stages.push(`order(${this.opts.orderBy.field},${this.opts.orderBy.direction})`)
     if (this.opts.limit !== undefined) stages.push(`limit(${this.opts.limit})`)
     return {
-      index: index?.name,
+      index: selectedIndexes[0]?.name,
+      indexes: selectedIndexes.map(index => index.name),
       stages,
       loadedRecords: this.nodes.size,
-      estimatedCost: Math.max(1, this.nodes.size * (index ? 0.25 : 1)),
+      estimatedCost: Math.max(1, this.nodes.size * (selectedIndexes.length > 0 ? 0.25 / selectedIndexes.length : 1)),
     }
   }
 
   toArray(): PolyNode[] {
     const started = Date.now()
     const finish = (results: PolyNode[]): PolyNode[] => {
-      const index = this.explain().index
-      this.onMetrics?.({ durationMs: Date.now() - started, scannedRecords: this.nodes.size, index })
+      const indexes = this.explain().indexes ?? []
+      this.onMetrics?.({ durationMs: Date.now() - started, scannedRecords: this.nodes.size, index: indexes[0], indexes })
       return results
     }
     const nativeIds = this.runNative()

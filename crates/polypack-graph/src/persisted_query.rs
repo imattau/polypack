@@ -34,6 +34,7 @@ struct SimilaritySpec {
 #[derive(Clone, Debug, PartialEq)]
 pub struct QueryExplain {
     pub index: Option<String>,
+    pub indexes: Vec<String>,
     pub stages: Vec<String>,
     pub loaded_records: usize,
     pub estimated_cost: f64,
@@ -199,14 +200,21 @@ impl<'a> PersistedGraphQuery<'a> {
     pub fn explain(&mut self) -> Result<QueryExplain> {
         let loaded_records = self.store.node_count()?;
         let mut stages = Vec::new();
-        let selected = self.selected_index();
-        let selected_range = selected.or_else(|| self.selected_range_index());
-        let index = selected_range.map(|definition| definition.name.clone()).or_else(|| {
+        let selected = self.selected_indexes();
+        let indexes: Vec<String> = selected.iter().map(|definition| definition.name.clone()).collect();
+        let index = indexes.first().cloned().or_else(|| {
             self.node_types.as_ref().filter(|types| !types.is_empty()).map(|_| "type-index".to_string())
         });
-        stages.push(selected_range.map_or_else(|| {
+        if indexes.is_empty() {
+            stages.push({
             if index.as_deref() == Some("type-index") { "type-index".to_string() } else { "record-scan".to_string() }
-        }, |definition| format!("property-index({})", definition.name)));
+            });
+        } else {
+            stages.extend(indexes.iter().map(|name| format!("property-index({name})")));
+        }
+        if indexes.len() > 1 {
+            stages.push(format!("index-intersection({})", indexes.len()));
+        }
         if let Some(types) = &self.node_types {
             if !types.is_empty() {
                 stages.push(format!("type-filter({})", types.join(",")));
@@ -229,34 +237,38 @@ impl<'a> PersistedGraphQuery<'a> {
             stages.push(format!("limit({limit})"));
         }
         Ok(QueryExplain {
+            indexes: indexes.clone(),
             index,
             stages,
             loaded_records,
-            estimated_cost: (loaded_records as f64 * if self.node_types.is_some() { 0.25 } else { 1.0 }).max(1.0),
+            estimated_cost: (loaded_records as f64 * if indexes.is_empty() { 1.0 } else { 0.25 / indexes.len() as f64 }).max(1.0),
         })
     }
 
     // ── internals ──
 
     fn base_query(&self, include_order: bool, include_pagination: bool) -> NodeQuery {
-        let candidate_ids = self.selected_index().and_then(|definition| {
-            let values = definition.fields.iter().map(|field| query_field_value(&self.attributes, field)).collect::<Vec<_>>();
-            if definition.sparse && values.iter().any(serde_json::Value::is_null) {
-                return None;
+        let candidate_ids = {
+            let mut sets = Vec::new();
+            for definition in self.selected_indexes() {
+                let equality = definition.fields.iter().all(|field| self.attributes.contains_key(field) || self.attributes.contains_key(field.strip_prefix("data.").unwrap_or(field)));
+                if equality {
+                    let values = definition.fields.iter().map(|field| query_field_value(&self.attributes, field)).collect::<Vec<_>>();
+                    if definition.sparse && values.iter().any(serde_json::Value::is_null) { continue; }
+                    let Some(key) = serde_json::to_string(&values).ok() else { continue };
+                    sets.push(self.secondary_indexes.get(&definition.name).and_then(|buckets| buckets.get(&key)).cloned().unwrap_or_default());
+                } else if definition.fields.len() == 1 {
+                    let Some(range) = self.attribute_ranges.get(&definition.fields[0]) else { continue };
+                    let ids = self.secondary_indexes.get(&definition.name).into_iter().flat_map(|buckets| buckets.iter()).filter_map(|(encoded, bucket)| {
+                        let value = serde_json::from_str::<Vec<serde_json::Value>>(encoded).ok()?.first()?.as_f64()?;
+                        if range.0.is_some_and(|above| value <= above) || range.1.is_some_and(|below| value >= below) { return None; }
+                        Some(bucket.iter().cloned())
+                    }).flatten().collect();
+                    sets.push(ids);
+                }
             }
-            let key = serde_json::to_string(&values).ok()?;
-            self.secondary_indexes.get(&definition.name)?.get(&key).map(|ids| ids.iter().cloned().collect())
-        });
-        let candidate_ids = candidate_ids.or_else(|| self.selected_range_index().and_then(|definition| {
-            let range = self.attribute_ranges.get(&definition.fields[0])?;
-            let buckets = self.secondary_indexes.get(&definition.name)?;
-            let ids = buckets.iter().filter_map(|(encoded, bucket)| {
-                let value = serde_json::from_str::<Vec<serde_json::Value>>(encoded).ok()?.first()?.as_f64()?;
-                if range.0.is_some_and(|above| value <= above) || range.1.is_some_and(|below| value >= below) { return None; }
-                Some(bucket.iter().cloned())
-            }).flatten().collect();
-            Some(ids)
-        }));
+            sets.into_iter().reduce(|mut ids, candidate| { ids.retain(|id| candidate.contains(id)); ids }).map(|ids| ids.into_iter().collect())
+        };
         NodeQuery {
             candidate_ids,
             node_types: self.node_types.clone(),
@@ -278,25 +290,17 @@ impl<'a> PersistedGraphQuery<'a> {
         }
     }
 
-    fn selected_index(&self) -> Option<&IndexDefinition> {
-        self.indexes.values().filter(|definition| {
-            !definition.fields.is_empty()
-                && definition.fields.iter().all(|field| {
-                    self.attributes.contains_key(field) || self.attributes.contains_key(field.strip_prefix("data.").unwrap_or(field))
-                })
-                && (!definition.sparse || definition.fields.iter().all(|field| !query_field_value(&self.attributes, field).is_null()))
-                && self.node_types.as_ref().is_none_or(|types| {
-                    definition.node_type.as_ref().is_none_or(|node_type| types.len() == 1 && types[0] == *node_type)
-                })
-        }).min_by_key(|definition| definition.fields.len())
-    }
-
-    fn selected_range_index(&self) -> Option<&IndexDefinition> {
-        self.indexes.values().find(|definition| {
-            definition.fields.len() == 1
-                && self.attribute_ranges.contains_key(&definition.fields[0])
-                && self.node_types.as_ref().is_none_or(|types| definition.node_type.as_ref().is_none_or(|node_type| types.len() == 1 && types[0] == *node_type))
-        })
+    fn selected_indexes(&self) -> Vec<&IndexDefinition> {
+        let mut selected: Vec<&IndexDefinition> = self.indexes.values().filter(|definition| {
+            let compatible_type = self.node_types.as_ref().is_none_or(|types| definition.node_type.as_ref().is_none_or(|node_type| types.len() == 1 && types[0] == *node_type));
+            let equality = !definition.fields.is_empty()
+                && definition.fields.iter().all(|field| self.attributes.contains_key(field) || self.attributes.contains_key(field.strip_prefix("data.").unwrap_or(field)))
+                && (!definition.sparse || definition.fields.iter().all(|field| !query_field_value(&self.attributes, field).is_null()));
+            let range = definition.fields.len() == 1 && self.attribute_ranges.contains_key(&definition.fields[0]);
+            compatible_type && (equality || range)
+        }).collect();
+        selected.sort_by(|left, right| left.name.cmp(&right.name));
+        selected
     }
 
     fn apply_edge_filters(&mut self, nodes: Vec<Node>) -> Result<Vec<Node>> {

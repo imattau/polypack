@@ -19,6 +19,14 @@ use crate::edge::EdgeEntry;
 use crate::graph::{now_millis, IndexDefinition};
 use crate::persisted_query::QueryExplain;
 
+fn query_field_value(attributes: &HashMap<String, serde_json::Value>, field: &str) -> serde_json::Value {
+    attributes
+        .get(field)
+        .or_else(|| attributes.get(field.strip_prefix("data.").unwrap_or(field)))
+        .cloned()
+        .unwrap_or(serde_json::Value::Null)
+}
+
 /// A `join` predicate closure: `Some` to filter by the connected node,
 /// `None` to require only that a connection exists.
 type JoinPredicate<'a> = Box<dyn Fn(&Node) -> bool + 'a>;
@@ -228,20 +236,17 @@ impl<'a> GraphQuery<'a> {
 
     /// Describe the hot-query stages without materializing results.
     pub fn explain(&self) -> QueryExplain {
-        let property_index = self.indexes.values().find(|definition| {
-            !definition.fields.is_empty()
-                && definition.fields.iter().all(|field| self.attributes.contains_key(field))
-                && self.node_types.as_ref().is_none_or(|types| definition.node_type.as_ref().is_none_or(|node_type| types.len() == 1 && types[0] == *node_type))
-        }).map(|definition| definition.name.clone());
-        let range_index = self.indexes.values().find(|definition| {
-            definition.fields.len() == 1
-                && self.attribute_ranges.contains_key(&definition.fields[0])
-                && self.node_types.as_ref().is_none_or(|types| definition.node_type.as_ref().is_none_or(|node_type| types.len() == 1 && types[0] == *node_type))
-        }).map(|definition| definition.name.clone());
-        let index = property_index.or(range_index).or_else(|| self.node_types.as_ref().filter(|types| !types.is_empty()).map(|_| "type-index".to_string()));
-        let mut stages = vec![index.as_ref().map_or_else(|| "record-scan".to_string(), |name| {
-            if name == "type-index" { name.clone() } else { format!("property-index({name})") }
-        })];
+        let selected = self.selected_indexes();
+        let indexes: Vec<String> = selected.iter().map(|definition| definition.name.clone()).collect();
+        let index = indexes.first().cloned().or_else(|| self.node_types.as_ref().filter(|types| !types.is_empty()).map(|_| "type-index".to_string()));
+        let mut stages: Vec<String> = if indexes.is_empty() {
+            vec![if index.as_deref() == Some("type-index") { "type-index".to_string() } else { "record-scan".to_string() }]
+        } else {
+            indexes.iter().map(|name| format!("property-index({name})")).collect()
+        };
+        if indexes.len() > 1 {
+            stages.push(format!("index-intersection({})", indexes.len()));
+        }
         if let Some(types) = &self.node_types {
             if !types.is_empty() {
                 stages.push(format!("type-filter({})", types.join(",")));
@@ -266,9 +271,10 @@ impl<'a> GraphQuery<'a> {
         let loaded_records = self.nodes.len();
         QueryExplain {
             index,
+            indexes,
             stages,
             loaded_records,
-            estimated_cost: (loaded_records as f64 * if self.node_types.is_some() { 0.25 } else { 1.0 }).max(1.0),
+            estimated_cost: (loaded_records as f64 * if selected.is_empty() { 1.0 } else { 0.25 / selected.len() as f64 }).max(1.0),
         }
     }
 
@@ -425,39 +431,47 @@ impl<'a> GraphQuery<'a> {
             return ids.iter().filter_map(|id| self.nodes.get(id)).collect();
         }
 
-        if let Some(index) = self.indexes.values().find(|definition| {
-            !definition.fields.is_empty()
-                && definition.fields.iter().all(|field| self.attributes.contains_key(field))
-                && self.node_types.as_ref().is_none_or(|types| definition.node_type.as_ref().is_none_or(|node_type| types.iter().any(|kind| kind == node_type)))
-        }) {
-            let values = index.fields.iter().map(|field| self.attributes.get(field).cloned().unwrap_or(serde_json::Value::Null)).collect::<Vec<_>>();
-            let key = serde_json::to_string(&values).expect("JSON index key serialization cannot fail");
-            if let Some(ids) = self.secondary_indexes.get(&index.name).and_then(|buckets| buckets.get(&key)) {
+        let selected = self.selected_indexes();
+        if !selected.is_empty() {
+            let mut candidate_sets = Vec::new();
+            for index in selected {
+                if index.fields.iter().all(|field| self.attributes.contains_key(field) || self.attributes.contains_key(field.strip_prefix("data.").unwrap_or(field))) {
+                    let values = index.fields.iter().map(|field| query_field_value(&self.attributes, field)).collect::<Vec<_>>();
+                    let key = serde_json::to_string(&values).expect("JSON index key serialization cannot fail");
+                    candidate_sets.push(self.secondary_indexes.get(&index.name).and_then(|buckets| buckets.get(&key)).cloned().unwrap_or_default());
+                } else if index.fields.len() == 1 {
+                    let field = &index.fields[0];
+                    let range = &self.attribute_ranges[field];
+                    let ids: HashSet<String> = self.secondary_indexes.get(&index.name).into_iter().flat_map(|buckets| buckets.iter()).filter_map(|(encoded, bucket)| {
+                        let values = serde_json::from_str::<Vec<serde_json::Value>>(encoded).ok()?;
+                        let value = values.first()?.as_f64()?;
+                        if range.above.is_some_and(|above| value <= above) || range.below.is_some_and(|below| value >= below) { return None; }
+                        Some(bucket.iter().cloned())
+                    }).flatten().collect();
+                    candidate_sets.push(ids);
+                }
+            }
+            if let Some((first, rest)) = candidate_sets.split_first() {
+                let ids = rest.iter().fold(first.clone(), |mut ids, candidate| { ids.retain(|id| candidate.contains(id)); ids });
                 return ids.iter().filter_map(|id| self.nodes.get(id)).collect();
             }
-            return Vec::new();
-        }
-
-        if let Some(index) = self.indexes.values().find(|definition| {
-            definition.fields.len() == 1
-                && self.attribute_ranges.contains_key(&definition.fields[0])
-                && self.node_types.as_ref().is_none_or(|types| definition.node_type.as_ref().is_none_or(|node_type| types.len() == 1 && types[0] == *node_type))
-        }) {
-            let field = &index.fields[0];
-            let range = &self.attribute_ranges[field];
-            let ids: HashSet<String> = self.secondary_indexes.get(&index.name).into_iter().flat_map(|buckets| buckets.iter()).filter_map(|(encoded, bucket)| {
-                let values = serde_json::from_str::<Vec<serde_json::Value>>(encoded).ok()?;
-                let value = values.first()?.as_f64()?;
-                if range.above.is_some_and(|above| value <= above) || range.below.is_some_and(|below| value >= below) { return None; }
-                Some(bucket.iter().cloned())
-            }).flatten().collect();
-            return ids.iter().filter_map(|id| self.nodes.get(id)).collect();
         }
 
         match &self.node_types {
             Some(types) => self.nodes.values().filter(|n| types.iter().any(|t| t == &n.node_type)).collect(),
             None => self.nodes.values().collect(),
         }
+    }
+
+    fn selected_indexes(&self) -> Vec<&IndexDefinition> {
+        let mut selected: Vec<&IndexDefinition> = self.indexes.values().filter(|definition| {
+            let compatible_type = self.node_types.as_ref().is_none_or(|types| definition.node_type.as_ref().is_none_or(|node_type| types.len() == 1 && types[0] == *node_type));
+            let equality = !definition.fields.is_empty() && definition.fields.iter().all(|field| self.attributes.contains_key(field) || self.attributes.contains_key(field.strip_prefix("data.").unwrap_or(field)));
+            let range = definition.fields.len() == 1 && self.attribute_ranges.contains_key(&definition.fields[0]);
+            compatible_type && (equality || range)
+        }).collect();
+        selected.sort_by(|left, right| left.name.cmp(&right.name));
+        selected
     }
 
     fn bfs(&self, seeds: &[String], step: &TraversalStep) -> HashSet<String> {

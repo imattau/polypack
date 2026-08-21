@@ -650,6 +650,7 @@ export class PolyGraph {
   ): string[] | undefined {
     if (!attributes && !ranges) return undefined
     const type = nodeTypes?.length === 1 ? nodeTypes[0] : undefined
+    const candidates: Set<string>[] = []
     for (const index of this.secondaryIndexes.values()) {
       if (index.nodeType && index.nodeType !== type) continue
       if (attributes && index.fields.every(field => Object.prototype.hasOwnProperty.call(attributes, field) ||
@@ -658,7 +659,8 @@ export class PolyGraph {
           ? attributes[field]
           : attributes[field.replace(/^data\./, '')])
         const ids = this.secondaryIndexData.get(index.name)?.get(JSON.stringify(values))
-        return ids ? [...ids] : []
+        candidates.push(new Set(ids ?? []))
+        continue
       }
       if (index.fields.length !== 1 || !ranges) continue
       const field = index.fields[0]
@@ -672,9 +674,15 @@ export class PolyGraph {
         if (range.below !== undefined && value >= range.below) continue
         ids.push(...bucket)
       }
-      return ids
+      candidates.push(new Set(ids))
     }
-    return undefined
+    if (candidates.length === 0) return undefined
+    candidates.sort((a, b) => a.size - b.size)
+    const result = candidates[0]
+    for (const candidate of candidates.slice(1)) {
+      for (const id of result) if (!candidate.has(id)) result.delete(id)
+    }
+    return [...result]
   }
 
   private captureTransactionState(): any {

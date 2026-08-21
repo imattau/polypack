@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "name": "secondary-index-intersection",
+  "indexes": [
+    { "name": "surname", "fields": ["surname"] },
+    { "name": "birth-year", "fields": ["birthYear"] }
+  ],
+  "nodes": [
+    { "id": "person-1", "type": "person", "data": { "surname": "Smith", "birthYear": 1980 }, "insertedAt": 1, "updatedAt": 1, "revision": 0 },
+    { "id": "person-2", "type": "person", "data": { "surname": "Smith", "birthYear": 1990 }, "insertedAt": 1, "updatedAt": 1, "revision": 0 },
+    { "id": "person-3", "type": "person", "data": { "surname": "Jones", "birthYear": 1980 }, "insertedAt": 1, "updatedAt": 1, "revision": 0 }
+  ],
+  "query": { "surname": "Smith", "birthYear": 1980 },
+  "expect": {
+    "ids": ["person-1"],
+    "indexes": ["surname", "birth-year"],
+    "intersectionStage": "index-intersection(2)"
+  }
+}

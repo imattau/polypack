@@ -69,3 +69,40 @@ fn schema_and_unique_index_fixture_passes() {
         .get_node(fixture["expect"]["presentId"].as_str().unwrap())
         .is_some());
 }
+
+#[test]
+fn secondary_index_fixture_passes() {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../fixtures/database-core/secondary-indexes.json");
+    let fixture: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    let mut graph = Graph::open(
+        Box::new(InMemoryStorage::new()),
+        StoreConfig::default(),
+        GraphConfig::default(),
+    )
+    .unwrap();
+    for index in fixture["indexes"].as_array().unwrap() {
+        graph
+            .define_index(IndexDefinition {
+                name: index["name"].as_str().unwrap().to_string(),
+                fields: index["fields"].as_array().unwrap().iter().map(|v| v.as_str().unwrap().to_string()).collect(),
+                ..Default::default()
+            })
+            .unwrap();
+    }
+    for node in fixture["nodes"].as_array().unwrap() {
+        graph.add_node(serde_json::from_value::<Node>(node.clone()).unwrap()).unwrap();
+    }
+    let query = graph
+        .query()
+        .where_field("surname", fixture["query"]["surname"].clone())
+        .where_field("birthYear", fixture["query"]["birthYear"].clone());
+    let explanation = query.explain();
+    let mut indexes = explanation.indexes.clone();
+    indexes.sort();
+    let mut expected = fixture["expect"]["indexes"].as_array().unwrap().iter().map(|v| v.as_str().unwrap().to_string()).collect::<Vec<_>>();
+    expected.sort();
+    assert_eq!(indexes, expected);
+    assert!(explanation.stages.contains(&fixture["expect"]["intersectionStage"].as_str().unwrap().to_string()));
+    assert_eq!(query.ids(), fixture["expect"]["ids"].as_array().unwrap().iter().map(|v| v.as_str().unwrap().to_string()).collect::<Vec<_>>());
+}

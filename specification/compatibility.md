@@ -28,6 +28,11 @@ ordering and implementation-specific diagnostic text.
   unit and persistence tests.
 - Python runs `python/tests/test_conformance.py` against the same fixture
   directory, plus its complete API and persistence suite.
+- Database-core fixtures under `fixtures/database-core` are also shared across
+  the language-specific suites. The secondary-index fixture covers candidate
+  intersection, selected-index explain output, and stable query results.
+  The migration fixture covers batched application-schema transformation and
+  record identity preservation.
 
 The Python runner reports the hot-cache eviction fixture as an explicit skip
 because cache sizing is an orchestration concern in that implementation; it

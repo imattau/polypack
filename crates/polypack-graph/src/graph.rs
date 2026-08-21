@@ -3164,6 +3164,43 @@ mod tests {
     }
 
     #[test]
+    fn hot_queries_intersect_secondary_index_candidates() {
+        let mut graph = test_graph();
+        graph.define_index(IndexDefinition { name: "surname".into(), fields: vec!["surname".into()], ..Default::default() }).unwrap();
+        graph.define_index(IndexDefinition { name: "birth-year".into(), fields: vec!["birthYear".into()], ..Default::default() }).unwrap();
+        for (id, surname, year) in [("a", "Smith", 1980), ("b", "Smith", 1990), ("c", "Jones", 1980)] {
+            let mut node = node_of_type(id, "person");
+            node.data.insert("surname".into(), surname.into());
+            node.data.insert("birthYear".into(), year.into());
+            graph.add_node(node).unwrap();
+        }
+        let query = graph.query().where_field("surname", "Smith".into()).where_field("birthYear", 1980.into());
+        let explanation = query.explain();
+        assert_eq!(explanation.indexes, vec!["birth-year", "surname"]);
+        assert!(explanation.stages.contains(&"index-intersection(2)".to_string()));
+        assert_eq!(query.ids(), vec!["a"]);
+    }
+
+    #[test]
+    fn persisted_queries_intersect_secondary_index_candidates() {
+        let mut graph = test_graph();
+        graph.define_index(IndexDefinition { name: "surname".into(), fields: vec!["surname".into()], ..Default::default() }).unwrap();
+        graph.define_index(IndexDefinition { name: "birth-year".into(), fields: vec!["birthYear".into()], ..Default::default() }).unwrap();
+        for (id, surname, year) in [("a", "Smith", 1980), ("b", "Smith", 1990), ("c", "Jones", 1980)] {
+            let mut node = node_of_type(id, "person");
+            node.data.insert("surname".into(), surname.into());
+            node.data.insert("birthYear".into(), year.into());
+            graph.add_node(node).unwrap();
+        }
+        graph.flush().unwrap();
+        let mut query = graph.query_persisted().where_field("surname", "Smith".into()).where_field("birthYear", 1980.into());
+        let explanation = query.explain().unwrap();
+        assert_eq!(explanation.indexes, vec!["birth-year", "surname"]);
+        assert!(explanation.stages.contains(&"index-intersection(2)".to_string()));
+        assert_eq!(query.ids().unwrap(), vec!["a"]);
+    }
+
+    #[test]
     fn indexes_reject_duplicate_compound_fields() {
         let mut graph = test_graph();
         let error = graph.define_index(IndexDefinition { name: "invalid".into(), fields: vec!["email".into(), "email".into()], ..Default::default() }).unwrap_err();

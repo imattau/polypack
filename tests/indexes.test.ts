@@ -84,6 +84,22 @@ describe('secondary indexes', () => {
     expect(stats.queryScannedRecords).toBe(1)
   })
 
+  it('intersects compatible hot-query indexes and explains the intersection', async () => {
+    const graph = new PolyGraph()
+    graph.defineIndex({ name: 'surname', fields: ['surname'] })
+    graph.defineIndex({ name: 'birth-year', fields: ['birthYear'] })
+    graph.addNode({ id: 'match', type: 'person', data: { surname: 'Smith', birthYear: 1980 }, insertedAt: 1, updatedAt: 1 })
+    graph.addNode({ id: 'surname-only', type: 'person', data: { surname: 'Smith', birthYear: 1990 }, insertedAt: 1, updatedAt: 1 })
+    graph.addNode({ id: 'year-only', type: 'person', data: { surname: 'Jones', birthYear: 1980 }, insertedAt: 1, updatedAt: 1 })
+
+    const query = graph.query().where('surname', 'Smith').where('birthYear', 1980)
+    expect(query.toArray().map(item => item.id)).toEqual(['match'])
+    const explanation = query.explain()
+    expect(explanation.indexes).toEqual(['surname', 'birth-year'])
+    expect(explanation.stages).toContain('index-intersection(2)')
+    expect((await graph.stats()).queryIndexUsage).toMatchObject({ surname: 1, 'birth-year': 1 })
+  })
+
   it('records every persisted index used by an intersection', async () => {
     const graph = new PolyGraph()
     graph.defineIndex({ name: 'surname', fields: ['surname'] })
