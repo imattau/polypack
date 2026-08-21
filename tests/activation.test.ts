@@ -213,6 +213,24 @@ describe('mergeActivation', () => {
     expect(merged.reinforcementCount).toBe(2)
     expect(merged.lastMeaningfulActivation).toBe(now)
   })
+
+  it('max-merges inhibition and per-context scores', () => {
+    const now = Date.now()
+    const a: NodeActivation = {
+      score: 0.2, importance: 0, reinforcementCount: 1, lastMeaningfulActivation: now,
+      inhibition: 0.3, lastInhibitedAt: now,
+      context: { 'project-x': { score: 0.7, lastMeaningfulActivation: now } },
+    }
+    const b: NodeActivation = {
+      score: 0.5, importance: 0, reinforcementCount: 2, lastMeaningfulActivation: now,
+      inhibition: 0.6, lastInhibitedAt: now,
+      context: { 'project-x': { score: 0.4, lastMeaningfulActivation: now }, coding: { score: 0.2, lastMeaningfulActivation: now } },
+    }
+    const merged = mergeActivation(a, b, now)
+    expect(merged.inhibition).toBeCloseTo(0.6, 5)
+    expect(merged.context?.['project-x'].score).toBeCloseTo(0.7, 5)
+    expect(merged.context?.coding.score).toBeCloseTo(0.2, 5)
+  })
 })
 
 describe('ActivationEngine', () => {
@@ -278,6 +296,69 @@ describe('ActivationEngine', () => {
     }
     const engine = new ActivationEngine(graph)
     expect(engine.workingMemory(2).map(n => n.id)).toEqual(['a', 'b'])
+    engine.dispose()
+  })
+
+  it('reinforces a context independently of the global score', () => {
+    const graph = new PolyGraph()
+    graph.addNode(node('n1'))
+    graph.reinforceNode('n1', 0.2)
+    graph.reinforceNode('n1', 0.3, undefined, 'project-x')
+
+    const engine = new ActivationEngine(graph)
+    // Global score reflects both reinforcements; the context reflects only its own.
+    expect(engine.effective('n1')).toBeCloseTo(0.5, 5)
+    expect(engine.effective('n1', 'project-x')).toBeCloseTo(0.3, 5)
+    // A context the node has no history in reads cold, even though it's globally active.
+    expect(engine.effective('n1', 'coding')).toBe(0)
+    expect(graph.getContextActivation('n1', 'project-x')).toBeCloseTo(0.3, 5)
+    engine.dispose()
+  })
+
+  it('suppress subtracts inhibition from effective() but not from the raw score', () => {
+    const graph = new PolyGraph()
+    graph.addNode(node('n1'))
+    graph.reinforceNode('n1', 0.8)
+    graph.suppressNode('n1', 0.5)
+
+    const engine = new ActivationEngine(graph)
+    expect(engine.inhibitionOf('n1')).toBeCloseTo(0.5, 5)
+    expect(engine.effective('n1')).toBeCloseTo(0.3, 5)
+    expect(graph.getActivation('n1')).toBeCloseTo(0.8, 5)
+
+    // Releasing suppression (negative amount) restores effective().
+    graph.suppressNode('n1', -0.5)
+    expect(engine.effective('n1')).toBeCloseTo(0.8, 5)
+    engine.dispose()
+  })
+
+  it('workingMemory with a tokenBudget stops once the budget is spent', () => {
+    const graph = new PolyGraph()
+    for (const [id, amount] of [['a', 0.9], ['b', 0.5], ['c', 0.1]] as const) {
+      graph.addNode(node(id))
+      graph.reinforceNode(id, amount)
+    }
+    const engine = new ActivationEngine(graph)
+    const selected = engine.workingMemory({ limit: 10, tokenBudget: 2, costOf: () => 1 })
+    expect(selected.map(n => n.id)).toEqual(['a', 'b'])
+    engine.dispose()
+  })
+
+  it('workingMemory with diversityLambda penalises redundant neighbours', () => {
+    const graph = new PolyGraph()
+    graph.addNode({ ...node('a'), vector: new Float64Array([1, 0]) })
+    graph.addNode({ ...node('b'), vector: new Float64Array([1, 0.01]) }) // near-duplicate of a
+    graph.addNode({ ...node('c'), vector: new Float64Array([0, 1]) }) // orthogonal
+    graph.reinforceNode('a', 0.9)
+    graph.reinforceNode('b', 0.85)
+    graph.reinforceNode('c', 0.5)
+
+    const engine = new ActivationEngine(graph)
+    const relevanceOnly = engine.workingMemory({ limit: 2 })
+    expect(relevanceOnly.map(n => n.id)).toEqual(['a', 'b'])
+
+    const diverse = engine.workingMemory({ limit: 2, diversityLambda: 0.8 })
+    expect(diverse.map(n => n.id)).toEqual(['a', 'c'])
     engine.dispose()
   })
 

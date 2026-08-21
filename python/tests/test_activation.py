@@ -198,3 +198,62 @@ def test_engine_working_memory_returns_most_active():
     engine = ActivationEngine(g)
     assert [n["id"] for n in engine.working_memory(2)] == ["a", "b"]
     engine.dispose()
+
+
+def test_reinforces_a_context_independently_of_the_global_score():
+    g = PolyGraph()
+    g.add_node(_node("a"))
+    g.reinforce_node("a", 0.2)
+    g.reinforce_node("a", 0.3, context="project-x")
+
+    engine = ActivationEngine(g)
+    assert engine.effective("a") == pytest.approx(0.5, abs=1e-5)
+    assert engine.effective("a", "project-x") == pytest.approx(0.3, abs=1e-5)
+    assert engine.effective("a", "coding") == 0.0
+    assert g.get_context_activation("a", "project-x") == pytest.approx(0.3, abs=1e-5)
+    engine.dispose()
+
+
+def test_suppress_subtracts_inhibition_from_effective_but_not_the_raw_score():
+    g = PolyGraph()
+    g.add_node(_node("a"))
+    g.reinforce_node("a", 0.8)
+    g.suppress_node("a", 0.5)
+
+    engine = ActivationEngine(g)
+    assert engine.inhibition_of("a") == pytest.approx(0.5, abs=1e-5)
+    assert engine.effective("a") == pytest.approx(0.3, abs=1e-5)
+    assert g.get_activation("a") == pytest.approx(0.8, abs=1e-5)
+
+    g.suppress_node("a", -0.5)
+    assert engine.effective("a") == pytest.approx(0.8, abs=1e-5)
+    engine.dispose()
+
+
+def test_working_memory_with_token_budget_stops_once_spent():
+    g = PolyGraph()
+    for id_, amount in [("a", 0.9), ("b", 0.5), ("c", 0.1)]:
+        g.add_node(_node(id_))
+        g.reinforce_node(id_, amount)
+    engine = ActivationEngine(g)
+    selected = engine.working_memory(limit=10, token_budget=2)
+    assert [n["id"] for n in selected] == ["a", "b"]
+    engine.dispose()
+
+
+def test_working_memory_with_diversity_lambda_penalises_redundant_neighbours():
+    g = PolyGraph()
+    g.add_node(_node("a", vector=[1.0, 0.0]))
+    g.add_node(_node("b", vector=[1.0, 0.01]))
+    g.add_node(_node("c", vector=[0.0, 1.0]))
+    g.reinforce_node("a", 0.9)
+    g.reinforce_node("b", 0.85)
+    g.reinforce_node("c", 0.5)
+
+    engine = ActivationEngine(g)
+    relevance_only = engine.working_memory(limit=2)
+    assert [n["id"] for n in relevance_only] == ["a", "b"]
+
+    diverse = engine.working_memory(limit=2, diversity_lambda=0.8)
+    assert [n["id"] for n in diverse] == ["a", "c"]
+    engine.dispose()

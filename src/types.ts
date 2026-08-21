@@ -10,6 +10,14 @@
  * `lastMeaningfulActivation`, so replicas compute identical current scores
  * from the same durable state plus their clocks.
  */
+/** A node's decayed relevance within one named context (e.g. a project, user, or task). */
+export interface ContextActivation {
+  /** Context-scoped activation. Clamped to [0, 1]. */
+  score: number
+  /** Epoch-ms anchor for this context's decay. */
+  lastMeaningfulActivation: number
+}
+
 export interface NodeActivation {
   /** Current learned activation, decay-corrected on read. Clamped to [0, 1]. */
   score: number
@@ -19,6 +27,20 @@ export interface NodeActivation {
   reinforcementCount: number
   /** Epoch-ms anchor for decay. Both `score` and `importance` decay from here. */
   lastMeaningfulActivation: number
+  /**
+   * Suppression: subtracted from `score` at read time (see `scoreOf`/`effective`
+   * in the `activation` module), never inside relational spreading. Clamped to
+   * [0, 1]. Absent (undefined) is equivalent to 0 and decays no differently.
+   */
+  inhibition?: number
+  /** Epoch-ms anchor for `inhibition`'s decay. Absent iff `inhibition` is absent. */
+  lastInhibitedAt?: number
+  /**
+   * Per-context activation, keyed by an application-defined context id (e.g.
+   * `"project-x"`, `"coding"`). Additional to (not a replacement for) the
+   * global `score` above — reinforcing with a `context` updates both.
+   */
+  context?: Record<string, ContextActivation>
 }
 
 /** A typed property-graph node. Timestamps are Unix milliseconds. */
@@ -52,17 +74,27 @@ export interface PolyEdge<TData extends Record<string, unknown> = Record<string,
 
 /** Mutation notification emitted through {@link PolyGraph.changes}. */
 export interface GraphChangeEvent {
-  type: 'node_added' | 'node_updated' | 'node_removed' | 'edge_added' | 'edge_updated' | 'edge_removed' | 'activation_updated'
+  type:
+    | 'node_added'
+    | 'node_updated'
+    | 'node_removed'
+    | 'edge_added'
+    | 'edge_updated'
+    | 'edge_removed'
+    | 'activation_updated'
+    | 'inhibition_updated'
   nodeId?: string
   nodeType?: string
   edgeId?: string
   edgeType?: string
   source?: string
   target?: string
-  /** Present on `activation_updated` events: the applied reinforcement delta. */
+  /** Present on `activation_updated`/`inhibition_updated` events: the applied delta. */
   delta?: number
-  /** Present on `activation_updated` events: an optional reinforcement reason. */
+  /** Present on `activation_updated`/`inhibition_updated` events: an optional reason. */
   reason?: string
+  /** Present on `activation_updated` events: the context reinforced alongside global score, if any. */
+  context?: string
   /** Transaction that produced this event, when the mutation ran in one. */
   transactionId?: string
 }

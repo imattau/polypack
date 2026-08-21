@@ -21,8 +21,9 @@
 import { readFileSync, readdirSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { PolyGraph, HNSWIndex, cosineSimilarity, ConflictError } from '../../src/index'
-import type { EdgeOwnership, PolyNode, SerializedNode, VectorIndexLike } from '../../src/index'
+import { PolyGraph, HNSWIndex, cosineSimilarity, ConflictError, mergeActivation } from '../../src/index'
+import type { EdgeOwnership, PolyNode, SerializedNode, VectorIndexLike, NodeActivation } from '../../src/index'
+import { decayActivationState, reinforceActivation, suppressActivation } from '../../src/utils'
 import type { QueryPlan } from './query-plan'
 
 export type ErrorCode =
@@ -84,6 +85,36 @@ export interface Expectations {
   aggregate?: { plan?: QueryPlan; field: string; op: 'sum' | 'avg' | 'min' | 'max' | 'count'; value: number; count: number }
 }
 
+export type ActivationCase =
+  | {
+      name: string
+      kind: 'decay'
+      input: NodeActivation
+      now: number
+      scoreHalfLifeMs?: number
+      importanceHalfLifeMs?: number
+      expect: NodeActivation
+    }
+  | {
+      name: string
+      kind: 'reinforce'
+      previous: NodeActivation | null
+      delta: number
+      now: number
+      context?: string
+      expect: NodeActivation
+    }
+  | { name: string; kind: 'merge'; existing: NodeActivation; incoming: NodeActivation; now: number; expect: NodeActivation }
+  | {
+      name: string
+      kind: 'suppress'
+      previous: NodeActivation | null
+      delta: number
+      now: number
+      inhibitionHalfLifeMs?: number
+      expect: NodeActivation
+    }
+
 export interface Fixture {
   schemaVersion: number
   name: string
@@ -91,8 +122,10 @@ export interface Fixture {
   orphanAware?: boolean
   graphOptions?: { hotCacheMax?: number }
   setup?: { nodes?: NodeInput[]; edges?: EdgeInput[] }
-  operations: Operation[]
-  expect: Expectations
+  operations?: Operation[]
+  expect?: Expectations
+  /** Pure activation-math cases (group `activation`) — no PolyGraph instance involved. */
+  activationCases?: ActivationCase[]
 }
 
 const FIXTURES_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'fixtures', 'conformance')
@@ -383,13 +416,66 @@ function assertExpectations(graph: PolyGraph, orphanGraph: OrphanAwareGraph | nu
   }
 }
 
+const ACTIVATION_EPSILON = 1e-9
+
+function assertActivationEqual(name: string, got: NodeActivation, expect: NodeActivation): void {
+  for (const key of ['score', 'importance', 'reinforcementCount', 'lastMeaningfulActivation'] as const) {
+    if (Math.abs(got[key] - expect[key]) > ACTIVATION_EPSILON) {
+      throw new ConformanceError(`${name}: ${key} = ${got[key]} !== ${expect[key]}`)
+    }
+  }
+  const gotInhibition = got.inhibition ?? 0
+  const expectInhibition = expect.inhibition ?? 0
+  if (Math.abs(gotInhibition - expectInhibition) > ACTIVATION_EPSILON) {
+    throw new ConformanceError(`${name}: inhibition = ${gotInhibition} !== ${expectInhibition}`)
+  }
+  const expectContext = expect.context ?? {}
+  const gotContext = got.context ?? {}
+  for (const key of Object.keys(expectContext)) {
+    const gotScore = gotContext[key]?.score ?? 0
+    const expectScore = expectContext[key].score
+    if (Math.abs(gotScore - expectScore) > ACTIVATION_EPSILON) {
+      throw new ConformanceError(`${name}: context[${key}].score = ${gotScore} !== ${expectScore}`)
+    }
+  }
+  for (const key of Object.keys(gotContext)) {
+    if (!(key in expectContext) && (gotContext[key]?.score ?? 0) > ACTIVATION_EPSILON) {
+      throw new ConformanceError(`${name}: unexpected context[${key}] with score ${gotContext[key].score}`)
+    }
+  }
+}
+
+export function runActivationCases(cases: ActivationCase[]): void {
+  for (const c of cases) {
+    if (c.kind === 'decay') {
+      const got = decayActivationState(c.input, c.now, c.scoreHalfLifeMs, c.importanceHalfLifeMs)
+      assertActivationEqual(c.name, got, c.expect)
+    } else if (c.kind === 'reinforce') {
+      const got = reinforceActivation(c.previous ?? undefined, c.delta, c.now, undefined, c.context)
+      assertActivationEqual(c.name, got, c.expect)
+    } else if (c.kind === 'suppress') {
+      const got = suppressActivation(c.previous ?? undefined, c.delta, c.now, c.inhibitionHalfLifeMs)
+      assertActivationEqual(c.name, got, c.expect)
+    } else {
+      const got = mergeActivation(c.existing, c.incoming, c.now)
+      assertActivationEqual(c.name, got, c.expect)
+    }
+  }
+}
+
 export function runFixture(fixture: Fixture, createIndex?: (onChange: (id: string) => void) => VectorIndexLike): void {
+  if (fixture.activationCases) {
+    runActivationCases(fixture.activationCases)
+    return
+  }
   const graph = fixture.orphanAware
     ? new OrphanAwareGraph(undefined, fixture.graphOptions?.hotCacheMax, undefined, undefined, createIndex)
     : new PolyGraph(undefined, fixture.graphOptions?.hotCacheMax, undefined, undefined, createIndex)
   const orphanGraph = fixture.orphanAware ? graph as OrphanAwareGraph : null
 
-  const needsHnsw = fixture.operations.some(op => op.op.startsWith('hnsw')) || (fixture.expect.hnswSearches?.length ?? 0) > 0
+  const operations = fixture.operations ?? []
+  const expect = fixture.expect ?? {}
+  const needsHnsw = operations.some(op => op.op.startsWith('hnsw')) || (expect.hnswSearches?.length ?? 0) > 0
   const hnsw = needsHnsw ? new HNSWIndex(undefined, cosineSimilarity, { M: 16, efConstruction: 200, efSearch: 300 }) : null
 
   if (hnsw) {
@@ -404,8 +490,8 @@ export function runFixture(fixture: Fixture, createIndex?: (onChange: (id: strin
   for (const edge of fixture.setup?.edges ?? []) {
     graph.addEdge(edge.source, edge.type, edge.target, edge.data, edge.ownership)
   }
-  for (const op of fixture.operations) {
+  for (const op of operations) {
     runOperation(graph, hnsw, op)
   }
-  assertExpectations(graph, orphanGraph, hnsw, fixture.expect)
+  assertExpectations(graph, orphanGraph, hnsw, expect)
 }

@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use polypack_core::activation::{
-    activation_score_of, decay_activation_state, reinforce_activation, DEFAULT_ACTIVATION,
+    activation_score_of, decay_activation_state, reinforce_activation, suppress_activation, DEFAULT_ACTIVATION,
 };
 use polypack_core::model::{edge_id, validate_activation, validate_node, NodeActivation};
 use polypack_core::storage::NodeQuery;
@@ -2230,14 +2230,39 @@ impl Graph {
         })
     }
 
+    /// Decay-corrected score of a loaded node within one named context, or 0
+    /// when the node has no history in that context. Unlike `get_activation`,
+    /// this never falls back to the global score. Mirrors
+    /// `PolyGraph.getContextActivation`.
+    pub fn get_context_activation(&self, id: &str, context: &str) -> f64 {
+        self.get_activation_state(id)
+            .and_then(|state| state.context.and_then(|c| c.get(context).map(|e| e.score)))
+            .unwrap_or(0.0)
+    }
+
     /// Apply a durable reinforcement delta to a loaded node's activation. The
     /// prior state is decay-corrected to now, `amount` is added to `score`, a
     /// fraction is folded into `importance`, the reinforcement counter
-    /// increments, and the decay anchor re-sets to now. Persists and emits an
+    /// increments, and the decay anchor re-sets to now. When `context` is
+    /// given, the same delta additionally reinforces
+    /// `activation.context[context]` — an independently-decaying, additional
+    /// lens, not a replacement for the global score. Persists and emits an
     /// `ActivationUpdated` change event. Returns the updated node or `None`
     /// when the node isn't loaded (see `reinforce_node_safe`). Mirrors
     /// `PolyGraph.reinforceNode`.
     pub fn reinforce_node(&mut self, id: &str, amount: f64, reason: Option<&str>) -> Result<Option<&Node>> {
+        self.reinforce_node_in_context(id, amount, reason, None)
+    }
+
+    /// [`Self::reinforce_node`] with an optional context. Mirrors
+    /// `PolyGraph.reinforceNode`'s `context` parameter.
+    pub fn reinforce_node_in_context(
+        &mut self,
+        id: &str,
+        amount: f64,
+        reason: Option<&str>,
+        context: Option<&str>,
+    ) -> Result<Option<&Node>> {
         if !amount.is_finite() {
             return Err(PolypackError::InvalidArgument("reinforcement amount must be finite".into()));
         }
@@ -2245,7 +2270,7 @@ impl Graph {
             return Ok(None);
         };
         let now = now_millis();
-        node.activation = Some(reinforce_activation(node.activation.as_ref(), amount, now, &DEFAULT_ACTIVATION));
+        node.activation = Some(reinforce_activation(node.activation.as_ref(), amount, now, &DEFAULT_ACTIVATION, context));
         node.updated_at = now;
         let node_type = node.node_type.clone();
 
@@ -2256,6 +2281,7 @@ impl Graph {
             node_type,
             delta: amount,
             reason: reason.map(|r| r.to_string()),
+            context: context.map(|c| c.to_string()),
         });
         Ok(self.nodes.get(id))
     }
@@ -2270,6 +2296,52 @@ impl Graph {
             return Ok(None);
         }
         self.reinforce_node(id, amount, reason)
+    }
+
+    /// Apply a durable suppression delta to a loaded node's `inhibition`
+    /// (mirrors `reinforce_node` but for the inhibition axis, which decays on
+    /// its own, shorter-by-default half-life and is subtracted from `score`
+    /// only at the final read/ranking step). A negative `amount` releases
+    /// suppression. Emits an `InhibitionUpdated` change event. Mirrors
+    /// `PolyGraph.suppressNode`.
+    pub fn suppress_node(&mut self, id: &str, amount: f64, reason: Option<&str>) -> Result<Option<&Node>> {
+        if !amount.is_finite() {
+            return Err(PolypackError::InvalidArgument("suppression amount must be finite".into()));
+        }
+        let Some(node) = self.nodes.get_mut(id) else {
+            return Ok(None);
+        };
+        let now = now_millis();
+        node.activation = Some(suppress_activation(
+            node.activation.as_ref(),
+            amount,
+            now,
+            DEFAULT_ACTIVATION.inhibition_half_life_ms,
+        ));
+        node.updated_at = now;
+        let node_type = node.node_type.clone();
+
+        self.touch_hot_cache(id);
+        self.mark_dirty(id);
+        self.emit(GraphChangeEvent::InhibitionUpdated {
+            node_id: id.to_string(),
+            node_type,
+            delta: amount,
+            reason: reason.map(|r| r.to_string()),
+        });
+        Ok(self.nodes.get(id))
+    }
+
+    /// Restore an evicted node when necessary, then suppress it. Mirrors
+    /// `PolyGraph.suppressNodeSafe`.
+    pub fn suppress_node_safe(&mut self, id: &str, amount: f64, reason: Option<&str>) -> Result<Option<&Node>> {
+        if !amount.is_finite() {
+            return Err(PolypackError::InvalidArgument("suppression amount must be finite".into()));
+        }
+        if self.get_node_safe(id)?.is_none() {
+            return Ok(None);
+        }
+        self.suppress_node(id, amount, reason)
     }
 
     /// Loaded nodes with the highest current activation, descending. The
@@ -2309,6 +2381,7 @@ impl Graph {
                 importance: corrected.importance,
                 reinforcement_count: activation.reinforcement_count,
                 last_meaningful_activation: now,
+                ..corrected
             });
             node.updated_at = now;
             dirty.push(node.id.clone());
@@ -4518,6 +4591,7 @@ mod tests {
                 node_type: "doc".into(),
                 delta: 0.5,
                 reason: Some("user_read".into()),
+                context: None,
             }]
         );
     }
@@ -4544,6 +4618,7 @@ mod tests {
             importance: 0.5,
             reinforcement_count: 1,
             last_meaningful_activation: now - DEFAULT_ACTIVATION.score_half_life_ms,
+            ..Default::default()
         });
         g.add_node(n).unwrap();
         g.reinforce_node("a", 0.5, None).unwrap();
@@ -4624,6 +4699,7 @@ mod tests {
                 importance: 0.0,
                 reinforcement_count: 1,
                 last_meaningful_activation: now,
+                ..Default::default()
             });
             g.add_node(n).unwrap();
         }

@@ -23,6 +23,10 @@ from . import (
     PolypackError,
     PolypackValueError,
     ConflictError,
+    merge_activation,
+    _decay_activation_state,
+    _reinforce_activation,
+    _suppress_activation,
 )
 
 # Resolve fixtures from the source tree, or from POLYPACK_FIXTURES when running
@@ -113,8 +117,57 @@ def load_fixtures() -> list[dict]:
     ]
 
 
+_ACTIVATION_EPSILON = 1e-9
+
+
+def _assert_activation_equal(name: str, got: dict, expect: dict) -> None:
+    for key in ("score", "importance", "reinforcementCount", "lastMeaningfulActivation"):
+        if abs(got[key] - expect[key]) > _ACTIVATION_EPSILON:
+            raise ConformanceError(f"{name}: {key} = {got[key]} != {expect[key]}")
+    got_inhibition = got.get("inhibition") or 0.0
+    expect_inhibition = expect.get("inhibition") or 0.0
+    if abs(got_inhibition - expect_inhibition) > _ACTIVATION_EPSILON:
+        raise ConformanceError(f"{name}: inhibition = {got_inhibition} != {expect_inhibition}")
+    expect_context = expect.get("context") or {}
+    got_context = got.get("context") or {}
+    for key, entry in expect_context.items():
+        got_score = (got_context.get(key) or {}).get("score", 0.0)
+        if abs(got_score - entry["score"]) > _ACTIVATION_EPSILON:
+            raise ConformanceError(f"{name}: context[{key}].score = {got_score} != {entry['score']}")
+    for key, entry in got_context.items():
+        if key not in expect_context and entry.get("score", 0.0) > _ACTIVATION_EPSILON:
+            raise ConformanceError(f"{name}: unexpected context[{key}] with score {entry['score']}")
+
+
+def run_activation_cases(cases: list[dict]) -> None:
+    for case in cases:
+        kind = case["kind"]
+        if kind == "decay":
+            kwargs = {}
+            if "scoreHalfLifeMs" in case:
+                kwargs["score_half_life_ms"] = case["scoreHalfLifeMs"]
+            if "importanceHalfLifeMs" in case:
+                kwargs["importance_half_life_ms"] = case["importanceHalfLifeMs"]
+            got = _decay_activation_state(case["input"], case["now"], **kwargs)
+        elif kind == "reinforce":
+            got = _reinforce_activation(case["previous"], case["delta"], case["now"], case.get("context"))
+        elif kind == "suppress":
+            kwargs = {}
+            if "inhibitionHalfLifeMs" in case:
+                kwargs["inhibition_half_life_ms"] = case["inhibitionHalfLifeMs"]
+            got = _suppress_activation(case["previous"], case["delta"], case["now"], **kwargs)
+        elif kind == "merge":
+            got = merge_activation(case["existing"], case["incoming"], case["now"])
+        else:
+            raise ConformanceError(f"unsupported activation case kind {kind}")
+        _assert_activation_equal(case["name"], got, case["expect"])
+
+
 def run_fixture(fixture: dict, index: Optional[Any] = None) -> None:
     name = fixture["name"]
+    if fixture.get("activationCases"):
+        run_activation_cases(fixture["activationCases"])
+        return
     if fixture.get("group") == "hot-cache-eviction":
         raise ConformanceError(f"{name}: hot-cache-eviction is out of Python v1 scope")
 

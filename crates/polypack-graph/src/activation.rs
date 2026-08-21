@@ -16,6 +16,7 @@
 use std::collections::{HashMap, HashSet};
 
 use polypack_core::activation::{clamp01, decay_activation_state, decay_factor, DEFAULT_ACTIVATION};
+use polypack_core::vector::cosine;
 use polypack_core::{Node, PolypackError, Result};
 
 use crate::graph::{now_millis, Graph};
@@ -109,15 +110,62 @@ pub struct PulseOptions {
     pub semantic_threshold: Option<f64>,
 }
 
-/// Effective activation of a node: its durable decayed score (using `score_half_life_ms`)
-/// plus any transient attention. Free function so the engine can compute it
-/// without double-borrowing the graph.
-fn effective_activation(node: &Node, attention: f64, now: i64, score_half_life_ms: i64) -> f64 {
-    let durable = match &node.activation {
-        Some(a) => decay_activation_state(a, now, score_half_life_ms, DEFAULT_ACTIVATION.importance_half_life_ms).score,
-        None => 0.0,
+/// Options for [`ActivationEngine::working_memory_with_options`].
+pub struct WorkingMemoryOptions {
+    /// Maximum nodes to return.
+    pub limit: usize,
+    /// Discard candidates whose `effective` score is at or below this.
+    pub min_score: f64,
+    /// Rank/select within this context (see `ActivationEngine::effective`) instead of the global score.
+    pub context: Option<String>,
+    /// Sum of `cost_of(node)` across selected nodes must not exceed this. Default: unbounded.
+    pub token_budget: Option<f64>,
+    /// Per-node cost against `token_budget`. The engine has no tokenizer — callers own this. Default: 1 per node.
+    pub cost_of: Box<dyn Fn(&Node) -> f64>,
+    /// MMR trade-off: 0 = pure relevance (default), 1 = pure diversity.
+    pub diversity_lambda: f64,
+    /// Redundancy metric between two candidate nodes. Default: cosine similarity of `node.vector` (0 if either lacks one).
+    pub similarity_of: Box<dyn Fn(&Node, &Node) -> f64>,
+}
+
+impl Default for WorkingMemoryOptions {
+    fn default() -> Self {
+        Self {
+            limit: 10,
+            min_score: 0.0,
+            context: None,
+            token_budget: None,
+            cost_of: Box::new(|_| 1.0),
+            diversity_lambda: 0.0,
+            similarity_of: Box::new(default_similarity),
+        }
+    }
+}
+
+/// Cosine similarity between two nodes' vectors, or 0 when either lacks one.
+fn default_similarity(a: &Node, b: &Node) -> f64 {
+    match (&a.vector, &b.vector) {
+        (Some(av), Some(bv)) => cosine(av, bv).unwrap_or(0.0),
+        _ => 0.0,
+    }
+}
+
+/// Effective activation of a node: its durable decayed score (using
+/// `score_half_life_ms`, or the context-scoped score when `context` is given)
+/// plus any transient attention, minus decayed inhibition. Free function so
+/// the engine can compute it without double-borrowing the graph.
+fn effective_activation(node: &Node, attention: f64, now: i64, score_half_life_ms: i64, context: Option<&str>) -> f64 {
+    let decayed = node
+        .activation
+        .as_ref()
+        .map(|a| decay_activation_state(a, now, score_half_life_ms, DEFAULT_ACTIVATION.importance_half_life_ms));
+    let base = match (&decayed, context) {
+        (Some(d), Some(ctx)) => d.context.as_ref().and_then(|c| c.get(ctx)).map(|e| e.score).unwrap_or(0.0),
+        (Some(d), None) => d.score,
+        (None, _) => 0.0,
     };
-    clamp01(durable + attention)
+    let inhibition = decayed.as_ref().and_then(|d| d.inhibition).unwrap_or(0.0);
+    clamp01(base + attention - inhibition)
 }
 
 /// Composite score for a node given a semantic hit and a graph contribution.
@@ -182,14 +230,23 @@ impl<'a> ActivationEngine<'a> {
         self.attention.get(id).copied().unwrap_or(0.0)
     }
 
-    /// Durable decayed score plus any transient attention.
-    pub fn effective(&mut self, id: &str) -> f64 {
+    /// Durable decayed score plus any transient attention, minus decayed
+    /// inhibition. When `context` is given, the context-scoped score is used
+    /// instead of the global score (0 if the node has no history in that
+    /// context). Inhibition is applied only here, never inside `pulse`'s
+    /// composite, so a suppressed node stays re-evaluable.
+    pub fn effective(&mut self, id: &str, context: Option<&str>) -> f64 {
         let now = now_millis();
         let attention = self.attention.get(id).copied().unwrap_or(0.0);
         match self.graph.get_node(id) {
-            Some(node) => effective_activation(node, attention, now, self.config.score_half_life_ms),
+            Some(node) => effective_activation(node, attention, now, self.config.score_half_life_ms, context),
             None => 0.0,
         }
+    }
+
+    /// Current decayed inhibition for `id` (0 when none).
+    pub fn inhibition_of(&self, id: &str) -> f64 {
+        self.graph.get_activation_state(id).and_then(|a| a.inhibition).unwrap_or(0.0)
     }
 
     // ── durable reinforcement (persisted and synced additively) ──
@@ -197,6 +254,18 @@ impl<'a> ActivationEngine<'a> {
     /// Reinforce a loaded node's durable activation. See `Graph::reinforce_node`.
     pub fn reinforce(&mut self, id: &str, amount: f64, reason: Option<&str>) -> Result<Option<&Node>> {
         self.graph.reinforce_node(id, amount, reason)
+    }
+
+    /// Reinforce a loaded node's durable activation within `context`. See
+    /// `Graph::reinforce_node_in_context`.
+    pub fn reinforce_in_context(&mut self, id: &str, amount: f64, reason: Option<&str>, context: &str) -> Result<Option<&Node>> {
+        self.graph.reinforce_node_in_context(id, amount, reason, Some(context))
+    }
+
+    /// Suppress a loaded node's durable `inhibition`. A negative `amount`
+    /// releases suppression. See `Graph::suppress_node`.
+    pub fn suppress(&mut self, id: &str, amount: f64, reason: Option<&str>) -> Result<Option<&Node>> {
+        self.graph.suppress_node(id, amount, reason)
     }
 
     /// Reinforce several nodes, coalescing change events into one batch.
@@ -332,23 +401,72 @@ impl<'a> ActivationEngine<'a> {
     // ── working memory ──
 
     /// The current "mental state": loaded nodes ranked by `effective`
-    /// activation (durable decayed score + transient attention) descending,
-    /// top `limit`.
+    /// activation (durable decayed score + transient attention, minus
+    /// inhibition) descending, top `limit`.
     pub fn working_memory(&mut self, limit: usize, min_score: f64) -> Result<Vec<Node>> {
-        if limit == 0 {
+        self.working_memory_with_options(&WorkingMemoryOptions { limit, min_score, ..Default::default() })
+    }
+
+    /// Budgeted, diversity-aware working-memory selection — a
+    /// memory-flavoured maximal-marginal-relevance pass suited to LLM context
+    /// assembly: greedily picks the highest `relevance − λ ×
+    /// similarity-to-already-selected` candidate under a token budget, so the
+    /// result isn't many near-duplicate highly-activated neighbours.
+    pub fn working_memory_with_options(&mut self, options: &WorkingMemoryOptions) -> Result<Vec<Node>> {
+        if options.limit == 0 {
             return Ok(Vec::new());
         }
         let now = now_millis();
-        let mut scored: Vec<(f64, Node)> = Vec::new();
+        let mut candidates: Vec<(f64, Node)> = Vec::new();
         for node in self.graph.query().to_array() {
-            let score = effective_activation(&node, self.attention_of(&node.id), now, self.config.score_half_life_ms);
-            if score > min_score {
-                scored.push((score, node));
+            let score = effective_activation(&node, self.attention_of(&node.id), now, self.config.score_half_life_ms, options.context.as_deref());
+            if score > options.min_score {
+                candidates.push((score, node));
             }
         }
-        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-        scored.truncate(limit);
-        Ok(scored.into_iter().map(|(_, n)| n).collect())
+        candidates.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+
+        if options.diversity_lambda <= 0.0 && options.token_budget.is_none() {
+            candidates.truncate(options.limit);
+            return Ok(candidates.into_iter().map(|(_, n)| n).collect());
+        }
+
+        // Cap the candidate pool before the O(pool * selected) MMR pass, so a
+        // graph with many loaded nodes doesn't turn selection quadratic.
+        let pool_size = (options.limit * 4).max(options.limit);
+        candidates.truncate(pool_size);
+
+        let budget = options.token_budget.unwrap_or(f64::INFINITY);
+        let mut remaining = candidates;
+        let mut selected: Vec<Node> = Vec::new();
+        let mut spent = 0.0;
+        while selected.len() < options.limit && !remaining.is_empty() {
+            let mut best_index = 0;
+            let mut best_score = f64::NEG_INFINITY;
+            for (i, (score, node)) in remaining.iter().enumerate() {
+                let max_similarity = selected
+                    .iter()
+                    .map(|s| (options.similarity_of)(node, s))
+                    .fold(0.0_f64, f64::max);
+                let mmr = if options.diversity_lambda > 0.0 {
+                    (1.0 - options.diversity_lambda) * score - options.diversity_lambda * max_similarity
+                } else {
+                    *score
+                };
+                if mmr > best_score {
+                    best_score = mmr;
+                    best_index = i;
+                }
+            }
+            let (_, chosen) = remaining.remove(best_index);
+            let cost = (options.cost_of)(&chosen);
+            if spent + cost > budget {
+                break;
+            }
+            spent += cost;
+            selected.push(chosen);
+        }
+        Ok(selected)
     }
 
     /// Alias for querying the most-activated nodes by durable score only —
@@ -424,7 +542,7 @@ mod tests {
             assert!((engine.attention_of("a") - 0.02).abs() < 1e-9);
             // effective()/get_activation() decay-correct against a fresh wall-clock
             // read, so allow for the (small) real elapsed time since reinforcement.
-            assert!((engine.effective("a") - 0.52).abs() < 1e-5);
+            assert!((engine.effective("a", None) - 0.52).abs() < 1e-5);
             // Sub-threshold attention never touches durable state.
             engine.bump_attention("a", 0.05);
             assert_eq!(engine.attention_of("a"), 0.0);
@@ -474,6 +592,81 @@ mod tests {
         let mut engine = ActivationEngine::new(&mut g, ActivationConfig::default());
         let wm = engine.working_memory(2, 0.0).unwrap();
         assert_eq!(wm.iter().map(|n| n.id.as_str()).collect::<Vec<_>>(), vec!["a", "b"]);
+        engine.dispose();
+    }
+
+    #[test]
+    fn reinforces_a_context_independently_of_the_global_score() {
+        let mut g = test_graph();
+        g.add_node(node("a", "t")).unwrap();
+        g.reinforce_node("a", 0.2, None).unwrap();
+        g.reinforce_node_in_context("a", 0.3, None, Some("project-x")).unwrap();
+
+        let mut engine = ActivationEngine::new(&mut g, ActivationConfig::default());
+        assert!((engine.effective("a", None) - 0.5).abs() < 1e-5);
+        assert!((engine.effective("a", Some("project-x")) - 0.3).abs() < 1e-5);
+        assert_eq!(engine.effective("a", Some("coding")), 0.0);
+        assert!((engine.graph.get_context_activation("a", "project-x") - 0.3).abs() < 1e-5);
+        engine.dispose();
+    }
+
+    #[test]
+    fn suppress_subtracts_inhibition_from_effective_but_not_the_raw_score() {
+        let mut g = test_graph();
+        g.add_node(node("a", "t")).unwrap();
+        g.reinforce_node("a", 0.8, None).unwrap();
+        g.suppress_node("a", 0.5, None).unwrap();
+
+        let mut engine = ActivationEngine::new(&mut g, ActivationConfig::default());
+        assert!((engine.inhibition_of("a") - 0.5).abs() < 1e-5);
+        assert!((engine.effective("a", None) - 0.3).abs() < 1e-5);
+        assert!((engine.graph.get_activation("a", ActivationConfig::default().score_half_life_ms) - 0.8).abs() < 1e-5);
+
+        engine.graph.suppress_node("a", -0.5, None).unwrap();
+        assert!((engine.effective("a", None) - 0.8).abs() < 1e-5);
+        engine.dispose();
+    }
+
+    #[test]
+    fn working_memory_with_token_budget_stops_once_spent() {
+        let mut g = test_graph();
+        for (id, amount) in [("a", 0.9), ("b", 0.5), ("c", 0.1)] {
+            g.add_node(node(id, "t")).unwrap();
+            g.reinforce_node(id, amount, None).unwrap();
+        }
+        let mut engine = ActivationEngine::new(&mut g, ActivationConfig::default());
+        let options = WorkingMemoryOptions { limit: 10, token_budget: Some(2.0), ..Default::default() };
+        let selected = engine.working_memory_with_options(&options).unwrap();
+        assert_eq!(selected.iter().map(|n| n.id.as_str()).collect::<Vec<_>>(), vec!["a", "b"]);
+        engine.dispose();
+    }
+
+    #[test]
+    fn working_memory_with_diversity_lambda_penalises_redundant_neighbours() {
+        let mut g = test_graph();
+        let mut a = node("a", "t");
+        a.vector = Some(vec![1.0, 0.0]);
+        let mut b = node("b", "t");
+        b.vector = Some(vec![1.0, 0.01]);
+        let mut c = node("c", "t");
+        c.vector = Some(vec![0.0, 1.0]);
+        g.add_node(a).unwrap();
+        g.add_node(b).unwrap();
+        g.add_node(c).unwrap();
+        g.reinforce_node("a", 0.9, None).unwrap();
+        g.reinforce_node("b", 0.85, None).unwrap();
+        g.reinforce_node("c", 0.5, None).unwrap();
+
+        let mut engine = ActivationEngine::new(&mut g, ActivationConfig::default());
+        let relevance_only = engine
+            .working_memory_with_options(&WorkingMemoryOptions { limit: 2, ..Default::default() })
+            .unwrap();
+        assert_eq!(relevance_only.iter().map(|n| n.id.as_str()).collect::<Vec<_>>(), vec!["a", "b"]);
+
+        let diverse = engine
+            .working_memory_with_options(&WorkingMemoryOptions { limit: 2, diversity_lambda: 0.8, ..Default::default() })
+            .unwrap();
+        assert_eq!(diverse.iter().map(|n| n.id.as_str()).collect::<Vec<_>>(), vec!["a", "c"]);
         engine.dispose();
     }
 }

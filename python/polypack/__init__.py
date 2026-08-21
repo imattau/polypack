@@ -303,6 +303,14 @@ def _patch_has(root: dict, path: str) -> bool:
     return True
 
 
+def _default_node_similarity(a: dict, b: dict) -> float:
+    """Cosine similarity between two nodes' vectors, or 0 when either lacks one."""
+    av, bv = a.get("vector"), b.get("vector")
+    if not av or not bv:
+        return 0.0
+    return _cosine(av, bv)
+
+
 def _cosine(a: Sequence[float], b: Sequence[float]) -> float:
     if len(a) != len(b):
         raise PolypackDimensionError(f"expected {len(a)} dimensions, got {len(b)}")
@@ -323,6 +331,8 @@ DEFAULT_ACTIVATION = {
     "scoreHalfLifeMs": _DAY,
     "importanceHalfLifeMs": 30 * _DAY,
     "importanceGain": 0.05,
+    "inhibitionHalfLifeMs": 12 * _HOUR,
+    "contextHalfLifeMs": _DAY,
 }
 
 
@@ -354,13 +364,22 @@ def _activation_score_of(node: Node, now: Optional[int] = None, half_life_ms: Op
     return _clamp01(activation["score"] * decay_factor(now - activation["lastMeaningfulActivation"], half_life_ms))
 
 
+def _decay_context_entry(entry: dict, now: int, half_life_ms: float) -> dict:
+    return {
+        "score": _clamp01(entry["score"] * decay_factor(now - entry["lastMeaningfulActivation"], half_life_ms)),
+        "lastMeaningfulActivation": entry["lastMeaningfulActivation"],
+    }
+
+
 def _decay_activation_state(
     activation: dict,
     now: int,
     score_half_life_ms: float = DEFAULT_ACTIVATION["scoreHalfLifeMs"],
     importance_half_life_ms: float = DEFAULT_ACTIVATION["importanceHalfLifeMs"],
+    inhibition_half_life_ms: float = DEFAULT_ACTIVATION["inhibitionHalfLifeMs"],
+    context_half_life_ms: float = DEFAULT_ACTIVATION["contextHalfLifeMs"],
 ) -> dict:
-    return {
+    result = {
         "score": _clamp01(activation["score"] * decay_factor(now - activation["lastMeaningfulActivation"], score_half_life_ms)),
         "importance": _clamp01(
             activation["importance"] * decay_factor(now - activation["lastMeaningfulActivation"], importance_half_life_ms)
@@ -368,21 +387,74 @@ def _decay_activation_state(
         "reinforcementCount": activation["reinforcementCount"],
         "lastMeaningfulActivation": activation["lastMeaningfulActivation"],
     }
+    if activation.get("inhibition") is not None:
+        anchor = activation.get("lastInhibitedAt", activation["lastMeaningfulActivation"])
+        result["inhibition"] = _clamp01(activation["inhibition"] * decay_factor(now - anchor, inhibition_half_life_ms))
+        result["lastInhibitedAt"] = activation.get("lastInhibitedAt")
+    if activation.get("context"):
+        result["context"] = {
+            key: _decay_context_entry(entry, now, context_half_life_ms) for key, entry in activation["context"].items()
+        }
+    return result
 
 
-def _reinforce_activation(previous: Optional[dict], delta: float, now: int) -> dict:
-    if previous:
-        decayed = _decay_activation_state(previous, now)
-        score, importance = decayed["score"], decayed["importance"]
-        count = previous.get("reinforcementCount", 0) + 1
-    else:
-        score, importance, count = 0.0, 0.0, 1
-    return {
+def _reinforce_activation(previous: Optional[dict], delta: float, now: int, context: Optional[str] = None) -> dict:
+    decayed = _decay_activation_state(previous, now) if previous else None
+    score = decayed["score"] if decayed else 0.0
+    importance = decayed["importance"] if decayed else 0.0
+    count = (previous.get("reinforcementCount", 0) + 1) if previous else 1
+
+    result = {
         "score": _clamp01(score + delta),
         "importance": _clamp01(importance + DEFAULT_ACTIVATION["importanceGain"] * delta),
         "reinforcementCount": count,
         "lastMeaningfulActivation": now,
     }
+    if decayed and decayed.get("inhibition") is not None:
+        result["inhibition"] = decayed["inhibition"]
+        result["lastInhibitedAt"] = decayed.get("lastInhibitedAt")
+
+    context_map = dict((decayed or {}).get("context") or (previous or {}).get("context") or {})
+    if context:
+        entry = context_map.get(context, {"score": 0.0, "lastMeaningfulActivation": now})
+        context_map[context] = {"score": _clamp01(entry["score"] + delta), "lastMeaningfulActivation": now}
+    if context_map:
+        result["context"] = context_map
+    return result
+
+
+def _suppress_activation(
+    previous: Optional[dict],
+    delta: float,
+    now: int,
+    inhibition_half_life_ms: float = DEFAULT_ACTIVATION["inhibitionHalfLifeMs"],
+) -> dict:
+    """Mirrors `_reinforce_activation` but for the `inhibition` axis: decay-correct
+    the prior inhibition to `now`, add `delta`, clamp, and re-anchor `lastInhibitedAt`.
+    A negative `delta` releases suppression. `score`/`importance` are only
+    decay-corrected, not re-anchored."""
+    decayed = (
+        _decay_activation_state(
+            previous,
+            now,
+            DEFAULT_ACTIVATION["scoreHalfLifeMs"],
+            DEFAULT_ACTIVATION["importanceHalfLifeMs"],
+            inhibition_half_life_ms,
+        )
+        if previous
+        else None
+    )
+    result = {
+        "score": decayed["score"] if decayed else 0.0,
+        "importance": decayed["importance"] if decayed else 0.0,
+        "reinforcementCount": previous.get("reinforcementCount", 0) if previous else 0,
+        "lastMeaningfulActivation": decayed["lastMeaningfulActivation"] if decayed else now,
+        "inhibition": _clamp01((decayed.get("inhibition", 0.0) if decayed else 0.0) + delta),
+        "lastInhibitedAt": now,
+    }
+    if decayed and decayed.get("context"):
+        result["context"] = decayed["context"]
+    return result
 
 
 def merge_activation(existing: dict, incoming: dict, now: Optional[int] = None) -> dict:
@@ -393,12 +465,23 @@ def merge_activation(existing: dict, incoming: dict, now: Optional[int] = None) 
     now = now if now is not None else int(time.time() * 1000)
     ex = _decay_activation_state(existing, now)
     inc = _decay_activation_state(incoming, now)
-    return {
+    result = {
         "score": max(ex["score"], inc["score"]),
         "importance": max(ex["importance"], inc["importance"]),
         "reinforcementCount": max(existing["reinforcementCount"], incoming["reinforcementCount"]),
         "lastMeaningfulActivation": now,
     }
+    if ex.get("inhibition") is not None or inc.get("inhibition") is not None:
+        result["inhibition"] = max(ex.get("inhibition") or 0.0, inc.get("inhibition") or 0.0)
+        result["lastInhibitedAt"] = now
+    if ex.get("context") or inc.get("context"):
+        context: dict = {}
+        for key in set((ex.get("context") or {}).keys()) | set((inc.get("context") or {}).keys()):
+            a = (ex.get("context") or {}).get(key, {}).get("score", 0.0)
+            b = (inc.get("context") or {}).get(key, {}).get("score", 0.0)
+            context[key] = {"score": max(a, b), "lastMeaningfulActivation": now}
+        result["context"] = context
+    return result
 
 
 def _validate_activation(activation: Any) -> dict:
@@ -414,12 +497,36 @@ def _validate_activation(activation: Any) -> dict:
     anchor = activation.get("lastMeaningfulActivation", 0)
     if not isinstance(anchor, (int, float)) or not math.isfinite(float(anchor)) or anchor < 0:
         raise PolypackValueError("activation.lastMeaningfulActivation must be a finite non-negative number")
-    return {
+    result = {
         "score": float(activation["score"]),
         "importance": float(activation["importance"]),
         "reinforcementCount": int(count),
         "lastMeaningfulActivation": int(anchor),
     }
+    inhibition = activation.get("inhibition")
+    if inhibition is not None:
+        if not isinstance(inhibition, (int, float)) or not math.isfinite(float(inhibition)) or not 0 <= float(inhibition) <= 1:
+            raise PolypackValueError("activation.inhibition must be a finite number in [0, 1]")
+        last_inhibited_at = activation.get("lastInhibitedAt")
+        if not isinstance(last_inhibited_at, (int, float)) or not math.isfinite(float(last_inhibited_at)) or last_inhibited_at < 0:
+            raise PolypackValueError("activation.lastInhibitedAt must be a finite non-negative number when inhibition is set")
+        result["inhibition"] = float(inhibition)
+        result["lastInhibitedAt"] = int(last_inhibited_at)
+    context = activation.get("context")
+    if context:
+        if not isinstance(context, dict):
+            raise PolypackValueError("activation.context must be an object")
+        validated_context = {}
+        for key, entry in context.items():
+            score = entry.get("score") if isinstance(entry, dict) else None
+            if not isinstance(score, (int, float)) or not math.isfinite(float(score)) or not 0 <= float(score) <= 1:
+                raise PolypackValueError(f"activation.context[{key}].score must be a finite number in [0, 1]")
+            entry_anchor = entry.get("lastMeaningfulActivation")
+            if not isinstance(entry_anchor, (int, float)) or not math.isfinite(float(entry_anchor)) or entry_anchor < 0:
+                raise PolypackValueError(f"activation.context[{key}].lastMeaningfulActivation must be a finite non-negative number")
+            validated_context[key] = {"score": float(score), "lastMeaningfulActivation": int(entry_anchor)}
+        result["context"] = validated_context
+    return result
 
 
 # ── Vector index wrappers ──
@@ -2008,28 +2115,54 @@ class PolyGraph:
 
     # ── activation (mirrors PolyGraph.reinforceNode etc.) ──
 
-    def reinforce_node(self, id_: str, amount: float, reason: Optional[str] = None) -> Optional[Node]:
+    def reinforce_node(self, id_: str, amount: float, reason: Optional[str] = None, context: Optional[str] = None) -> Optional[Node]:
         """Apply a durable reinforcement delta. The prior state is decay-corrected
         to now, `amount` is added to `score`, a fraction folds into `importance`,
-        the counter increments, and the decay anchor re-sets to now. Returns the
-        updated node, or `None` if the node isn't loaded. (Python has no change
-        events, so no notification is emitted.)"""
+        the counter increments, and the decay anchor re-sets to now. When
+        `context` is given, the same delta additionally reinforces
+        `activation.context[context]` — an independently-decaying, additional
+        lens, not a replacement for the global score. Returns the updated node,
+        or `None` if the node isn't loaded. (Python has no change events, so no
+        notification is emitted.)"""
         if not isinstance(amount, (int, float)) or not math.isfinite(float(amount)):
             raise PolypackValueError("reinforcement amount must be finite")
         node = self._nodes.get(id_)
         if node is None:
             return None
         now = int(time.time() * 1000)
-        node["activation"] = _reinforce_activation(node.get("activation"), float(amount), now)
+        node["activation"] = _reinforce_activation(node.get("activation"), float(amount), now, context)
         node["updatedAt"] = now
         self._dirty_node_ids.add(id_)
         self._dirty = True
         return _copy_node(node)
 
-    def reinforce_node_safe(self, id_: str, amount: float, reason: Optional[str] = None) -> Optional[Node]:
+    def reinforce_node_safe(self, id_: str, amount: float, reason: Optional[str] = None, context: Optional[str] = None) -> Optional[Node]:
         """Alias for `reinforce_node` — the Python graph has no hot cache or
         eviction, so there is nothing to restore."""
-        return self.reinforce_node(id_, amount, reason)
+        return self.reinforce_node(id_, amount, reason, context)
+
+    def suppress_node(self, id_: str, amount: float, reason: Optional[str] = None) -> Optional[Node]:
+        """Apply a durable suppression delta to a node's `inhibition` (mirrors
+        `reinforce_node` but for the inhibition axis, which decays on its own,
+        shorter-by-default half-life and is subtracted from `score` only at the
+        final read/ranking step). A negative `amount` releases suppression.
+        Returns the updated node, or `None` if the node isn't loaded."""
+        if not isinstance(amount, (int, float)) or not math.isfinite(float(amount)):
+            raise PolypackValueError("suppression amount must be finite")
+        node = self._nodes.get(id_)
+        if node is None:
+            return None
+        now = int(time.time() * 1000)
+        node["activation"] = _suppress_activation(node.get("activation"), float(amount), now)
+        node["updatedAt"] = now
+        self._dirty_node_ids.add(id_)
+        self._dirty = True
+        return _copy_node(node)
+
+    def suppress_node_safe(self, id_: str, amount: float, reason: Optional[str] = None) -> Optional[Node]:
+        """Alias for `suppress_node` — the Python graph has no hot cache or
+        eviction, so there is nothing to restore."""
+        return self.suppress_node(id_, amount, reason)
 
     def get_activation(self, id_: str, half_life_ms: Optional[float] = None) -> float:
         """Current decayed activation score of a node (0 when it has none)."""
@@ -2042,6 +2175,15 @@ class PolyGraph:
         if node is None or node.get("activation") is None:
             return None
         return _decay_activation_state(node["activation"], int(time.time() * 1000))
+
+    def get_context_activation(self, id_: str, context: str) -> float:
+        """Decay-corrected score of a node within one named context, or 0 when
+        the node has no history in that context. Unlike `get_activation`, this
+        never falls back to the global score."""
+        state = self.get_activation_state(id_)
+        if not state:
+            return 0.0
+        return (state.get("context") or {}).get(context, {}).get("score", 0.0)
 
     def top_activated(self, limit: int, min_score: float = 0.0) -> list:
         """Loaded nodes with the highest current activation, descending."""
@@ -2723,26 +2865,38 @@ class ActivationEngine:
     def attention_of(self, id_: str) -> float:
         return self.attention.get(id_, 0.0)
 
-    def effective(self, id_: str) -> float:
-        """Durable decayed score (using `scoreHalfLifeMs`) plus transient attention."""
-        node = self.graph.get_node(id_)
-        durable = 0.0
-        if node and node.get("activation"):
-            act = node["activation"]
-            now = int(time.time() * 1000)
-            durable = _clamp01(
-                act["score"] * decay_factor(now - act["lastMeaningfulActivation"], self.config["scoreHalfLifeMs"])
-            )
-        return _clamp01(durable + self.attention_of(id_))
+    def effective(self, id_: str, context: Optional[str] = None) -> float:
+        """Durable decayed score (using `scoreHalfLifeMs`, or the context-scoped
+        score when `context` is given) plus transient attention, minus decayed
+        inhibition. Inhibition is applied only here, never inside `pulse`'s
+        composite, so a suppressed node stays re-evaluable."""
+        state = self.graph.get_activation_state(id_)
+        if not state:
+            return self.attention_of(id_)
+        base = (state.get("context") or {}).get(context, {}).get("score", 0.0) if context is not None else state["score"]
+        inhibition = state.get("inhibition") or 0.0
+        return _clamp01(base + self.attention_of(id_) - inhibition)
+
+    def inhibition_of(self, id_: str) -> float:
+        """Current decayed inhibition for `id_` (0 when none)."""
+        state = self.graph.get_activation_state(id_)
+        return (state or {}).get("inhibition") or 0.0
 
     # ── durable reinforcement ──
 
-    def reinforce(self, id_: str, amount: float, reason: Optional[str] = None) -> Optional[Node]:
-        return self.graph.reinforce_node(id_, amount, reason)
+    def reinforce(self, id_: str, amount: float, reason: Optional[str] = None, context: Optional[str] = None) -> Optional[Node]:
+        return self.graph.reinforce_node(id_, amount, reason, context)
 
     def reinforce_all(self, entries: Iterable[tuple]) -> None:
-        for id_, amount, reason in entries:
-            self.graph.reinforce_node(id_, amount, reason)
+        for entry in entries:
+            id_, amount, reason = entry[0], entry[1], entry[2] if len(entry) > 2 else None
+            context = entry[3] if len(entry) > 3 else None
+            self.graph.reinforce_node(id_, amount, reason, context)
+
+    def suppress(self, id_: str, amount: float, reason: Optional[str] = None) -> Optional[Node]:
+        """Suppress a node's durable `inhibition`. A negative `amount` releases
+        suppression."""
+        return self.graph.suppress_node(id_, amount, reason)
 
     # ── relational spreading activation ──
 
@@ -2819,27 +2973,73 @@ class ActivationEngine:
             reverse=True,
         )
 
-    def absorb(self, vector: Any, **options) -> list:
+    def absorb(self, vector: Any, context: Optional[str] = None, **options) -> list:
         """`pulse` plus reinforcement: nodes whose composite clears
-        `absorbThreshold` receive durable reinforcement of `absorbGain * score`."""
+        `absorbThreshold` receive durable reinforcement of `absorbGain * score`.
+        When `context` is given, the same reinforcement additionally reinforces
+        that context on every absorbed node."""
         scores = self.pulse(vector, **options)
         for id_, score in scores:
             if score >= self.config["absorbThreshold"]:
-                self.graph.reinforce_node(id_, _clamp01(self.config["absorbGain"] * score), "pulse")
+                self.graph.reinforce_node(id_, _clamp01(self.config["absorbGain"] * score), "pulse", context)
         return scores
 
     # ── working memory ──
 
-    def working_memory(self, limit: int = 10, min_score: float = 0.0) -> list:
+    def working_memory(
+        self,
+        limit: int = 10,
+        min_score: float = 0.0,
+        context: Optional[str] = None,
+        token_budget: Optional[float] = None,
+        cost_of: Optional[Callable[[Node], float]] = None,
+        diversity_lambda: float = 0.0,
+        similarity_of: Optional[Callable[[Node, Node], float]] = None,
+    ) -> list:
         """The current "mental state": loaded nodes ranked by `effective`
-        activation descending, top `limit`."""
-        scored = []
+        activation (durable decayed score + transient attention, minus
+        inhibition) descending, top `limit`.
+
+        Passing `token_budget` and/or `diversity_lambda` enables a budgeted,
+        diversity-aware selection — a memory-flavoured maximal-marginal-relevance
+        pass suited to LLM context assembly: greedily picks the highest
+        `relevance - diversity_lambda * similarity-to-already-selected`
+        candidate under a token budget, so the result isn't many
+        near-duplicate highly-activated neighbours."""
+        cost_of = cost_of or (lambda _n: 1.0)
+        similarity_of = similarity_of or _default_node_similarity
+
+        candidates = []
         for node in self.graph._nodes.values():
-            score = self.effective(node["id"])
+            score = self.effective(node["id"], context)
             if score > min_score:
-                scored.append((score, _copy_node(node)))
-        scored.sort(key=lambda x: x[0], reverse=True)
-        return [n for _, n in scored[:limit]]
+                candidates.append((score, _copy_node(node)))
+        candidates.sort(key=lambda x: x[0], reverse=True)
+
+        if diversity_lambda <= 0.0 and token_budget is None:
+            return [n for _, n in candidates[:limit]]
+
+        pool = candidates[: max(limit * 4, limit)]
+        budget = token_budget if token_budget is not None else float("inf")
+        remaining = list(pool)
+        selected: list = []
+        spent = 0.0
+        while len(selected) < limit and remaining:
+            best_index = 0
+            best_mmr = float("-inf")
+            for i, (score, node) in enumerate(remaining):
+                max_similarity = max((similarity_of(node, s) for s in selected), default=0.0)
+                mmr = (1 - diversity_lambda) * score - diversity_lambda * max_similarity if diversity_lambda > 0 else score
+                if mmr > best_mmr:
+                    best_mmr = mmr
+                    best_index = i
+            _, chosen = remaining.pop(best_index)
+            cost = cost_of(chosen)
+            if spent + cost > budget:
+                break
+            spent += cost
+            selected.append(chosen)
+        return selected
 
 
 # ── Change batch (v1: structural contract; execution is Phase 5) ──

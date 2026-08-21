@@ -2,6 +2,7 @@ import { Subscription } from 'rxjs'
 import type { PolyGraph } from './graph.js'
 import type { PolyNode, NodeActivation } from './types.js'
 import { ACTIVATION_DEFAULTS, clamp01, decayActivationState, decayFactor } from './utils.js'
+import { cosineSimilarity } from './vector-index.js'
 
 const HOUR = 3_600_000
 const DAY = 24 * HOUR
@@ -63,9 +64,28 @@ export interface PulseOptions extends SpreadOptions {
    * Default 0 — nodes with zero similarity to the query never enter the region.
    */
   semanticThreshold?: number
+  /** When given, `absorb` reinforces this context (in addition to global score) on every absorbed node. */
+  context?: string
 }
 
 export type VectorLike = number[] | Float32Array | Float64Array
+
+export interface WorkingMemoryOptions {
+  /** Maximum nodes to return. Default 10. */
+  limit?: number
+  /** Discard candidates whose `effective` score is at or below this. Default 0. */
+  minScore?: number
+  /** Rank/select within this context (see {@link ActivationEngine.effective}) instead of the global score. */
+  context?: string
+  /** Sum of `costOf(node)` across selected nodes must not exceed this. Default: unbounded. */
+  tokenBudget?: number
+  /** Per-node cost against `tokenBudget`. The engine has no tokenizer — callers own this. Default: 1 per node. */
+  costOf?: (node: PolyNode) => number
+  /** MMR trade-off: 0 = pure relevance (default), 1 = pure diversity. */
+  diversityLambda?: number
+  /** Redundancy metric between two candidate nodes. Default: cosine similarity of `node.vector` (0 if either lacks one). */
+  similarityOf?: (a: PolyNode, b: PolyNode) => number
+}
 
 /** Rank a score map descending, discarding entries at or below `threshold`. */
 function ranked(scores: Map<string, number>, threshold: number): Map<string, number> {
@@ -92,12 +112,26 @@ export function mergeActivation(
 ): NodeActivation {
   const ex = decayActivationState(existing, now)
   const inc = decayActivationState(incoming, now)
-  return {
+  const result: NodeActivation = {
     score: Math.max(ex.score, inc.score),
     importance: Math.max(ex.importance, inc.importance),
     reinforcementCount: Math.max(existing.reinforcementCount, incoming.reinforcementCount),
     lastMeaningfulActivation: now,
   }
+  if (ex.inhibition !== undefined || inc.inhibition !== undefined) {
+    result.inhibition = Math.max(ex.inhibition ?? 0, inc.inhibition ?? 0)
+    result.lastInhibitedAt = now
+  }
+  if (ex.context || inc.context) {
+    const context: Record<string, { score: number; lastMeaningfulActivation: number }> = {}
+    for (const key of new Set([...Object.keys(ex.context ?? {}), ...Object.keys(inc.context ?? {})])) {
+      const a = ex.context?.[key]
+      const b = inc.context?.[key]
+      context[key] = { score: Math.max(a?.score ?? 0, b?.score ?? 0), lastMeaningfulActivation: now }
+    }
+    result.context = context
+  }
+  return result
 }
 
 /**
@@ -171,31 +205,53 @@ export class ActivationEngine {
     return this.attention.get(id) ?? 0
   }
 
-  /** Durable decayed score plus any transient attention. */
-  effective(id: string): number {
+  /**
+   * Durable decayed score plus any transient attention, minus decayed
+   * inhibition (clamped to [0,1]). When `context` is given, the context-scoped
+   * score is used instead of the global score (0 if the node has no history in
+   * that context) — global and context are different lenses, not blended.
+   * Inhibition is applied only here, at the final read/ranking layer, never
+   * inside `pulse`'s composite — so a suppressed node stays re-evaluable.
+   */
+  effective(id: string, context?: string): number {
     const state = this.graph.getActivationState(id)
     if (!state) return this.attentionOf(id)
     const decayed = decayActivationState(state, Date.now(), this.config.scoreHalfLifeMs, this.config.importanceHalfLifeMs)
-    return clamp01(decayed.score + this.attentionOf(id))
+    const base = context !== undefined ? (decayed.context?.[context]?.score ?? 0) : decayed.score
+    return clamp01(base + this.attentionOf(id) - (decayed.inhibition ?? 0))
+  }
+
+  /** Current decayed inhibition for `id` (0 when none). */
+  inhibitionOf(id: string): number {
+    return this.graph.getActivationState(id)?.inhibition ?? 0
   }
 
   // ── Durable reinforcement (persisted and synced additively) ──
 
   /** Reinforce a loaded node's durable activation. See {@link PolyGraph.reinforceNode}. */
-  reinforce(id: string, amount: number, reason?: string): void {
-    this.graph.reinforceNode(id, amount, reason)
+  reinforce(id: string, amount: number, reason?: string, context?: string): void {
+    this.graph.reinforceNode(id, amount, reason, context)
   }
 
   /** Reinforce several nodes, coalescing change events into one flush. */
-  reinforceAll(entries: Array<{ id: string; amount: number; reason?: string }>): void {
+  reinforceAll(entries: Array<{ id: string; amount: number; reason?: string; context?: string }>): void {
     if (entries.length === 0) return
     const graph = this.graph
     graph.startBatch()
     try {
-      for (const entry of entries) graph.reinforceNode(entry.id, entry.amount, entry.reason)
+      for (const entry of entries) graph.reinforceNode(entry.id, entry.amount, entry.reason, entry.context)
     } finally {
       graph.endBatch()
     }
+  }
+
+  /**
+   * Suppress a loaded node's durable `inhibition` (mirrors {@link reinforce}
+   * but for the inhibition axis). A negative `amount` releases suppression.
+   * See {@link PolyGraph.suppressNode}.
+   */
+  suppress(id: string, amount: number, reason?: string): void {
+    this.graph.suppressNode(id, amount, reason)
   }
 
   // ── Relational spreading activation ──
@@ -295,10 +351,10 @@ export class ActivationEngine {
    */
   async absorb(input: string | VectorLike, options: PulseOptions = {}): Promise<Map<string, number>> {
     const scores = await this.pulse(input, options)
-    const entries: Array<{ id: string; amount: number; reason: string }> = []
+    const entries: Array<{ id: string; amount: number; reason: string; context?: string }> = []
     for (const [id, score] of scores) {
       if (score >= this.config.absorbThreshold) {
-        entries.push({ id, amount: clamp01(this.config.absorbGain * score), reason: 'pulse' })
+        entries.push({ id, amount: clamp01(this.config.absorbGain * score), reason: 'pulse', context: options.context })
       }
     }
     this.reinforceAll(entries)
@@ -309,15 +365,74 @@ export class ActivationEngine {
 
   /**
    * The current "mental state": loaded nodes ranked by `effective` activation
-   * (durable decayed score + transient attention) descending, top `limit`.
+   * (durable decayed score + transient attention, minus inhibition) descending,
+   * top `limit`.
+   *
+   * Passing an options object instead enables a budgeted, diversity-aware
+   * selection — a memory-flavoured maximal-marginal-relevance pass suited to
+   * LLM context assembly: greedily picks the highest `relevance − λ ×
+   * similarity-to-already-selected` candidate, under a token budget, so the
+   * result isn't 20 near-duplicate highly-activated neighbours.
    */
-  workingMemory(limit = 10, minScore = 0): PolyNode[] {
-    const withScore: Array<{ node: PolyNode; score: number }> = []
+  workingMemory(limit?: number, minScore?: number): PolyNode[]
+  workingMemory(options: WorkingMemoryOptions): PolyNode[]
+  workingMemory(limitOrOptions: number | WorkingMemoryOptions = 10, minScoreArg = 0): PolyNode[] {
+    const options: WorkingMemoryOptions =
+      typeof limitOrOptions === 'number' ? { limit: limitOrOptions, minScore: minScoreArg } : limitOrOptions
+
+    const limit = options.limit ?? 10
+    const minScore = options.minScore ?? 0
+    const costOf = options.costOf ?? (() => 1)
+    const diversityLambda = options.diversityLambda ?? 0
+    const similarityOf = options.similarityOf ?? defaultSimilarity
+    const budget = options.tokenBudget ?? Infinity
+
+    const candidates: Array<{ node: PolyNode; score: number }> = []
     for (const node of this.graph.query().toArray()) {
-      const score = this.effective(node.id)
-      if (score > minScore) withScore.push({ node, score })
+      const score = this.effective(node.id, options.context)
+      if (score > minScore) candidates.push({ node, score })
     }
-    withScore.sort((a, b) => b.score - a.score)
-    return withScore.slice(0, limit).map(entry => entry.node)
+    candidates.sort((a, b) => b.score - a.score)
+
+    if (diversityLambda <= 0 && budget === Infinity) {
+      return candidates.slice(0, limit).map(entry => entry.node)
+    }
+
+    // Cap the candidate pool before the O(pool * selected) MMR pass, so a
+    // graph with many loaded nodes doesn't turn selection quadratic.
+    const pool = candidates.slice(0, Math.max(limit * 4, limit))
+
+    const selected: PolyNode[] = []
+    const remaining = [...pool]
+    let spent = 0
+    while (selected.length < limit && remaining.length > 0) {
+      let bestIndex = -1
+      let bestScore = -Infinity
+      for (let i = 0; i < remaining.length; i++) {
+        const candidate = remaining[i]
+        const maxSimilarity = selected.length === 0
+          ? 0
+          : Math.max(...selected.map(s => similarityOf(candidate.node, s)))
+        const mmr = diversityLambda > 0
+          ? (1 - diversityLambda) * candidate.score - diversityLambda * maxSimilarity
+          : candidate.score
+        if (mmr > bestScore) {
+          bestScore = mmr
+          bestIndex = i
+        }
+      }
+      const [chosen] = remaining.splice(bestIndex, 1)
+      const cost = costOf(chosen.node)
+      if (spent + cost > budget) break
+      spent += cost
+      selected.push(chosen.node)
+    }
+    return selected
   }
+}
+
+/** Cosine similarity between two nodes' vectors, or 0 when either lacks one. */
+function defaultSimilarity(a: PolyNode, b: PolyNode): number {
+  if (!a.vector || !b.vector) return 0
+  return cosineSimilarity(a.vector, b.vector)
 }

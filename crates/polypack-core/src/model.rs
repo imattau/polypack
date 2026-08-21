@@ -8,12 +8,22 @@ fn is_finite_vec(v: &[f64]) -> bool {
     v.iter().all(|x| x.is_finite())
 }
 
+/// A node's decayed relevance within one named context (e.g. a project, user, or task).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ContextActivation {
+    /// Context-scoped activation. Clamped to [0, 1].
+    pub score: f64,
+    /// Epoch-ms anchor for this context's decay.
+    pub last_meaningful_activation: i64,
+}
+
 /// Durable activation state for a node (see `crate::activation`). All fields
 /// are persisted and replicated; transient, runtime-only attention is held by
 /// the `ActivationEngine` in `polypack-graph` and never serialized. Decay is a
 /// pure function of elapsed time anchored at `last_meaningful_activation`, so
 /// replicas with the same stored state compute identical current scores.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct NodeActivation {
     /// Current learned activation, decay-corrected on read. Clamped to [0, 1].
@@ -24,6 +34,17 @@ pub struct NodeActivation {
     pub reinforcement_count: u64,
     /// Epoch-ms anchor for decay. Both `score` and `importance` decay from here.
     pub last_meaningful_activation: i64,
+    /// Suppression, subtracted from `score` at read time only (never inside
+    /// relational spreading). Clamped to [0, 1]. Absent is equivalent to 0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inhibition: Option<f64>,
+    /// Epoch-ms anchor for `inhibition`'s decay. Absent iff `inhibition` is absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_inhibited_at: Option<i64>,
+    /// Per-context activation, additional to (not a replacement for) the
+    /// global `score` above.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<std::collections::HashMap<String, ContextActivation>>,
 }
 
 /// A typed property-graph node. Serializes as camelCase JSON matching the
@@ -140,6 +161,32 @@ pub fn validate_activation(a: &NodeActivation) -> Result<()> {
             "activation.lastMeaningfulActivation must be a finite non-negative number".into(),
         ));
     }
+    if let Some(inhibition) = a.inhibition {
+        if !inhibition.is_finite() || !(0.0..=1.0).contains(&inhibition) {
+            return Err(PolypackError::RangeOutOfBounds(
+                "activation.inhibition must be a finite number in [0, 1]".into(),
+            ));
+        }
+        if a.last_inhibited_at.map(|t| t < 0).unwrap_or(true) {
+            return Err(PolypackError::RangeOutOfBounds(
+                "activation.lastInhibitedAt must be a finite non-negative number when inhibition is set".into(),
+            ));
+        }
+    }
+    if let Some(context) = &a.context {
+        for (key, entry) in context {
+            if !entry.score.is_finite() || !(0.0..=1.0).contains(&entry.score) {
+                return Err(PolypackError::RangeOutOfBounds(format!(
+                    "activation.context[{key}].score must be a finite number in [0, 1]"
+                )));
+            }
+            if entry.last_meaningful_activation < 0 {
+                return Err(PolypackError::RangeOutOfBounds(format!(
+                    "activation.context[{key}].lastMeaningfulActivation must be a finite non-negative number"
+                )));
+            }
+        }
+    }
     Ok(())
 }
 
@@ -231,6 +278,7 @@ mod tests {
             importance: 0.0,
             reinforcement_count: 0,
             last_meaningful_activation: 0,
+            ..Default::default()
         });
         assert!(matches!(validate_node(&n), Err(PolypackError::RangeOutOfBounds(_))));
 
@@ -240,6 +288,7 @@ mod tests {
             importance: 0.0,
             reinforcement_count: 0,
             last_meaningful_activation: -1,
+            ..Default::default()
         });
         assert!(matches!(validate_node(&n), Err(PolypackError::RangeOutOfBounds(_))));
     }

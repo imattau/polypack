@@ -14,5 +14,6 @@ pub enum GraphChangeEvent {
     EdgeAdded { edge_id: String, edge_type: String, source: String, target: String },
     EdgeUpdated { edge_id: String, edge_type: String, source: String, target: String },
     EdgeRemoved { edge_type: String, source: String, target: String },
-    ActivationUpdated { node_id: String, node_type: String, delta: f64, reason: Option<String> },
+    ActivationUpdated { node_id: String, node_type: String, delta: f64, reason: Option<String>, context: Option<String> },
+    InhibitionUpdated { node_id: String, node_type: String, delta: f64, reason: Option<String> },
 }

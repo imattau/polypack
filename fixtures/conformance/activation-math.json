@@ -1,0 +1,256 @@
+{
+  "schemaVersion": 1,
+  "name": "activation-math",
+  "group": "activation",
+  "activationCases": [
+    {
+      "name": "decay-one-halflife",
+      "kind": "decay",
+      "input": { "score": 0.8, "importance": 0.6, "reinforcementCount": 2, "lastMeaningfulActivation": 0 },
+      "now": 86400000,
+      "scoreHalfLifeMs": 86400000,
+      "importanceHalfLifeMs": 86400000,
+      "expect": { "score": 0.4, "importance": 0.3, "reinforcementCount": 2, "lastMeaningfulActivation": 0 }
+    },
+    {
+      "name": "decay-zero-elapsed",
+      "kind": "decay",
+      "input": { "score": 0.8, "importance": 0.6, "reinforcementCount": 2, "lastMeaningfulActivation": 1000 },
+      "now": 1000,
+      "expect": { "score": 0.8, "importance": 0.6, "reinforcementCount": 2, "lastMeaningfulActivation": 1000 }
+    },
+    {
+      "name": "decay-clock-skew-treated-as-no-elapse",
+      "kind": "decay",
+      "input": { "score": 0.8, "importance": 0.6, "reinforcementCount": 2, "lastMeaningfulActivation": 5000 },
+      "now": 1000,
+      "expect": { "score": 0.8, "importance": 0.6, "reinforcementCount": 2, "lastMeaningfulActivation": 5000 }
+    },
+    {
+      "name": "decay-non-decaying-halflife",
+      "kind": "decay",
+      "input": { "score": 0.8, "importance": 0.6, "reinforcementCount": 2, "lastMeaningfulActivation": 0 },
+      "now": 86400000,
+      "scoreHalfLifeMs": 0,
+      "importanceHalfLifeMs": 0,
+      "expect": { "score": 0.8, "importance": 0.6, "reinforcementCount": 2, "lastMeaningfulActivation": 0 }
+    },
+    {
+      "name": "reinforce-from-unset",
+      "kind": "reinforce",
+      "previous": null,
+      "delta": 0.3,
+      "now": 1000,
+      "expect": { "score": 0.3, "importance": 0.015, "reinforcementCount": 1, "lastMeaningfulActivation": 1000 }
+    },
+    {
+      "name": "reinforce-accumulates-without-elapse",
+      "kind": "reinforce",
+      "previous": { "score": 0.2, "importance": 0.1, "reinforcementCount": 1, "lastMeaningfulActivation": 0 },
+      "delta": 0.3,
+      "now": 0,
+      "expect": { "score": 0.5, "importance": 0.115, "reinforcementCount": 2, "lastMeaningfulActivation": 0 }
+    },
+    {
+      "name": "reinforce-clamps-at-one",
+      "kind": "reinforce",
+      "previous": { "score": 0.9, "importance": 0.99, "reinforcementCount": 4, "lastMeaningfulActivation": 0 },
+      "delta": 0.5,
+      "now": 0,
+      "expect": { "score": 1, "importance": 1, "reinforcementCount": 5, "lastMeaningfulActivation": 0 }
+    },
+    {
+      "name": "reinforce-negative-delta-decrements",
+      "kind": "reinforce",
+      "previous": { "score": 0.5, "importance": 0.1, "reinforcementCount": 3, "lastMeaningfulActivation": 0 },
+      "delta": -0.3,
+      "now": 0,
+      "expect": { "score": 0.2, "importance": 0.085, "reinforcementCount": 4, "lastMeaningfulActivation": 0 }
+    },
+    {
+      "name": "reinforce-decay-corrects-before-adding",
+      "kind": "reinforce",
+      "previous": { "score": 0.8, "importance": 0, "reinforcementCount": 1, "lastMeaningfulActivation": 0 },
+      "delta": 0.1,
+      "now": 86400000,
+      "expect": { "score": 0.5, "importance": 0.005, "reinforcementCount": 2, "lastMeaningfulActivation": 86400000 }
+    },
+    {
+      "name": "merge-takes-max-per-field",
+      "kind": "merge",
+      "existing": { "score": 0.3, "importance": 0.2, "reinforcementCount": 2, "lastMeaningfulActivation": 0 },
+      "incoming": { "score": 0.5, "importance": 0.1, "reinforcementCount": 5, "lastMeaningfulActivation": 0 },
+      "now": 0,
+      "expect": { "score": 0.5, "importance": 0.2, "reinforcementCount": 5, "lastMeaningfulActivation": 0 }
+    },
+    {
+      "name": "merge-decay-corrects-both-sides-first",
+      "kind": "merge",
+      "existing": { "score": 0.8, "importance": 0, "reinforcementCount": 1, "lastMeaningfulActivation": 0 },
+      "incoming": { "score": 0.1, "importance": 0, "reinforcementCount": 0, "lastMeaningfulActivation": 0 },
+      "now": 86400000,
+      "expect": { "score": 0.4, "importance": 0, "reinforcementCount": 1, "lastMeaningfulActivation": 86400000 }
+    },
+    {
+      "name": "merge-idempotent-for-redelivered-snapshot",
+      "kind": "merge",
+      "existing": { "score": 0.5, "importance": 0.3, "reinforcementCount": 3, "lastMeaningfulActivation": 2000 },
+      "incoming": { "score": 0.5, "importance": 0.3, "reinforcementCount": 3, "lastMeaningfulActivation": 2000 },
+      "now": 2000,
+      "expect": { "score": 0.5, "importance": 0.3, "reinforcementCount": 3, "lastMeaningfulActivation": 2000 }
+    },
+    {
+      "name": "reinforce-with-context-updates-both-global-and-context",
+      "kind": "reinforce",
+      "previous": null,
+      "delta": 0.3,
+      "now": 1000,
+      "context": "project-x",
+      "expect": {
+        "score": 0.3,
+        "importance": 0.015,
+        "reinforcementCount": 1,
+        "lastMeaningfulActivation": 1000,
+        "context": { "project-x": { "score": 0.3, "lastMeaningfulActivation": 1000 } }
+      }
+    },
+    {
+      "name": "reinforce-with-context-accumulates-and-preserves-other-contexts",
+      "kind": "reinforce",
+      "previous": {
+        "score": 0.2,
+        "importance": 0.1,
+        "reinforcementCount": 1,
+        "lastMeaningfulActivation": 0,
+        "context": {
+          "project-x": { "score": 0.4, "lastMeaningfulActivation": 0 },
+          "coding": { "score": 0.1, "lastMeaningfulActivation": 0 }
+        }
+      },
+      "delta": 0.2,
+      "now": 0,
+      "context": "project-x",
+      "expect": {
+        "score": 0.4,
+        "importance": 0.11,
+        "reinforcementCount": 2,
+        "lastMeaningfulActivation": 0,
+        "context": {
+          "project-x": { "score": 0.6, "lastMeaningfulActivation": 0 },
+          "coding": { "score": 0.1, "lastMeaningfulActivation": 0 }
+        }
+      }
+    },
+    {
+      "name": "reinforce-without-context-leaves-existing-context-decayed-but-untouched",
+      "kind": "reinforce",
+      "previous": {
+        "score": 0.2,
+        "importance": 0.0,
+        "reinforcementCount": 1,
+        "lastMeaningfulActivation": 0,
+        "context": { "project-x": { "score": 0.8, "lastMeaningfulActivation": 0 } }
+      },
+      "delta": 0.1,
+      "now": 86400000,
+      "expect": {
+        "score": 0.2,
+        "importance": 0.005,
+        "reinforcementCount": 2,
+        "lastMeaningfulActivation": 86400000,
+        "context": { "project-x": { "score": 0.4, "lastMeaningfulActivation": 0 } }
+      }
+    },
+    {
+      "name": "decay-inhibition-one-halflife-independent-of-score-anchor",
+      "kind": "decay",
+      "input": {
+        "score": 0.0,
+        "importance": 0.0,
+        "reinforcementCount": 1,
+        "lastMeaningfulActivation": 0,
+        "inhibition": 0.8,
+        "lastInhibitedAt": 0
+      },
+      "now": 43200000,
+      "expect": {
+        "score": 0.0,
+        "importance": 0.0,
+        "reinforcementCount": 1,
+        "lastMeaningfulActivation": 0,
+        "inhibition": 0.4,
+        "lastInhibitedAt": 0
+      }
+    },
+    {
+      "name": "suppress-from-unset",
+      "kind": "suppress",
+      "previous": null,
+      "delta": 0.5,
+      "now": 1000,
+      "expect": { "score": 0, "importance": 0, "reinforcementCount": 0, "lastMeaningfulActivation": 1000, "inhibition": 0.5, "lastInhibitedAt": 1000 }
+    },
+    {
+      "name": "suppress-decay-corrects-prior-inhibition-then-adds",
+      "kind": "suppress",
+      "previous": {
+        "score": 0.6,
+        "importance": 0.2,
+        "reinforcementCount": 3,
+        "lastMeaningfulActivation": 43200000,
+        "inhibition": 0.8,
+        "lastInhibitedAt": 0
+      },
+      "delta": 0.1,
+      "now": 43200000,
+      "expect": {
+        "score": 0.6,
+        "importance": 0.2,
+        "reinforcementCount": 3,
+        "lastMeaningfulActivation": 43200000,
+        "inhibition": 0.5,
+        "lastInhibitedAt": 43200000
+      }
+    },
+    {
+      "name": "suppress-negative-delta-releases",
+      "kind": "suppress",
+      "previous": { "score": 0.0, "importance": 0.0, "reinforcementCount": 0, "lastMeaningfulActivation": 0, "inhibition": 0.6, "lastInhibitedAt": 0 },
+      "delta": -0.4,
+      "now": 0,
+      "expect": { "score": 0.0, "importance": 0.0, "reinforcementCount": 0, "lastMeaningfulActivation": 0, "inhibition": 0.2, "lastInhibitedAt": 0 }
+    },
+    {
+      "name": "merge-takes-max-inhibition-and-per-context-score",
+      "kind": "merge",
+      "existing": {
+        "score": 0.2,
+        "importance": 0.0,
+        "reinforcementCount": 1,
+        "lastMeaningfulActivation": 0,
+        "inhibition": 0.3,
+        "lastInhibitedAt": 0,
+        "context": { "project-x": { "score": 0.7, "lastMeaningfulActivation": 0 } }
+      },
+      "incoming": {
+        "score": 0.5,
+        "importance": 0.0,
+        "reinforcementCount": 2,
+        "lastMeaningfulActivation": 0,
+        "inhibition": 0.6,
+        "lastInhibitedAt": 0,
+        "context": { "project-x": { "score": 0.4, "lastMeaningfulActivation": 0 }, "coding": { "score": 0.2, "lastMeaningfulActivation": 0 } }
+      },
+      "now": 0,
+      "expect": {
+        "score": 0.5,
+        "importance": 0.0,
+        "reinforcementCount": 2,
+        "lastMeaningfulActivation": 0,
+        "inhibition": 0.6,
+        "lastInhibitedAt": 0,
+        "context": { "project-x": { "score": 0.7, "lastMeaningfulActivation": 0 }, "coding": { "score": 0.2, "lastMeaningfulActivation": 0 } }
+      }
+    }
+  ]
+}

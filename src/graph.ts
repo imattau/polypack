@@ -19,6 +19,7 @@ import {
   decayActivationState,
   edgeId,
   reinforceActivation,
+  suppressActivation,
   yieldToUI,
 } from './utils.js'
 import type { PersistenceAdapter, PersistenceChanges } from './persistence/adapter.js'
@@ -770,6 +771,24 @@ export class PolyGraph {
     }
     if (!Number.isFinite(activation.lastMeaningfulActivation) || activation.lastMeaningfulActivation < 0) {
       throw new RangeError('activation.lastMeaningfulActivation must be a finite non-negative number')
+    }
+    if (activation.inhibition !== undefined) {
+      if (!Number.isFinite(activation.inhibition) || activation.inhibition < 0 || activation.inhibition > 1) {
+        throw new RangeError('activation.inhibition must be a finite number in [0, 1]')
+      }
+      if (!Number.isFinite(activation.lastInhibitedAt ?? NaN) || (activation.lastInhibitedAt ?? -1) < 0) {
+        throw new RangeError('activation.lastInhibitedAt must be a finite non-negative number when inhibition is set')
+      }
+    }
+    if (activation.context) {
+      for (const [key, entry] of Object.entries(activation.context)) {
+        if (!Number.isFinite(entry.score) || entry.score < 0 || entry.score > 1) {
+          throw new RangeError(`activation.context[${key}].score must be a finite number in [0, 1]`)
+        }
+        if (!Number.isFinite(entry.lastMeaningfulActivation) || entry.lastMeaningfulActivation < 0) {
+          throw new RangeError(`activation.context[${key}].lastMeaningfulActivation must be a finite non-negative number`)
+        }
+      }
     }
   }
 
@@ -2006,31 +2025,74 @@ export class PolyGraph {
   }
 
   /**
+   * Decay-corrected score of a loaded node within one named context, or 0 when
+   * the node has no history in that context. Unlike {@link getActivation},
+   * this never falls back to the global score — a node with plenty of global
+   * activation but no history in `context` reads cold in that context.
+   */
+  getContextActivation(id: string, context: string): number {
+    const state = this.getActivationState(id)
+    return state?.context?.[context]?.score ?? 0
+  }
+
+  /**
    * Apply a durable reinforcement delta to a loaded node's activation. The
    * prior state is decay-corrected to now, `amount` is added to `score`, a
    * fraction is folded into `importance`, the reinforcement counter increments,
-   * and the decay anchor re-sets to now. Persists and emits an
-   * `activation_updated` change event. Returns the updated node or `undefined`
-   * if the node isn't loaded (see {@link reinforceNodeSafe}).
+   * and the decay anchor re-sets to now. When `context` is given, the same
+   * delta additionally reinforces `activation.context[context]` — an
+   * independently-decaying, additional lens, not a replacement for the global
+   * score. Persists and emits an `activation_updated` change event. Returns the
+   * updated node or `undefined` if the node isn't loaded (see
+   * {@link reinforceNodeSafe}).
    */
-  reinforceNode(id: string, amount: number, reason?: string): PolyNode | undefined {
+  reinforceNode(id: string, amount: number, reason?: string, context?: string): PolyNode | undefined {
     if (!Number.isFinite(amount)) throw new RangeError('Reinforcement amount must be finite')
     const node = this.nodes.get(id)
     if (!node) return undefined
     const now = Date.now()
-    node.activation = reinforceActivation(node.activation, amount, now, ACTIVATION_DEFAULTS)
+    node.activation = reinforceActivation(node.activation, amount, now, ACTIVATION_DEFAULTS, context)
     node.updatedAt = now
     this.touchHotCache(id)
     this.markDirty(id)
-    this.emitChange({ type: 'activation_updated', nodeId: id, nodeType: node.type, delta: amount, reason })
+    this.emitChange({ type: 'activation_updated', nodeId: id, nodeType: node.type, delta: amount, reason, context })
     return this.applyDeserialize(clonePolyNode(node))
   }
 
   /** Restore an evicted node when necessary, then reinforce it. */
-  async reinforceNodeSafe(id: string, amount: number, reason?: string): Promise<PolyNode | undefined> {
+  async reinforceNodeSafe(id: string, amount: number, reason?: string, context?: string): Promise<PolyNode | undefined> {
     if (!Number.isFinite(amount)) throw new RangeError('Reinforcement amount must be finite')
     if (!await this.getNodeSafe(id)) return undefined
-    return this.reinforceNode(id, amount, reason)
+    return this.reinforceNode(id, amount, reason, context)
+  }
+
+  /**
+   * Apply a durable suppression delta to a loaded node's `inhibition` (mirrors
+   * {@link reinforceNode} but for the inhibition axis, which decays on its own,
+   * shorter-by-default half-life and is subtracted from `score` only at the
+   * final read/ranking step — never inside relational spreading — so a
+   * suppressed node stays re-evaluable rather than permanently invisible). A
+   * negative `amount` releases suppression. Emits an `inhibition_updated`
+   * change event. Returns the updated node or `undefined` if not loaded.
+   */
+  suppressNode(id: string, amount: number, reason?: string): PolyNode | undefined {
+    if (!Number.isFinite(amount)) throw new RangeError('Suppression amount must be finite')
+    const node = this.nodes.get(id)
+    if (!node) return undefined
+    const now = Date.now()
+    node.activation = suppressActivation(node.activation, amount, now, ACTIVATION_DEFAULTS.inhibitionHalfLifeMs)
+    node.updatedAt = now
+    this.touchHotCache(id)
+    this.markDirty(id)
+    this.emitChange({ type: 'inhibition_updated', nodeId: id, nodeType: node.type, delta: amount, reason })
+    return this.applyDeserialize(clonePolyNode(node))
+  }
+
+  /** Restore an evicted node when necessary, then suppress it. */
+  async suppressNodeSafe(id: string, amount: number, reason?: string): Promise<PolyNode | undefined> {
+    if (!Number.isFinite(amount)) throw new RangeError('Suppression amount must be finite')
+    if (!await this.getNodeSafe(id)) return undefined
+    return this.suppressNode(id, amount, reason)
   }
 
   /** Loaded nodes with the highest current activation, descending. The working-memory primitive. */
@@ -2058,8 +2120,7 @@ export class PolyGraph {
       if (!node.activation) continue
       const corrected = decayActivationState(node.activation, now)
       node.activation = {
-        score: corrected.score,
-        importance: corrected.importance,
+        ...corrected,
         reinforcementCount: node.activation.reinforcementCount,
         lastMeaningfulActivation: now,
       }

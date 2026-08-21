@@ -824,6 +824,7 @@ fn from_napi_activation(a: &NodeActivation) -> CoreNodeActivation {
     importance: a.importance,
     reinforcement_count: a.reinforcement_count as u64,
     last_meaningful_activation: a.last_meaningful_activation,
+    ..Default::default()
   }
 }
 
@@ -856,6 +857,7 @@ pub fn reinforce_activation(previous: Option<NodeActivation>, delta: f64, now: i
     delta,
     now,
     &polypack_core::DEFAULT_ACTIVATION,
+    None,
   ))
 }
 

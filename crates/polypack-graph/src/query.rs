@@ -1090,6 +1090,7 @@ mod tests {
                 importance: 0.0,
                 reinforcement_count: 1,
                 last_meaningful_activation: now,
+                ..Default::default()
             });
             f.add(n);
         }
@@ -1109,6 +1110,7 @@ mod tests {
                 importance: 0.0,
                 reinforcement_count: 1,
                 last_meaningful_activation: now,
+                ..Default::default()
             });
             f.add(n);
         }

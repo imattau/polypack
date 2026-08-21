@@ -58,12 +58,34 @@ fn msg_to_json(msg: &Msg) -> serde_json::Value {
 
 fn activation_to_msg(activation: &Option<crate::model::NodeActivation>) -> Msg {
     match activation {
-        Some(a) => Msg::map(vec![
-            ("score", Msg::Float(a.score)),
-            ("importance", Msg::Float(a.importance)),
-            ("reinforcementCount", Msg::Int(a.reinforcement_count as i64)),
-            ("lastMeaningfulActivation", Msg::Int(a.last_meaningful_activation)),
-        ]),
+        Some(a) => {
+            let mut entries = vec![
+                ("score", Msg::Float(a.score)),
+                ("importance", Msg::Float(a.importance)),
+                ("reinforcementCount", Msg::Int(a.reinforcement_count as i64)),
+                ("lastMeaningfulActivation", Msg::Int(a.last_meaningful_activation)),
+            ];
+            if let Some(inhibition) = a.inhibition {
+                entries.push(("inhibition", Msg::Float(inhibition)));
+                entries.push(("lastInhibitedAt", Msg::Int(a.last_inhibited_at.unwrap_or(a.last_meaningful_activation))));
+            }
+            if let Some(context) = &a.context {
+                let context_entries = context
+                    .iter()
+                    .map(|(key, entry)| {
+                        (
+                            Msg::Str(key.clone()),
+                            Msg::map(vec![
+                                ("score", Msg::Float(entry.score)),
+                                ("lastMeaningfulActivation", Msg::Int(entry.last_meaningful_activation)),
+                            ]),
+                        )
+                    })
+                    .collect();
+                entries.push(("context", Msg::Map(context_entries)));
+            }
+            Msg::map(entries)
+        }
         // Match the TypeScript reference, which encodes `activation: undefined`
         // as an explicit nil key, so bytes stay identical across languages.
         None => Msg::Nil,
@@ -96,11 +118,45 @@ fn msg_to_activation(msg: &Msg) -> Result<Option<crate::model::NodeActivation>> 
         Some(Msg::Int(i)) => *i,
         _ => return Err(PolypackError::CorruptData("activation missing or invalid lastMeaningfulActivation".into())),
     };
+    let inhibition = match find("inhibition") {
+        Some(Msg::Float(f)) => Some(*f),
+        Some(Msg::Int(i)) => Some(*i as f64),
+        _ => None,
+    };
+    let last_inhibited_at = match find("lastInhibitedAt") {
+        Some(Msg::Int(i)) => Some(*i),
+        _ => None,
+    };
+    let context = match find("context") {
+        Some(Msg::Map(entries)) => {
+            let mut context = std::collections::HashMap::new();
+            for (k, v) in entries {
+                let Msg::Str(key) = k else { continue };
+                let Msg::Map(fields) = v else { continue };
+                let find_field = |name: &str| fields.iter().find(|(k, _)| matches!(k, Msg::Str(s) if s == name)).map(|(_, v)| v);
+                let score = match find_field("score") {
+                    Some(Msg::Float(f)) => *f,
+                    Some(Msg::Int(i)) => *i as f64,
+                    _ => continue,
+                };
+                let anchor = match find_field("lastMeaningfulActivation") {
+                    Some(Msg::Int(i)) => *i,
+                    _ => continue,
+                };
+                context.insert(key.clone(), crate::model::ContextActivation { score, last_meaningful_activation: anchor });
+            }
+            Some(context)
+        }
+        _ => None,
+    };
     Ok(Some(crate::model::NodeActivation {
         score,
         importance,
         reinforcement_count,
         last_meaningful_activation,
+        inhibition,
+        last_inhibited_at,
+        context,
     }))
 }
 
@@ -504,6 +560,7 @@ mod tests {
             importance: 0.1,
             reinforcement_count: 2,
             last_meaningful_activation: 1,
+            ..Default::default()
         });
         let bytes = encode_snapshot(&[("n1".to_string(), n)], &[], &[("v1".to_string(), vec![0.5, 0.25])]);
         assert_eq!(hex(&bytes), expected);
@@ -547,6 +604,7 @@ mod tests {
             importance: 0.2,
             reinforcement_count: 3,
             last_meaningful_activation: 42,
+            ..Default::default()
         });
         let bytes = encode_snapshot(&[("n1".to_string(), n.clone())], &[], &[]);
         let decoded = decode_snapshot(&bytes).unwrap();

@@ -19,7 +19,7 @@ export interface SyncOp {
   seq: number
   timestamp: number
   clientId: string
-  kind: 'addNode' | 'updateNode' | 'removeNode' | 'addEdge' | 'updateEdge' | 'removeEdges' | 'activationUpdate'
+  kind: 'addNode' | 'updateNode' | 'removeNode' | 'addEdge' | 'updateEdge' | 'removeEdges' | 'activationUpdate' | 'inhibitionUpdate'
   payload: Record<string, unknown>
   operationId?: string
   transactionId?: string
