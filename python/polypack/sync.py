@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+import copy
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -68,6 +69,12 @@ class FileSyncOperationLog:
         state = json.loads(self.path.read_text())
         if not isinstance(state, dict) or not isinstance(state.get("ops", []), list):
             raise ValueError("invalid sync operation log")
+        for operation in state["ops"]:
+            validate_sync_operation(operation)
+        if state.get("checksum") is not None and state["checksum"] != sync_checksum(state["ops"]):
+            raise ValueError("sync operation log checksum mismatch")
+        if state.get("identityChecksum") is not None and state["identityChecksum"] != sync_identity_checksum(state.get("operationIds", []), state.get("transactionIds", [])):
+            raise ValueError("sync operation identity checksum mismatch")
         return state
 
     def append_batch(self, operations: list[dict[str, Any]], base_cursor: int, operation_ids: set[str], transaction_ids: set[str]) -> None:
@@ -178,7 +185,7 @@ class SyncServer:
                 self._operation_ids.add(operation_key)
             if transaction_key:
                 self._transaction_ids.add(transaction_key)
-            accepted.append(operation)
+            accepted.append(copy.deepcopy(operation))
         self.ops.extend(accepted)
         if self.max_ops is not None and len(self.ops) > self.max_ops:
             removed = len(self.ops) - self.max_ops

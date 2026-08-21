@@ -602,3 +602,10 @@ def test_sync_server_supports_durable_recovery_idempotence_and_filters(tmp_path)
     assert recovered["cursor"] == 2 and recovered["ops"][0]["kind"] == "updateNode"
     restored = polypack.SyncServer(operation_log=polypack.FileSyncOperationLog(tmp_path / "sync.json"), max_ops=2)
     assert restored.cursor == 2
+
+
+def test_sync_operation_log_rejects_corruption(tmp_path):
+    path = tmp_path / "sync.json"
+    path.write_text(json.dumps({"baseCursor": 0, "ops": [], "checksum": "bad"}))
+    with pytest.raises(ValueError, match="checksum mismatch"):
+        polypack.SyncServer(operation_log=polypack.FileSyncOperationLog(path))

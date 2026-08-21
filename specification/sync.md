@@ -60,5 +60,7 @@ administrative monitoring.
 Native servers expose the same minimum server guarantees: protocol-version
 validation, batch limits, global cursors, snapshot/delta recovery, bounded
 retention, operation and transaction idempotence, and deterministic checksums.
+Python includes a JSON operation-log adapter; Rust exposes a synchronous state
+machine and leaves durable log integration to the host `Storage` implementation.
 Authorization, conflict callbacks, subscription predicates, and transport
 delivery remain host-language integration points.
