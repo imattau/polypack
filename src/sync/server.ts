@@ -11,6 +11,8 @@ export interface SyncServerOptions {
   clientMetadata?: (client: SyncServerClient) => Record<string, unknown> | undefined
   operationLog?: SyncOperationLog
   maxBatchOps?: number
+  /** Maximum number of operations queued for durable processing. */
+  maxPendingOps?: number
 }
 
 export type SyncServerClient = {
@@ -33,15 +35,17 @@ export class SyncServer {
   private clients: SyncServerClient[] = []
   private clientFilters = new Map<SyncServerClient, SyncSubscriptionOptions['filter']>()
   private baseCursor = 0
-  private readonly options: SyncServerOptions & { protocolVersion: number; maxOps: number; maxBatchOps: number }
+  private readonly options: SyncServerOptions & { protocolVersion: number; maxOps: number; maxBatchOps: number; maxPendingOps: number }
   private readyPromise: Promise<void> | null = null
   private durableQueue: Promise<void> = Promise.resolve()
+  private pendingOps = 0
   onOp?: (op: SyncOp) => void
 
   constructor(options: SyncServerOptions = {}) {
-    this.options = { ...options, protocolVersion: options.protocolVersion ?? SYNC_PROTOCOL_VERSION, maxOps: options.maxOps ?? Number.POSITIVE_INFINITY, maxBatchOps: options.maxBatchOps ?? Number.POSITIVE_INFINITY }
+    this.options = { ...options, protocolVersion: options.protocolVersion ?? SYNC_PROTOCOL_VERSION, maxOps: options.maxOps ?? Number.POSITIVE_INFINITY, maxBatchOps: options.maxBatchOps ?? Number.POSITIVE_INFINITY, maxPendingOps: options.maxPendingOps ?? Number.POSITIVE_INFINITY }
     if ((this.options.maxOps !== Number.POSITIVE_INFINITY && !Number.isInteger(this.options.maxOps)) || this.options.maxOps < 1) throw new RangeError('maxOps must be a positive integer or Infinity')
     if ((this.options.maxBatchOps !== Number.POSITIVE_INFINITY && !Number.isInteger(this.options.maxBatchOps)) || this.options.maxBatchOps < 1) throw new RangeError('maxBatchOps must be a positive integer or Infinity')
+    if ((this.options.maxPendingOps !== Number.POSITIVE_INFINITY && !Number.isInteger(this.options.maxPendingOps)) || this.options.maxPendingOps < 1) throw new RangeError('maxPendingOps must be a positive integer or Infinity')
   }
 
   /** Load durable server history before accepting requests. */
@@ -145,7 +149,18 @@ export class SyncServer {
 
   private processDelta(msg: SyncMessage, sender: SyncServerClient, errors: SyncError[] = []): void {
     if (this.options.operationLog) {
-      const run = this.durableQueue.then(() => this.processDurableDelta(msg, sender, errors))
+      if (this.pendingOps + msg.ops.length > this.options.maxPendingOps) {
+        sender.send({ type: 'ack', clientId: msg.clientId, fromSeq: msg.fromSeq, ops: [], protocolVersion: this.options.protocolVersion, errors: [{ code: 'pending_too_large', message: `Durable sync queue is full; maximum pending operations is ${this.options.maxPendingOps}` }] })
+        return
+      }
+      this.pendingOps += msg.ops.length
+      const run = this.durableQueue.then(async () => {
+        try {
+          await this.processDurableDelta(msg, sender, errors)
+        } finally {
+          this.pendingOps -= msg.ops.length
+        }
+      })
       this.durableQueue = run.then(() => undefined, () => undefined)
       return
     }
@@ -205,18 +220,25 @@ export class SyncServer {
       const key = `${op.clientId}:${op.seq}`
       const operationKey = op.operationId ? `${op.clientId}:${op.operationId}` : undefined
       if (this.seenOps.has(key) || (operationKey && this.seenOperationIds.has(operationKey))) continue
-      await this.options.operationLog!.append(op)
+      accepted.push(op)
+    }
+    const log = this.options.operationLog!
+    if (accepted.length > 0) {
+      if (log.appendBatch) await log.appendBatch(accepted)
+      else for (const op of accepted) await log.append(op)
+    }
+    for (const op of accepted) {
+      const key = `${op.clientId}:${op.seq}`
+      const operationKey = op.operationId ? `${op.clientId}:${op.operationId}` : undefined
       this.seenOps.add(key)
       if (operationKey) this.seenOperationIds.add(operationKey)
       this.opLog.push(op)
-      accepted.push(op)
       this.onOp?.(op)
       while (this.opLog.length > this.options.maxOps) {
         this.forgetOperation(this.opLog.shift()!)
         this.baseCursor++
       }
     }
-    const log = this.options.operationLog!
     if (log.compact && this.baseCursor > 0) await log.compact(this.baseCursor)
     const acknowledgedSeq = msg.ops.reduce((max, op) => Math.max(max, op.seq), msg.fromSeq)
     sender.send({ type: 'ack', clientId: msg.clientId, fromSeq: acknowledgedSeq, ops: [], protocolVersion: this.options.protocolVersion, errors: errors.length ? errors : undefined })
@@ -228,6 +250,12 @@ export class SyncServer {
       if (visible.length === 0) continue
       client.send({ type: 'delta', clientId: 'server', fromSeq: broadcastCursor, cursor: this.cursor, ops: visible, checksum: syncChecksum(visible), protocolVersion: this.options.protocolVersion })
     }
+  }
+
+  /** Wait until durable submissions accepted so far have reached the operation log. */
+  async flush(): Promise<void> {
+    await this.ready()
+    await this.durableQueue
   }
 
   private forgetOperation(op: SyncOp): void {

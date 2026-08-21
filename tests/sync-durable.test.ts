@@ -80,6 +80,45 @@ describe('durable sync operation logs', () => {
     })))
     await expect(new FileSyncOperationLog(io).load()).rejects.toThrow(/Invalid sync operation log state/)
   })
+
+  it('rejects duplicate persisted operation identities', async () => {
+    const io = new MemoryFileIO()
+    await io.writeFile('sync-operations.json', new TextEncoder().encode(JSON.stringify({
+      baseCursor: 0,
+      ops: [op(1), op(1)],
+    })))
+    await expect(new FileSyncOperationLog(io).load()).rejects.toThrow(/Invalid sync operation log state/)
+  })
+
+  it('flushes a durable batch before returning', async () => {
+    const io = new MemoryFileIO()
+    const server = new SyncServer({ operationLog: new FileSyncOperationLog(io) })
+    const handle = server.addClient({ send: () => undefined })
+    handle(message([op(1), op(2)]))
+    await server.flush()
+    const state = await new FileSyncOperationLog(io).load()
+    expect(state.ops.map(item => item.operationId)).toEqual(['op-1', 'op-2'])
+  })
+
+  it('rejects durable submissions when the pending queue is full', async () => {
+    let release!: () => void
+    const gate = new Promise<void>(resolve => { release = resolve })
+    const log = {
+      load: async () => ({ baseCursor: 0, ops: [] }),
+      append: async () => undefined,
+      appendBatch: async () => { await gate },
+    }
+    const sent: SyncMessage[] = []
+    const server = new SyncServer({ operationLog: log, maxPendingOps: 1 })
+    const handle = server.addClient({ send: message => sent.push(message) })
+    handle(message([op(1)]))
+    handle(message([op(2)]))
+    expect(sent[0]).toMatchObject({ errors: [{ code: 'pending_too_large' }] })
+    release()
+    await server.flush()
+    expect(sent).toHaveLength(2)
+    expect(sent[1]).toMatchObject({ clientId: 'client' })
+  })
 })
 
 describe('durable sync client state', () => {

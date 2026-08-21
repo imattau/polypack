@@ -7,7 +7,7 @@ export interface SyncContext {
 }
 
 export interface SyncError {
-  code: 'unauthorized' | 'conflict' | 'protocol_version' | 'cursor_expired' | 'batch_too_large' | 'checksum_mismatch'
+  code: 'unauthorized' | 'conflict' | 'protocol_version' | 'cursor_expired' | 'batch_too_large' | 'pending_too_large' | 'checksum_mismatch'
   message: string
   operationId?: string
 }

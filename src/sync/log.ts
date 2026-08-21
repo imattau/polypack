@@ -101,6 +101,8 @@ export interface SyncLogState {
 export interface SyncOperationLog {
   load(): Promise<SyncLogState>
   append(op: SyncOp): Promise<void>
+  /** Persist a logical batch atomically when the adapter can provide it. */
+  appendBatch?(ops: readonly SyncOp[]): Promise<void>
   compact?(baseCursor: number): Promise<void>
 }
 
@@ -115,6 +117,10 @@ export class MemorySyncOperationLog implements SyncOperationLog {
 
   async append(op: SyncOp): Promise<void> {
     this.ops.push({ ...op, payload: structuredClone(op.payload) })
+  }
+
+  async appendBatch(ops: readonly SyncOp[]): Promise<void> {
+    this.ops.push(...ops.map(op => ({ ...op, payload: structuredClone(op.payload) })))
   }
 
   async compact(baseCursor: number): Promise<void> {
@@ -133,8 +139,13 @@ export class FileSyncOperationLog implements SyncOperationLog {
   async load(): Promise<SyncLogState> {
     const data = await this.io.readFile(this.fileName)
     if (!data || data.length === 0) return { baseCursor: 0, ops: [] }
-    const parsed = JSON.parse(new TextDecoder().decode(data)) as Partial<SyncLogState>
-    if (!Number.isInteger(parsed.baseCursor) || (parsed.baseCursor ?? 0) < 0 || !Array.isArray(parsed.ops) || parsed.ops.some(op => !this.validOperation(op))) {
+    let parsed: Partial<SyncLogState>
+    try {
+      parsed = JSON.parse(new TextDecoder().decode(data)) as Partial<SyncLogState>
+    } catch {
+      throw new Error('Invalid sync operation log state')
+    }
+    if (!this.validState(parsed)) {
       throw new Error('Invalid sync operation log state')
     }
     if (parsed.checksum !== undefined && parsed.checksum !== syncChecksum(parsed.ops)) {
@@ -146,16 +157,40 @@ export class FileSyncOperationLog implements SyncOperationLog {
   private validOperation(op: unknown): op is SyncOp {
     if (!op || typeof op !== 'object') return false
     const candidate = op as Partial<SyncOp>
-    return Number.isInteger(candidate.seq) && (candidate.seq ?? -1) >= 0 &&
+    return Number.isInteger(candidate.seq) && (candidate.seq ?? -1) >= 1 &&
       typeof candidate.timestamp === 'number' && Number.isFinite(candidate.timestamp) &&
       typeof candidate.clientId === 'string' && candidate.clientId.length > 0 &&
-      typeof candidate.kind === 'string' && !!candidate.payload && typeof candidate.payload === 'object'
+      typeof candidate.kind === 'string' && !!candidate.payload && typeof candidate.payload === 'object' &&
+      (candidate.operationId === undefined || (typeof candidate.operationId === 'string' && candidate.operationId.length > 0)) &&
+      (candidate.transactionId === undefined || (typeof candidate.transactionId === 'string' && candidate.transactionId.length > 0)) &&
+      (candidate.baseRevision === undefined || (Number.isInteger(candidate.baseRevision) && (candidate.baseRevision ?? -1) >= 0))
+  }
+
+  private validState(value: Partial<SyncLogState>): value is SyncLogState {
+    if (!Number.isInteger(value.baseCursor) || (value.baseCursor ?? -1) < 0 || !Array.isArray(value.ops) || value.ops.some(op => !this.validOperation(op))) return false
+    const operationKeys = new Set<string>()
+    const operationIds = new Set<string>()
+    for (const op of value.ops) {
+      const key = `${op.clientId}:${op.seq}`
+      if (operationKeys.has(key)) return false
+      operationKeys.add(key)
+      if (op.operationId !== undefined) {
+        const operationKey = `${op.clientId}:${op.operationId}`
+        if (operationIds.has(operationKey)) return false
+        operationIds.add(operationKey)
+      }
+    }
+    return true
   }
 
   async append(op: SyncOp): Promise<void> {
+    await this.appendBatch([op])
+  }
+
+  async appendBatch(ops: readonly SyncOp[]): Promise<void> {
     await this.enqueue(async () => {
       const state = await this.load()
-      state.ops.push(op)
+      state.ops.push(...ops.map(op => ({ ...op, payload: structuredClone(op.payload) })))
       await this.write(state)
     })
   }

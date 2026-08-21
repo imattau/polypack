@@ -1480,7 +1480,22 @@ export class PolyGraph {
     if (options?.expectedRevision !== undefined && edge.revision !== options.expectedRevision) {
       throw new ConflictError(id, options.expectedRevision, edge.revision)
     }
-    this.removeEdges(source, edge.type, edge.target)
+    const ownership = getOwnership(edge.data)
+    if (ownership === 'owned' && !this.hasOtherOwnedSource(edge.target, source)) {
+      this.removeNode(edge.target)
+    }
+    const sourceEdges = this.edges.get(source)
+    sourceEdges?.delete(edge.id)
+    if (sourceEdges && sourceEdges.size === 0) this.edges.delete(source)
+    const remainingFromSource = [...(sourceEdges?.values() ?? [])].some(candidate => candidate.target === edge!.target)
+    if (!remainingFromSource) this.nodeToEdgeMap.get(edge.target)?.delete(source)
+    this.dirtyEdges.delete(edge.id)
+    this.removedEdgeIds.add(edge.id)
+    this.emitChange({ type: 'edge_removed', edgeId: edge.id, edgeType: edge.type, source, target: edge.target })
+    if (ownership === 'shared' && !this.hasOtherIncoming(edge.target, source)) {
+      this.onOrphan?.(edge.target)
+    }
+    this.schedulePersist()
     return true
   }
 
@@ -1550,8 +1565,9 @@ export class PolyGraph {
 
     const removeAll = !type && !target
     for (const edge of removed) {
-      if (!removeAll) edges.delete(edge.id)
-      this.nodeToEdgeMap.get(edge.target)?.delete(source)
+      edges.delete(edge.id)
+      const stillFromSource = [...edges.values()].some(candidate => candidate.target === edge.target)
+      if (!stillFromSource) this.nodeToEdgeMap.get(edge.target)?.delete(source)
       const id = edge.id
       this.dirtyEdges.delete(id)
       this.removedEdgeIds.add(id)

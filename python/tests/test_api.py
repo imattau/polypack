@@ -2,6 +2,8 @@
 
 import numpy as np
 import pytest
+import json
+from pathlib import Path
 
 import polypack
 from polypack import (
@@ -289,3 +291,97 @@ def test_persist_recovers_from_truncated_wal(tmp_path):
     assert (tmp_path / "snapshot.msgpack").exists()
     wal_file = tmp_path / "wal.msgpack"
     assert not wal_file.exists() or wal_file.stat().st_size == 0
+
+
+def test_transaction_conformance_fixture():
+    fixture_path = Path(__file__).resolve().parents[2] / "fixtures" / "database-core" / "transaction.json"
+    fixture = json.loads(fixture_path.read_text())
+    graph = PolyGraph()
+    graph.add_node(fixture["setup"]["nodes"][0])
+    tx_spec = fixture["transaction"]
+
+    def apply(tx):
+        patch = tx_spec["patch"]
+        tx.patch_node(
+            patch["id"],
+            increment=patch["increment"],
+            expected_revision=patch["expectedRevision"],
+        )
+        tx.add_node(tx_spec["addNode"])
+        edge = tx_spec["addEdge"]
+        tx.add_edge(edge["source"], edge["type"], edge["target"])
+        assert tx.get_node(tx_spec["readYourWrites"]["id"])["data"]["count"] == tx_spec["readYourWrites"]["count"]
+
+    graph.transaction(apply)
+    assert graph.size == fixture["expect"]["nodeCount"]
+    assert graph.get_node("person-1")["data"]["count"] == fixture["expect"]["person1Count"]
+    assert graph.get_node("person-1")["revision"] == fixture["expect"]["person1Revision"]
+    assert graph.get_edge_targets("person-1", "RELATED_TO") == fixture["expect"]["edgeTargets"]
+
+    def rollback(tx):
+        rollback_spec = fixture["rollback"]
+        tx.patch_node(
+            rollback_spec["patch"]["id"],
+            set=rollback_spec["patch"]["set"],
+            expected_revision=rollback_spec["patch"]["expectedRevision"],
+        )
+        tx.add_node(rollback_spec["addNode"])
+        raise RuntimeError("rollback fixture failure")
+
+    with pytest.raises(RuntimeError, match="rollback fixture failure"):
+        graph.transaction(rollback)
+    assert graph.size == fixture["expect"]["rollbackCount"]
+    assert graph.get_node("temporary") is None
+    assert graph.get_node("person-1")["data"]["count"] == fixture["expect"]["person1Count"]
+    assert graph.get_node("person-1")["revision"] == fixture["expect"]["rollbackRevision"]
+
+
+def test_schema_and_unique_index_conformance_fixture():
+    fixture_path = Path(__file__).resolve().parents[2] / "fixtures" / "database-core" / "schema-and-indexes.json"
+    fixture = json.loads(fixture_path.read_text())
+    graph = PolyGraph()
+    node_type = fixture["nodeType"]
+    graph.register_node_type(
+        node_type["name"],
+        required_fields=node_type["requiredFields"],
+        data_types=node_type["dataTypes"],
+    )
+    graph.define_index(fixture["index"])
+    graph.add_node(fixture["validNode"])
+    with pytest.raises(PolypackError):
+        graph.add_node(fixture["invalidNode"])
+    with pytest.raises(polypack.UniqueConstraintError):
+        graph.add_node(fixture["duplicateNode"])
+    assert graph.size == fixture["expect"]["nodeCount"]
+    assert graph.get_node(fixture["expect"]["presentId"])["data"]["name"] == "Mary"
+
+
+def test_parallel_edge_identity_conformance_fixture():
+    fixture_path = Path(__file__).resolve().parents[2] / "fixtures" / "database-core" / "parallel-edges.json"
+    fixture = json.loads(fixture_path.read_text())
+    graph = PolyGraph()
+    for node in fixture["nodes"]:
+        graph.add_node(node)
+    for edge in fixture["edges"]:
+        graph.add_edge(edge["source"], edge["type"], edge["target"], edge["data"], id=edge["id"])
+    update = fixture["update"]
+    graph.update_edge(update["id"], update["data"], expected_revision=update["expectedRevision"])
+    remove = fixture["remove"]
+    assert graph.remove_edge(remove["id"], expected_revision=remove["expectedRevision"])
+    edges = graph.get_edges("a", "RELATED")
+    assert [edge["id"] for edge in edges] == fixture["expect"]["edgeIds"]
+    assert edges[0]["revision"] == fixture["expect"]["revision"]
+    assert edges[0]["data"]["confidence"] == fixture["expect"]["confidence"]
+
+
+def test_snapshot_isolation_conformance_fixture():
+    fixture_path = Path(__file__).resolve().parents[2] / "fixtures" / "database-core" / "snapshot-isolation.json"
+    fixture = json.loads(fixture_path.read_text())
+    graph = PolyGraph()
+    for node in fixture["nodes"]:
+        graph.add_node(node)
+    snapshot = graph.snapshot()
+    graph.add_node(fixture["mutation"]["add"])
+    graph.remove_node(fixture["mutation"]["remove"])
+    assert sorted(snapshot.query().ids()) == fixture["expect"]["snapshotIds"]
+    assert sorted(graph.query().ids()) == fixture["expect"]["liveIds"]

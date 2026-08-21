@@ -520,7 +520,11 @@ payloads** — activation is accumulated knowledge, not last-write-wins data.
   any pending operations and close.
 - `SyncServer` is an in-memory relay by default. Pass a `SyncOperationLog` as
   `operationLog` and await `ready()` before accepting clients to restore and
-  durably append the server history. `addClient(handle)` returns that client's
+  durably append the server history. `maxBatchOps` bounds an incoming envelope
+  and `maxPendingOps` applies back-pressure to the durable queue. A rejected
+  envelope receives an `ack` with `pending_too_large`; retry it after the queue
+  drains. `await server.flush()` waits for all durable submissions accepted so
+  far to reach the operation log. `addClient(handle)` returns that client's
   incoming-message handler, `removeClient(handle)` unregisters it, and `ops`
   exposes the received log. The server deduplicates operations by client and
   sequence, acknowledges both first-time and repeated delivery, and serves full

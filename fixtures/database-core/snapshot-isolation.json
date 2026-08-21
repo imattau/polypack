@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 1,
+  "name": "snapshot-isolation",
+  "nodes": [
+    { "id": "a", "type": "record", "data": { "value": 1 }, "insertedAt": 1, "updatedAt": 1, "revision": 0 },
+    { "id": "b", "type": "record", "data": { "value": 2 }, "insertedAt": 1, "updatedAt": 1, "revision": 0 }
+  ],
+  "mutation": { "add": { "id": "c", "type": "record", "data": { "value": 3 }, "insertedAt": 2, "updatedAt": 2, "revision": 0 }, "remove": "b" },
+  "expect": { "snapshotIds": ["a", "b"], "liveIds": ["a", "c"] }
+}
