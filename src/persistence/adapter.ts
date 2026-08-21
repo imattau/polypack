@@ -1,6 +1,9 @@
-import type { SerializedNode, SerializedEdge, IndexDefinition, MutationRecord, VerificationReport, GraphStats, NodeTypeDefinition, EdgeTypeDefinition } from '../types.js'
+import type { SerializedNode, SerializedEdge, IndexDefinition, MutationRecord, VerificationReport, GraphStats, PersistedSchemaDefinitions } from '../types.js'
 import type { AdapterCapabilities } from '../types.js'
 import type { FileIO } from './file-io.js'
+
+/** Backwards-compatible adapter-module export for schema metadata. */
+export type { PersistedSchemaDefinitions } from '../types.js'
 
 /** Storage-level node predicates used by persisted queries. */
 export interface PersistedNodeQuery {
@@ -20,18 +23,13 @@ export interface PersistenceChanges {
   baseRevision?: number
   metadata?: Record<string, unknown>
   indexDefinitions?: IndexDefinition[]
+  schemaDefinitions?: PersistedSchemaDefinitions
   putNodes: SerializedNode[]
   deleteNodeIds: string[]
   putEdges: SerializedEdge[]
   deleteEdgeIds: string[]
   putVectors: Array<{ id: string; vector: number[] }>
   deleteVectorIds: string[]
-}
-
-/** Serializable schema metadata; runtime validator callbacks are omitted. */
-export interface PersistedSchemaDefinitions {
-  nodeTypes: Array<{ nodeType: string } & Omit<NodeTypeDefinition, 'validate'>>
-  edgeTypes: Array<{ edgeType: string } & Omit<EdgeTypeDefinition, 'validate'>>
 }
 
 /** Storage contract used by {@link PolyGraph}. Implement all writes atomically where possible. */

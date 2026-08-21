@@ -137,6 +137,26 @@ describe('BinaryStoreAdapter', () => {
       expect(await adapter.getAllEdges()).toHaveLength(0)
       expect(await adapter.getAllVectors()).toHaveLength(0)
     })
+
+    it('recovers schema metadata from the same WAL as record changes', async () => {
+      const io = new MemoryFileIO()
+      const first = new BinaryStoreAdapter({ storeDir: 'schema-wal', compactThreshold: 1000, fileIO: io })
+      await first.applyChanges!({
+        transactionId: 'schema-transaction',
+        operationId: 'schema-operation',
+        schemaDefinitions: { nodeTypes: [{ nodeType: 'person', requiredFields: ['name'] }], edgeTypes: [] },
+        putNodes: [{ id: 'p1', type: 'person', data: { name: 'Ada' }, vector: null, insertedAt: 1, updatedAt: 1 }],
+        deleteNodeIds: [], putEdges: [], deleteEdgeIds: [], putVectors: [], deleteVectorIds: [],
+      })
+      await io.deleteFile('schemas.json')
+
+      const restored = new BinaryStoreAdapter({ storeDir: 'schema-wal', compactThreshold: 1000, fileIO: io })
+      expect(await restored.getNode('p1')).toMatchObject({ id: 'p1', type: 'person' })
+      expect(await restored.getSchemaDefinitions()).toEqual({
+        nodeTypes: [{ nodeType: 'person', requiredFields: ['name'] }],
+        edgeTypes: [],
+      })
+    })
   })
 
   describe('edges', () => {

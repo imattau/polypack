@@ -1,6 +1,7 @@
 import type { SerializedNode, SerializedEdge, IndexDefinition, MutationRecord } from '../types.js'
-import type { PersistenceAdapter, PersistenceChanges, PersistedNodeQuery, PersistedSchemaDefinitions } from './adapter.js'
-import { applyPersistedCountPagination, applyPersistedNodeQuery, matchesPersistedNode } from './query.js'
+import type { PersistenceAdapter, PersistenceChanges, PersistedNodeQuery } from './adapter.js'
+import type { PersistedSchemaDefinitions } from '../types.js'
+import { applyPersistedCountPagination, applyPersistedNodeQuery, matchesPersistedNode, SecondaryIndexBuckets } from './query.js'
 import { mutationRecordFromChanges } from './mutation-log.js'
 
 /** Volatile persistence adapter for Node.js, tests, and temporary graphs. */
@@ -23,6 +24,7 @@ export class MemoryAdapter implements PersistenceAdapter {
   private edgesByTarget = new Map<string, Set<string>>()
   private nodeOrder = new Map<string, true>()
   private indexDefinitions: IndexDefinition[] = []
+  private secondaryIndexes = new SecondaryIndexBuckets()
   private schemaDefinitions: PersistedSchemaDefinitions = { nodeTypes: [], edgeTypes: [] }
   private mutations: MutationRecord[] = []
   private nextMutation = 1n
@@ -54,6 +56,7 @@ export class MemoryAdapter implements PersistenceAdapter {
 
   private indexNode(node: SerializedNode): void {
     const existing = this.nodes.get(node.id)
+    if (existing) this.secondaryIndexes.remove(existing)
     if (existing && existing.type !== node.type) this.unindexNode(node.id, existing.type)
     let ids = this.byType.get(node.type)
     if (!ids) {
@@ -61,10 +64,12 @@ export class MemoryAdapter implements PersistenceAdapter {
       this.byType.set(node.type, ids)
     }
     ids.add(node.id)
+    this.secondaryIndexes.add(node)
   }
 
   private unindexNode(id: string, type?: string): void {
     const node = this.nodes.get(id)
+    this.secondaryIndexes.remove(node)
     const ids = this.byType.get(type ?? node?.type ?? '')
     if (ids) {
       ids.delete(id)
@@ -116,7 +121,12 @@ export class MemoryAdapter implements PersistenceAdapter {
 
   async applyChanges(changes: PersistenceChanges): Promise<void> {
     if (changes.operationId && this.mutations.some(record => record.operationId === changes.operationId)) return
-    if (changes.indexDefinitions) this.indexDefinitions = changes.indexDefinitions.map(index => ({ ...index, fields: [...index.fields] }))
+    if (changes.indexDefinitions) {
+      this.indexDefinitions = changes.indexDefinitions.map(index => ({ ...index, fields: [...index.fields] }))
+      this.secondaryIndexes.setDefinitions(this.indexDefinitions)
+      this.secondaryIndexes.rebuild(this.nodes.values())
+    }
+    if (changes.schemaDefinitions) this.schemaDefinitions = structuredClone(changes.schemaDefinitions)
     for (const id of changes.deleteNodeIds) { this.unindexNode(id); this.nodes.delete(id); this.nodeOrder.delete(id) }
     for (const id of changes.deleteEdgeIds) { this.unindexEdge(id); this.edges.delete(id) }
     for (const id of changes.deleteVectorIds) this.vectors.delete(id)
@@ -184,7 +194,8 @@ export class MemoryAdapter implements PersistenceAdapter {
   }
 
   async queryNodes(query: PersistedNodeQuery): Promise<SerializedNode[]> {
-    const candidates = this.typeCandidateIds(query)
+    const indexed = this.secondaryIndexes.candidates(query)
+    const candidates = indexed.ids ? [...indexed.ids] : this.typeCandidateIds(query)
     const nodes = candidates
       ? candidates.map(id => this.nodes.get(id)).filter((n): n is SerializedNode => !!n)
       : [...this.nodes.values()]
@@ -203,6 +214,15 @@ export class MemoryAdapter implements PersistenceAdapter {
         count += this.byType.get(type)?.size ?? 0
       }
     } else {
+      const indexed = this.secondaryIndexes.candidates(query)
+      if (indexed.ids) {
+        count = 0
+        for (const id of indexed.ids) {
+          const node = this.nodes.get(id)
+          if (node && matchesPersistedNode(node, query)) count++
+        }
+        return applyPersistedCountPagination(count, query)
+      }
       count = 0
       for (const node of this.nodes.values()) {
         if (matchesPersistedNode(node, query)) count++
@@ -310,6 +330,7 @@ export class MemoryAdapter implements PersistenceAdapter {
     this.byType.clear()
     this.edgesBySource.clear()
     this.edgesByTarget.clear()
+    this.secondaryIndexes.rebuild([])
   }
 
   async close(): Promise<void> {

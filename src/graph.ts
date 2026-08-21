@@ -21,7 +21,8 @@ import {
   reinforceActivation,
   yieldToUI,
 } from './utils.js'
-import type { PersistenceAdapter, PersistenceChanges, PersistedSchemaDefinitions } from './persistence/adapter.js'
+import type { PersistenceAdapter, PersistenceChanges } from './persistence/adapter.js'
+import type { PersistedSchemaDefinitions } from './types.js'
 import type { FileIO } from './persistence/file-io.js'
 import { MemoryAdapter } from './persistence/memory.js'
 import { createEmbedding, defaultEmbedding } from './embedding.js'
@@ -875,6 +876,7 @@ export class PolyGraph {
         baseRevision: this.currentTransactionOptions?.baseRevision,
         metadata: this.currentTransactionOptions?.metadata,
         indexDefinitions: indexDefinitionsDirty ? this.indexes : undefined,
+        schemaDefinitions: schemaDefinitionsDirty ? this.persistedSchemaDefinitions() : undefined,
         putNodes: nodesToSave,
         deleteNodeIds: removedNodeIds,
         putEdges: dirtyEdgeList,
@@ -896,7 +898,7 @@ export class PolyGraph {
         await Promise.all(removedVectorIds.map(id => this.persistence.deleteVector(id)))
         await this.persistence.bulkPutVectors(dirtyVectorEntries)
       }
-      if (schemaDefinitionsDirty && this.persistence.setSchemaDefinitions) {
+      if (schemaDefinitionsDirty && !this.persistence.applyChanges && this.persistence.setSchemaDefinitions) {
         await this.persistence.setSchemaDefinitions(this.persistedSchemaDefinitions())
       }
     } catch (error) {

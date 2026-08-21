@@ -162,11 +162,14 @@ export class PersistedGraphQuery {
       ...Object.keys(this.query.attributeRanges ?? {}),
     ])
     const nodeType = this.query.nodeTypes?.length === 1 ? this.query.nodeTypes[0] : undefined
-    const index = indexes.find((candidate: IndexDefinition) =>
+    const selectedIndexes = indexes.filter((candidate: IndexDefinition) =>
       (!candidate.nodeType || candidate.nodeType === nodeType) &&
       candidate.fields.every(field => fields.has(field) || fields.has(field.replace(/^data\./, ''))),
     )
-    const stages = [index ? `property-index(${index.name})` : 'record-scan']
+    const stages = selectedIndexes.length > 0
+      ? selectedIndexes.map(index => `property-index(${index.name})`)
+      : ['record-scan']
+    if (selectedIndexes.length > 1) stages.push(`index-intersection(${selectedIndexes.length})`)
     if (this.query.nodeTypes?.length) stages.push(`type-filter(${this.query.nodeTypes.join(',')})`)
     if (this.edgeType) stages.push(`edge-filter(${this.edgeType})`)
     if (this.edgeSource) stages.push(`edge-source(${this.edgeSource})`)
@@ -176,10 +179,11 @@ export class PersistedGraphQuery {
     if (this.resultLimit !== undefined) stages.push(`limit(${this.resultLimit})`)
     const loadedRecords = (await this.adapter.allNodeIds()).length
     return {
-      index: index?.name,
+      index: selectedIndexes[0]?.name,
+      indexes: selectedIndexes.map(index => index.name),
       stages,
       loadedRecords,
-      estimatedCost: Math.max(1, loadedRecords * (index ? 0.25 : 1) + this.traversals.length * loadedRecords),
+      estimatedCost: Math.max(1, loadedRecords * (selectedIndexes.length > 0 ? Math.pow(0.25, selectedIndexes.length) : 1) + this.traversals.length * loadedRecords),
     }
   }
 

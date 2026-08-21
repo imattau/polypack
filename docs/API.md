@@ -295,6 +295,9 @@ comparisons reject vectors with mismatched dimensions.
   rewrites the snapshot quadratically. Startup replays the WAL, then persists a
   snapshot before deleting it so a crash between those steps loses nothing.
   Recovery also tolerates a truncated WAL tail from a mid-append crash.
+  Schema definitions supplied in an atomic `applyChanges` commit are included
+  in the WAL and snapshot; the legacy `schemas.json` sidecar remains readable
+  for older stores.
 - `syncWrites: true` fsyncs WAL appends and snapshot writes (including the
   containing directory) for crash durability at a throughput cost.
 - `BinaryStoreAdapter` lives behind platform subpaths so the core entry point

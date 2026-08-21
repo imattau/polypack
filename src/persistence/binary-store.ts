@@ -1,6 +1,7 @@
 import type { SerializedNode, SerializedEdge, AdapterCapabilities, IndexDefinition, MutationRecord, VerificationReport } from '../types.js'
-import type { PersistenceAdapter, PersistenceChanges, PersistedNodeQuery, PersistedSchemaDefinitions } from './adapter.js'
-import { applyPersistedCountPagination, applyPersistedNodeQuery, matchesPersistedNode } from './query.js'
+import type { PersistenceAdapter, PersistenceChanges, PersistedNodeQuery } from './adapter.js'
+import type { PersistedSchemaDefinitions } from '../types.js'
+import { applyPersistedCountPagination, applyPersistedNodeQuery, matchesPersistedNode, SecondaryIndexBuckets } from './query.js'
 import type { WalEntry } from './binary-format.js'
 import { encodeWalEntries, decodeWalEntries, encodeSnapshot, decodeSnapshot, encodeMutationRecords, decodeMutationRecords } from './binary-format.js'
 import type { FileIO } from './file-io.js'
@@ -62,6 +63,7 @@ export class BinaryStoreAdapter implements PersistenceAdapter {
   private edges = new Map<string, SerializedEdge>()
   private vectors = new Map<string, number[]>()
   private indexDefinitions: IndexDefinition[] = []
+  private secondaryIndexes = new SecondaryIndexBuckets()
   private schemaDefinitions: PersistedSchemaDefinitions = { nodeTypes: [], edgeTypes: [] }
   private mutationRecords: MutationRecord[] = []
   private nextMutationSequence = 1n
@@ -109,6 +111,7 @@ export class BinaryStoreAdapter implements PersistenceAdapter {
 
   private indexNode(node: SerializedNode): void {
     const existing = this.nodes.get(node.id)
+    if (existing) this.secondaryIndexes.remove(existing)
     if (existing && existing.type !== node.type) this.unindexNode(node.id, existing.type)
     let ids = this.byType.get(node.type)
     if (!ids) {
@@ -116,10 +119,12 @@ export class BinaryStoreAdapter implements PersistenceAdapter {
       this.byType.set(node.type, ids)
     }
     ids.add(node.id)
+    this.secondaryIndexes.add(node)
   }
 
   private unindexNode(id: string, type?: string): void {
     const node = this.nodes.get(id)
+    this.secondaryIndexes.remove(node)
     const ids = this.byType.get(type ?? node?.type ?? '')
     if (ids) {
       ids.delete(id)
@@ -162,6 +167,7 @@ export class BinaryStoreAdapter implements PersistenceAdapter {
     this.byType.clear()
     this.edgesBySource.clear()
     this.edgesByTarget.clear()
+    this.secondaryIndexes.setDefinitions(this.indexDefinitions)
     for (const node of this.nodes.values()) this.indexNode(node)
     for (const edge of this.edges.values()) this.indexEdge(edge)
   }
@@ -209,15 +215,21 @@ export class BinaryStoreAdapter implements PersistenceAdapter {
       this.releaseLock = await this.io.acquireExclusiveLock(LOCK_FILE, { storeDir: this.config.storeDir }, this.config.staleLockMs)
     }
     const snapshotData = await this.io.readFile(SNAPSHOT_FILE)
+    let snapshotHasSchema = false
     if (snapshotData) {
-      const { nodes, edges, vectors, indexes } = decodeSnapshot(snapshotData)
+      const { nodes, edges, vectors, indexes, schemaDefinitions } = decodeSnapshot(snapshotData)
       this.nodes = nodes
       this.edges = edges
       this.vectors = vectors
       this.indexDefinitions = indexes
+      this.secondaryIndexes.setDefinitions(this.indexDefinitions)
+      if (schemaDefinitions) {
+        this.schemaDefinitions = schemaDefinitions
+        snapshotHasSchema = true
+      }
     }
     const schemaData = await this.io.readFile(SCHEMAS_FILE)
-    if (schemaData) {
+    if (schemaData && !snapshotHasSchema) {
       try {
         const parsed = JSON.parse(new TextDecoder().decode(schemaData)) as PersistedSchemaDefinitions
         if (!Array.isArray(parsed.nodeTypes) || !Array.isArray(parsed.edgeTypes)) throw new Error('schema metadata must contain nodeTypes and edgeTypes arrays')
@@ -278,12 +290,17 @@ export class BinaryStoreAdapter implements PersistenceAdapter {
         break
       case 'setIndexes':
         this.indexDefinitions = entry.indexes.map(index => ({ ...index, fields: [...index.fields] }))
+        this.secondaryIndexes.setDefinitions(this.indexDefinitions)
+        this.secondaryIndexes.rebuild(this.nodes.values())
+        break
+      case 'setSchema':
+        this.schemaDefinitions = structuredClone(entry.schema)
         break
     }
   }
 
   private async writeSnapshot(): Promise<void> {
-    await this.io.writeFile(SNAPSHOT_FILE, encodeSnapshot(this.nodes, this.edges, this.vectors, this.indexDefinitions))
+    await this.io.writeFile(SNAPSHOT_FILE, encodeSnapshot(this.nodes, this.edges, this.vectors, this.indexDefinitions, this.schemaDefinitions))
   }
 
   /**
@@ -327,7 +344,13 @@ export class BinaryStoreAdapter implements PersistenceAdapter {
       const entries: WalEntry[] = []
       if (changes.indexDefinitions) {
         this.indexDefinitions = changes.indexDefinitions.map(index => ({ ...index, fields: [...index.fields] }))
+        this.secondaryIndexes.setDefinitions(this.indexDefinitions)
+        this.secondaryIndexes.rebuild(this.nodes.values())
         entries.push({ kind: 'setIndexes', indexes: this.indexDefinitions })
+      }
+      if (changes.schemaDefinitions) {
+        this.schemaDefinitions = structuredClone(changes.schemaDefinitions)
+        entries.push({ kind: 'setSchema', schema: structuredClone(this.schemaDefinitions) })
       }
       for (const id of changes.deleteNodeIds) {
         const node = this.nodes.get(id)
@@ -371,6 +394,7 @@ export class BinaryStoreAdapter implements PersistenceAdapter {
         if (this.walEntryCount >= this.effectiveCompactThreshold()) {
           this.scheduleCompact()
         }
+        if (changes.schemaDefinitions) await this.io.writeFile(SCHEMAS_FILE, new TextEncoder().encode(JSON.stringify(this.schemaDefinitions)))
       }
     })
   }
@@ -544,7 +568,8 @@ export class BinaryStoreAdapter implements PersistenceAdapter {
     this.assertOpen()
     return this.enqueue(async () => {
       await this.ensureLoaded()
-      const candidates = this.typeCandidateIds(query)
+      const indexed = this.secondaryIndexes.candidates(query)
+      const candidates = indexed.ids ? [...indexed.ids] : this.typeCandidateIds(query)
       const nodes = candidates
         ? candidates.map(id => this.nodes.get(id)).filter((n): n is SerializedNode => !!n)
         : [...this.nodes.values()]
@@ -566,8 +591,17 @@ export class BinaryStoreAdapter implements PersistenceAdapter {
         for (const type of query.nodeTypes!) {
           count += this.byType.get(type)?.size ?? 0
         }
-      } else {
+    } else {
+      const indexed = this.secondaryIndexes.candidates(query)
+      if (indexed.ids) {
         count = 0
+        for (const id of indexed.ids) {
+          const node = this.nodes.get(id)
+          if (node && matchesPersistedNode(node, query)) count++
+        }
+        return applyPersistedCountPagination(count, query)
+      }
+      count = 0
         for (const node of this.nodes.values()) {
           if (matchesPersistedNode(node, query)) count++
         }
@@ -689,8 +723,9 @@ export class BinaryStoreAdapter implements PersistenceAdapter {
       this.byType.clear()
       this.edgesBySource.clear()
       this.edgesByTarget.clear()
+      this.secondaryIndexes.rebuild([])
       this.walEntryCount = 0
-      await this.io.writeFile(SNAPSHOT_FILE, encodeSnapshot(this.nodes, this.edges, this.vectors, this.indexDefinitions))
+      await this.io.writeFile(SNAPSHOT_FILE, encodeSnapshot(this.nodes, this.edges, this.vectors, this.indexDefinitions, this.schemaDefinitions))
       await this.io.writeFile(WAL_FILE, new Uint8Array(0))
     })
   }

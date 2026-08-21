@@ -1,5 +1,5 @@
 import { encode as msgpackEncode, decode as msgpackDecode } from '@msgpack/msgpack'
-import type { SerializedNode, SerializedEdge, IndexDefinition, MutationRecord } from '../types.js'
+import type { SerializedNode, SerializedEdge, IndexDefinition, MutationRecord, PersistedSchemaDefinitions } from '../types.js'
 
 export type WalEntryKind =
   | 'putNode'
@@ -10,6 +10,7 @@ export type WalEntryKind =
   | 'deleteVector'
   | 'clearAll'
   | 'setIndexes'
+  | 'setSchema'
 
 export type WalEntry =
   | { kind: 'putNode'; node: SerializedNode }
@@ -20,6 +21,7 @@ export type WalEntry =
   | { kind: 'deleteVector'; id: string }
   | { kind: 'clearAll' }
   | { kind: 'setIndexes'; indexes: IndexDefinition[] }
+  | { kind: 'setSchema'; schema: PersistedSchemaDefinitions }
 
 export interface SnapshotData {
   version: 1
@@ -27,6 +29,7 @@ export interface SnapshotData {
   edges: Array<[string, SerializedEdge]>
   vectors: Array<[string, number[]]>
   indexes?: IndexDefinition[]
+  schemaDefinitions?: PersistedSchemaDefinitions
 }
 
 export function encodeWalEntries(entries: WalEntry[]): Uint8Array {
@@ -94,6 +97,7 @@ export function encodeSnapshot(
   edges: Map<string, SerializedEdge>,
   vectors: Map<string, number[]>,
   indexes: IndexDefinition[] = [],
+  schemaDefinitions?: PersistedSchemaDefinitions,
 ): Uint8Array {
   const snapshot: SnapshotData = {
     version: 1,
@@ -101,6 +105,7 @@ export function encodeSnapshot(
     edges: [],
     vectors: [],
     indexes: indexes.map(index => ({ ...index, fields: [...index.fields] })),
+    schemaDefinitions: schemaDefinitions ? structuredClone(schemaDefinitions) : undefined,
   }
   for (const [id, node] of nodes) snapshot.nodes.push([id, node])
   for (const [id, edge] of edges) snapshot.edges.push([id, edge])
@@ -113,6 +118,7 @@ export function decodeSnapshot(data: Uint8Array): {
   edges: Map<string, SerializedEdge>
   vectors: Map<string, number[]>
   indexes: IndexDefinition[]
+  schemaDefinitions?: PersistedSchemaDefinitions
 } {
   const snapshot = msgpackDecode(data) as SnapshotData
   const nodes = new Map<string, SerializedNode>()
@@ -122,5 +128,5 @@ export function decodeSnapshot(data: Uint8Array): {
   if (snapshot.nodes) for (const [id, node] of snapshot.nodes) nodes.set(id, node)
   if (snapshot.edges) for (const [id, edge] of snapshot.edges) edges.set(id, edge)
   if (snapshot.vectors) for (const [id, vector] of snapshot.vectors) vectors.set(id, vector)
-  return { nodes, edges, vectors, indexes }
+  return { nodes, edges, vectors, indexes, schemaDefinitions: snapshot.schemaDefinitions ? structuredClone(snapshot.schemaDefinitions) : undefined }
 }

@@ -48,6 +48,7 @@ export type {
   EdgeCardinality,
   NodeTypeDefinition,
   EdgeTypeDefinition,
+  PersistedSchemaDefinitions,
 } from './types.js'
 export type { MigrationDefinition, MigrationOptions, MigrationProgress, MigrationReport } from './migrations.js'
 export { defineEdges } from './types.js'

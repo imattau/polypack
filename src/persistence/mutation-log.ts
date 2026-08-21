@@ -13,6 +13,7 @@ export function mutationRecordFromChanges(changes: PersistenceChanges, sequence:
   for (const vector of changes.putVectors) operations.push({ type: 'putVector', payload: vector as unknown as Record<string, unknown> })
   for (const id of changes.deleteVectorIds) operations.push({ type: 'deleteVector', payload: { id } })
   if (changes.indexDefinitions) operations.push({ type: 'setIndexes', payload: { indexes: changes.indexDefinitions } })
+  if (changes.schemaDefinitions) operations.push({ type: 'setSchema', payload: { schema: changes.schemaDefinitions } })
   if (operations.length === 0) return undefined
   return {
     operationId,

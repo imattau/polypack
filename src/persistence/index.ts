@@ -1,5 +1,6 @@
 export { MemoryAdapter } from './memory.js'
 export type { PersistenceAdapter, PersistenceChanges, PersistedNodeQuery } from './adapter.js'
+export type { PersistedSchemaDefinitions } from '../types.js'
 export type { FileIO } from './file-io.js'
 export { MemoryFileIO } from './file-io.js'
 export { ReadOnlyStoreError, StoreLockError } from './lock-errors.js'

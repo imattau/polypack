@@ -139,15 +139,22 @@ export interface EdgeTypeDefinition {
   dataTypes?: Record<string, 'string' | 'number' | 'integer' | 'boolean' | 'object' | 'array'>
 }
 
+/** Serializable schema metadata; runtime validator callbacks are omitted. */
+export interface PersistedSchemaDefinitions {
+  nodeTypes: Array<{ nodeType: string } & Omit<NodeTypeDefinition, 'validate'>>
+  edgeTypes: Array<{ edgeType: string } & Omit<EdgeTypeDefinition, 'validate'>>
+}
+
 export interface QueryExplain {
   index?: string
+  indexes?: string[]
   stages: string[]
   estimatedCost: number
   loadedRecords: number
 }
 
 export type GraphOperation = {
-  type: 'putNode' | 'deleteNode' | 'putEdge' | 'deleteEdge' | 'putVector' | 'deleteVector' | 'setIndexes'
+  type: 'putNode' | 'deleteNode' | 'putEdge' | 'deleteEdge' | 'putVector' | 'deleteVector' | 'setIndexes' | 'setSchema'
   payload: Record<string, unknown>
 }
 

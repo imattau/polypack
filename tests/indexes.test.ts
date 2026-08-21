@@ -112,6 +112,25 @@ describe('secondary indexes', () => {
     expect(plan.loadedRecords).toBe(2)
   })
 
+  it('intersects persisted secondary indexes for compound predicates and ranges', async () => {
+    const graph = new PolyGraph()
+    graph.defineIndex({ name: 'surname', nodeType: 'person', fields: ['surname'] })
+    graph.defineIndex({ name: 'birth-year', nodeType: 'person', fields: ['birthYear'], sparse: true })
+    graph.addNode({ id: 'match', type: 'person', data: { surname: 'Smith', birthYear: 1980 }, insertedAt: 1, updatedAt: 1 })
+    graph.addNode({ id: 'wrong-name', type: 'person', data: { surname: 'Jones', birthYear: 1980 }, insertedAt: 1, updatedAt: 1 })
+    graph.addNode({ id: 'wrong-year', type: 'person', data: { surname: 'Smith', birthYear: 2020 }, insertedAt: 1, updatedAt: 1 })
+    await graph.flush()
+
+    const query = graph.queryPersisted()
+      .whereNodeType('person')
+      .where('surname', 'Smith')
+      .whereAttributeRange('birthYear', { below: 2000 })
+    expect(await query.ids()).toEqual(['match'])
+    const plan = await query.explain()
+    expect(plan.indexes).toEqual(['surname', 'birth-year'])
+    expect(plan.stages).toContain('index-intersection(2)')
+  })
+
   it('persists index definitions in the binary store', async () => {
     const io = new MemoryFileIO()
     const graph = new PolyGraph(new BinaryStoreAdapter({ storeDir: 'index-metadata', fileIO: io }))
