@@ -1,10 +1,13 @@
 # polypack (Python)
 
 Python bindings for the polypack embedded property-graph and vector-search
-core. `PolyGraph` and `GraphQuery` are a native Python layer mirroring the
+core. `PolyGraph` and `GraphQuery` are a Python layer mirroring the
 [TypeScript `PolyGraph`/`GraphQuery` API](../docs/API.md); vector indexing,
-query execution, and directory-backed persistence run in the Rust core
+persisted queries, and directory-backed persistence run in the Rust core
 (`polypack._core`, built from [`crates/polypack-python`](../crates/polypack-python)).
+Simple hot-cache filters, ordering, pagination, and aggregates use the local
+Python pipeline to avoid repeatedly serializing the working set across the
+Python/Rust boundary.
 
 ## Install
 
@@ -53,6 +56,34 @@ and only materialize the requested result page in Python:
 ```python
 graph.query_persisted().where_type("book").order_by("price", "desc").limit(20).to_list()
 ```
+
+`query_persisted()` requires an open directory-backed store and returns a
+`PersistedGraphQuery`. Its supported chainable methods are:
+
+- `where_type(*types)`
+- `where(field, value)`
+- `where_range(field, above=None, below=None)` with exclusive boundaries
+- `order_by(field, direction="asc")`
+- `offset(n)` and `limit(n)`
+
+Its terminal methods are synchronous: `to_list()`, `ids()`, and `count()`.
+`to_list()` returns only the requested page, while `count()` counts all records
+matching the filters before pagination. Pending writable changes are saved
+before a persisted query runs. Similarity, joins, and traversal remain on the
+hot `GraphQuery` API.
+
+### Python API surface
+
+The main public classes are:
+
+- `PolyGraph`: graph lifecycle, mutations, transactions, persistence, and hot queries.
+- `GraphQuery`: synchronous hot-cache filters, ranges, ordering, pagination, traversal, joins, similarity, activation, and aggregates.
+- `PersistedGraphQuery`: native storage-level filtering, ordering, pagination, and counting for directory-backed stores.
+- `ExactIndex` and `HnswIndex`: standalone native vector indexes.
+- `ActivationEngine`: adaptive-memory operations over a `PolyGraph`.
+
+Python method names use `snake_case` equivalents of the TypeScript API, such as
+`add_node`, `update_node`, `where_type`, `similar_to`, and `to_list`.
 
 ## Persistence
 

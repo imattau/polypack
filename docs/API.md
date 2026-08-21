@@ -6,6 +6,11 @@ optional and only loaded by `@0xx0lostcause0xx0/polypack/react`.
 
 ## `@0xx0lostcause0xx0/polypack`
 
+This reference documents the TypeScript package. The Python binding is a
+separate package with `snake_case` method names and a deliberately smaller
+persisted-query surface; see [python/README.md](../python/README.md) for its
+public API and binding-specific behavior.
+
 ### `PolyGraph`
 
 ```ts

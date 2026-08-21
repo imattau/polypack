@@ -37,7 +37,7 @@ cargo add polypack-core
   underlying the TypeScript native addon and the Python bindings.
 - **GitHub releases:** [release notes, source archives, and tags](https://github.com/imattau/polypack/releases)
   are published from the repository. The current source release is
-  [`v2.4.7`](https://github.com/imattau/polypack/releases/tag/v2.4.7).
+  [`v3.0.0`](https://github.com/imattau/polypack/releases/tag/v3.0.0).
 
 Stable GitHub releases run the complete test, build, export, and package checks
 before the corresponding packages are submitted to npm, PyPI, and crates.io
@@ -64,7 +64,7 @@ migration notes.
 - **Explainable queries** — persisted and hot-query plans with index selection, estimated cost, and operational metrics
 - **Configurable indexes** — compound and unique node-data indexes with persisted Python index metadata
 - **Cross-language contract** — shared conformance fixtures and compatibility levels for TypeScript, Rust, and Python
-- **Persisted queries** — asynchronous filtering and similarity across the full backing store
+- **Persisted queries** — asynchronous filtering, ordering, pagination, and similarity across the full backing store without loading the result set into the hot cache
 - **Adaptive memory** — activation model: durable, decayed relevance (`score`/`importance`) per node, spreading activation over edges, semantic pulses, and a live working-memory set — synced additively
 - **Real-time sync** — acknowledgements, retry, deduplication, reconnect recovery, and echo suppression
 
@@ -97,6 +97,13 @@ await graph.addNodeWithEmbedding({
 const textMatches = await graph.queryText('semantic graph search', 0.1, 10)
 textMatches.toArray()
 
+// Query the complete persisted store without warming the hot cache
+const recentPosts = await graph.queryPersisted()
+  .whereNodeType('document')
+  .orderBy('updatedAt', 'desc')
+  .limit(20)
+  .toArray()
+
 // Search by similarity
 graph.query()
   .whereNodeType('document')
@@ -127,7 +134,7 @@ graph.query()
 
 | Subpath | Contents |
 |---------|----------|
-| `@0xx0lostcause0xx0/polypack` | Core: PolyGraph, VectorIndex, GraphQuery, MemoryAdapter |
+| `@0xx0lostcause0xx0/polypack` | Core: PolyGraph, VectorIndex, GraphQuery, PersistedGraphQuery, MemoryAdapter |
 | `@0xx0lostcause0xx0/polypack/persistence` | Platform-neutral persistence: adapters, `FileIO` types |
 | `@0xx0lostcause0xx0/polypack/persistence/node` | BinaryStoreAdapter + `NodeFileIO` for the filesystem |
 | `@0xx0lostcause0xx0/polypack/persistence/opfs` | BinaryStoreAdapter + `OPFSFileIO` for the browser |
@@ -135,11 +142,16 @@ graph.query()
 | `@0xx0lostcause0xx0/polypack/activation` | Adaptive memory: `ActivationEngine`, `mergeActivation`, activation config types |
 | `@0xx0lostcause0xx0/polypack/sync` | Sync layer: OpLog, SyncAdapter, SyncClient, SyncServer |
 | `@0xx0lostcause0xx0/polypack-native` | Separate package: NAPI-RS bindings for native `VectorIndex`/`HNSWIndex` over the Rust core |
-| `polypack-db` (PyPI) | Separate package: PyO3/maturin bindings exposing `PolyGraph`, `GraphQuery`, and vector indexes to Python — see [python/README.md](python/README.md) |
+| `polypack-db` (PyPI) | Separate package: PyO3/maturin bindings exposing `PolyGraph`, `GraphQuery`, `PersistedGraphQuery`, and vector indexes to Python — see [python/README.md](python/README.md) |
 | `polypack-core` (crates.io) | Separate package: the portable Rust core (property graph, vector search, persistence) shared by the TypeScript native addon and the Python bindings |
 
 See the complete [API reference](docs/API.md), including persistence, React,
 sync, lifecycle, ownership, and error contracts.
+
+The Python binding has a separate, idiomatic API with `snake_case` method names.
+See the [Python API guide](python/README.md) for `PolyGraph`, hot-cache
+`GraphQuery`, native storage-level `query_persisted()`, vector indexes, and
+binding-specific behavior.
 
 ## Requirements
 
