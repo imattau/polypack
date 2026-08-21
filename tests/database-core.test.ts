@@ -1,4 +1,6 @@
 import { describe, expect, it } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { AdapterCapabilityError, ConflictError, MemoryAdapter, PolyGraph } from '../src/index'
 import { BinaryStoreAdapter } from '../src/persistence/binary-store'
 import { MemoryFileIO } from '../src/persistence/file-io'
@@ -199,6 +201,32 @@ describe('database-core mutation API', () => {
     const reopened = new BinaryStoreAdapter({ storeDir: 'mutation-log-test', fileIO: io })
     expect(await reopened.latestMutationSequence!()).toBe(1n)
     expect((await reopened.getMutationsSince!(0n))[0].operationId).toBe(records[0].operationId)
+  })
+
+  it('exposes the durable mutation cursor through the graph API', async () => {
+    const graph = new PolyGraph(new MemoryAdapter())
+    await graph.transaction(tx => tx.addNode(node('graph-log')))
+
+    const latest = await graph.latestMutationSequence()
+    const records = await graph.mutationLogSince(0n)
+    expect(records.at(-1)?.sequence).toBe(latest)
+    expect(records.some(record => record.operations.some(operation => operation.type === 'putNode'))).toBe(true)
+    expect(await graph.mutationLogSince(latest)).toEqual([])
+    expect(await graph.mutationLogPage(0n, 1)).toHaveLength(1)
+    expect(await graph.mutationLogPage(0n, 0)).toEqual([])
+    await expect(graph.mutationLogPage(0n, -1)).rejects.toThrow(/page limit/)
+    expect(graph.adapterCapabilities?.changeFeed).toBe(true)
+  })
+
+  it('persists caller-supplied transaction operation identity', async () => {
+    const fixture = JSON.parse(readFileSync(join(process.cwd(), 'fixtures/database-core/durable-mutation-log.json'), 'utf8'))
+    const graph = new PolyGraph(new MemoryAdapter())
+    await graph.transaction(tx => tx.addNode(fixture.transaction.node), { operationId: fixture.transaction.operationId })
+    const records = await graph.mutationLogSince(0n)
+    expect(Number(await graph.latestMutationSequence())).toBe(fixture.expect.latestSequence)
+    expect(records.at(-1)?.operationId).toBe(fixture.expect.operationId)
+    expect(records.at(-1)?.operations[0].type).toBe(fixture.expect.operationType)
+    expect(records.at(-1)?.operations[0].payload.id).toBe(fixture.expect.nodeId)
   })
 
   it('deduplicates repeated operation IDs in the mutation log', async () => {

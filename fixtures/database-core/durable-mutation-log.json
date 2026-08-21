@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "name": "durable-mutation-log",
+  "transaction": {
+    "operationId": "fixture-operation-1",
+    "node": {
+      "id": "fixture-record",
+      "type": "record",
+      "data": { "source": "conformance" },
+      "insertedAt": 1,
+      "updatedAt": 1
+    }
+  },
+  "expect": {
+    "latestSequence": 1,
+    "operationId": "fixture-operation-1",
+    "operationType": "putNode",
+    "nodeId": "fixture-record"
+  }
+}

@@ -216,6 +216,8 @@ export interface GraphResourceLimits {
 }
 
 export interface TransactionOptions {
+  /** Optional stable logical operation identity for retries and audit records. */
+  operationId?: string
   actor?: string
   baseRevision?: number
   metadata?: Record<string, unknown>

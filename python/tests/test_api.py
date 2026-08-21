@@ -144,6 +144,7 @@ def test_validation_errors():
 def test_adapter_capability_requirements():
     graph = PolyGraph()
     graph.require_adapter_capabilities({"transactions": True, "vectorSearch": "exact"})
+    assert graph.capabilities["changeFeed"] is True
     with pytest.raises(AdapterCapabilityError, match="fsync"):
         graph.require_adapter_capabilities(fsync=True)
 
@@ -250,6 +251,21 @@ def test_latest_mutation_sequence_cursor(tmp_path):
     graph.add_node({"id": "a", "type": "t", "data": {}, "insertedAt": 1, "updatedAt": 1})
     graph.save()
     assert graph.latest_mutation_sequence() == graph.mutation_log()[-1]["sequence"]
+
+
+def test_durable_mutation_log_fixture(tmp_path):
+    fixture_path = Path(__file__).resolve().parents[2] / "fixtures" / "database-core" / "durable-mutation-log.json"
+    fixture = json.loads(fixture_path.read_text())
+    graph = PolyGraph.open(str(tmp_path))
+    graph.transaction(
+        lambda tx: tx.add_node(fixture["transaction"]["node"]),
+        operation_id=fixture["transaction"]["operationId"],
+    )
+    records = graph.mutation_log_since(0)
+    assert graph.latest_mutation_sequence() == fixture["expect"]["latestSequence"]
+    assert records[-1]["operationId"] == fixture["expect"]["operationId"]
+    assert records[-1]["operations"][0]["operationType"] == fixture["expect"]["operationType"]
+    assert records[-1]["operations"][0]["payload"]["id"] == fixture["expect"]["nodeId"]
 
 
 def test_context_manager_saves_before_closing_the_store(tmp_path):

@@ -11,6 +11,12 @@ fn fixture() -> Value {
     serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
 }
 
+fn mutation_log_fixture() -> Value {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../fixtures/database-core/durable-mutation-log.json");
+    serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+}
+
 fn object(value: &Value) -> Map<String, Value> {
     value.as_object().cloned().unwrap_or_default()
 }
@@ -92,4 +98,31 @@ fn revisions_and_patches_fixture_passes() {
     assert_eq!(node.data["profile"]["displayName"], "M. Smith");
     assert!(!node.data.contains_key("temporary"));
     assert!(!node.data.contains_key("stale"));
+}
+
+#[test]
+fn durable_mutation_log_fixture_passes() {
+    let fixture = mutation_log_fixture();
+    assert_eq!(fixture["schemaVersion"], 1);
+    let mut graph = Graph::open(
+        Box::new(InMemoryStorage::new()),
+        StoreConfig::default(),
+        GraphConfig::default(),
+    )
+    .unwrap();
+    let transaction = &fixture["transaction"];
+    let node = serde_json::from_value::<Node>(transaction["node"].clone()).unwrap();
+    graph
+        .transaction_with_identity(
+            Some(transaction["operationId"].as_str().unwrap().to_string()),
+            |tx| tx.add_node(node),
+        )
+        .unwrap();
+
+    let records = graph.mutation_log().unwrap();
+    let record = records.last().unwrap();
+    assert_eq!(graph.latest_mutation_sequence().unwrap(), fixture["expect"]["latestSequence"].as_u64().unwrap());
+    assert_eq!(record.operation_id, fixture["expect"]["operationId"]);
+    assert_eq!(record.operations[0].operation_type, "putNode");
+    assert_eq!(record.operations[0].payload["id"], fixture["expect"]["nodeId"]);
 }

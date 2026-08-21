@@ -1,6 +1,6 @@
 import type { FileIO } from '../persistence/file-io.js'
 import type { SyncOp } from './types.js'
-import { syncChecksum } from './checksum.js'
+import { syncChecksum, syncIdentityChecksum } from './checksum.js'
 
 export interface SyncClientState {
   clientId: string
@@ -97,12 +97,22 @@ export interface SyncLogState {
   /** Identity tombstones retained after operation compaction. */
   operationIds?: string[]
   transactionIds?: string[]
+  identityChecksum?: string
   /** Integrity marker for durable files; omitted by legacy logs. */
   checksum?: string
 }
 
+export interface SyncLogStats {
+  baseCursor: number
+  cursor: number
+  operationCount: number
+  operationIdentityCount: number
+  transactionIdentityCount: number
+}
+
 export interface SyncOperationLog {
   load(): Promise<SyncLogState>
+  stats?(): Promise<SyncLogStats>
   append(op: SyncOp): Promise<void>
   /** Persist a logical batch atomically when the adapter can provide it. */
   appendBatch?(ops: readonly SyncOp[]): Promise<void>
@@ -118,6 +128,10 @@ export class MemorySyncOperationLog implements SyncOperationLog {
 
   async load(): Promise<SyncLogState> {
     return { baseCursor: this.baseCursor, ops: this.ops.map(op => ({ ...op, payload: structuredClone(op.payload) })), operationIds: [...this.operationIds], transactionIds: [...this.transactionIds] }
+  }
+
+  async stats(): Promise<SyncLogStats> {
+    return { baseCursor: this.baseCursor, cursor: this.baseCursor + this.ops.length, operationCount: this.ops.length, operationIdentityCount: this.operationIds.size, transactionIdentityCount: this.transactionIds.size }
   }
 
   async append(op: SyncOp): Promise<void> {
@@ -158,7 +172,15 @@ export class FileSyncOperationLog implements SyncOperationLog {
     if (parsed.checksum !== undefined && parsed.checksum !== syncChecksum(parsed.ops)) {
       throw new Error('Sync operation log checksum mismatch')
     }
-    return { baseCursor: parsed.baseCursor as number, ops: parsed.ops, operationIds: parsed.operationIds, transactionIds: parsed.transactionIds, checksum: parsed.checksum }
+    if (parsed.identityChecksum !== undefined && parsed.identityChecksum !== syncIdentityChecksum(parsed.operationIds ?? [], parsed.transactionIds ?? [])) {
+      throw new Error('Sync operation identity checksum mismatch')
+    }
+    return { baseCursor: parsed.baseCursor as number, ops: parsed.ops, operationIds: parsed.operationIds, transactionIds: parsed.transactionIds, identityChecksum: parsed.identityChecksum, checksum: parsed.checksum }
+  }
+
+  async stats(): Promise<SyncLogStats> {
+    const state = await this.load()
+    return { baseCursor: state.baseCursor, cursor: state.baseCursor + state.ops.length, operationCount: state.ops.length, operationIdentityCount: state.operationIds?.length ?? state.ops.filter(op => op.operationId).length, transactionIdentityCount: state.transactionIds?.length ?? state.ops.filter(op => op.transactionId).length }
   }
 
   private validOperation(op: unknown): op is SyncOp {
@@ -228,7 +250,7 @@ export class FileSyncOperationLog implements SyncOperationLog {
       if (op.operationId) operationIds.add(`${op.clientId}:${op.operationId}`)
       if (op.transactionId) transactionIds.add(`${op.clientId}:${op.transactionId}`)
     }
-    const persisted = { baseCursor: state.baseCursor, ops: state.ops, operationIds: [...operationIds], transactionIds: [...transactionIds], checksum: syncChecksum(state.ops) }
+    const persisted = { baseCursor: state.baseCursor, ops: state.ops, operationIds: [...operationIds], transactionIds: [...transactionIds], identityChecksum: syncIdentityChecksum([...operationIds], [...transactionIds]), checksum: syncChecksum(state.ops) }
     await this.io.writeFile(this.fileName, new TextEncoder().encode(JSON.stringify(persisted)))
   }
 }

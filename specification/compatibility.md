@@ -48,6 +48,13 @@ calling conventions, but must preserve these observable guarantees:
 - adapter capability declarations are honored rather than inferred;
 - durable mutation records retain operation, transaction, actor, revision,
   timestamp, and metadata identity where the adapter supports logical logs.
+- logical-log consumers can resume from an exclusive sequence cursor and use
+  bounded pages where the implementation exposes a paged change-feed API;
+  TypeScript uses `mutationLogPage`, while Rust and Python use
+  `mutation_log_page`.
+- implementations that retain logical mutation records must advertise the
+  `changeFeed` capability; adapters without that capability must reject
+  change-feed reads rather than returning a misleading empty history.
 
 When a capability is unavailable, the implementation must expose the declared
 degradation or reject the operation; it must not claim a stronger guarantee.

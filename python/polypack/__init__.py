@@ -634,7 +634,7 @@ class DirectoryStorage:
             "fsync": True,
             "secondaryIndexes": True,
             "snapshots": True,
-            "changeFeed": False,
+            "changeFeed": True,
             "concurrentWriters": False,
             "vectorSearch": "exact",
         }
@@ -859,7 +859,7 @@ class PolyGraph:
             "fsync": False,
             "secondaryIndexes": True,
             "snapshots": True,
-            "changeFeed": False,
+            "changeFeed": True,
             "concurrentWriters": False,
             "vectorSearch": "exact",
         }

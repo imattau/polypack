@@ -94,7 +94,7 @@ export class BinaryStoreAdapter implements PersistenceAdapter {
       fsync: this.config.syncWrites,
       secondaryIndexes: true,
       snapshots: true,
-      changeFeed: false,
+      changeFeed: true,
       concurrentWriters: false,
       vectorSearch: 'exact',
     }
@@ -514,6 +514,16 @@ export class BinaryStoreAdapter implements PersistenceAdapter {
     await this.enqueue(() => this.ensureLoaded())
     return this.mutationRecords
       .filter(record => record.sequence > sequence)
+      .map(record => ({ ...record, operations: record.operations.map(operation => ({ ...operation, payload: structuredClone(operation.payload) })) }))
+  }
+
+  async getMutationLogPage(sequence: bigint, limit: number): Promise<MutationRecord[]> {
+    if (!Number.isInteger(limit) || limit < 0) throw new RangeError('mutation log page limit must be a non-negative integer')
+    this.assertOpen()
+    await this.enqueue(() => this.ensureLoaded())
+    return this.mutationRecords
+      .filter(record => record.sequence > sequence)
+      .slice(0, limit)
       .map(record => ({ ...record, operations: record.operations.map(operation => ({ ...operation, payload: structuredClone(operation.payload) })) }))
   }
 

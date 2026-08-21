@@ -1,5 +1,5 @@
 import { Subject } from 'rxjs'
-import type { PolyNode, PolyEdge, EdgeOwnership, GraphChangeEvent, SerializedNode, SerializedEdge, DataTransform, NodeActivation, WriteOptions, NodePatch, GraphTransaction, IndexDefinition, GraphStats, QueryResourceLimits, NodeTypeDefinition, EdgeTypeDefinition, EdgeCardinality, QueryMetrics, GraphResourceLimits, TransactionOptions, VerificationReport } from './types.js'
+import type { PolyNode, PolyEdge, EdgeOwnership, GraphChangeEvent, SerializedNode, SerializedEdge, DataTransform, NodeActivation, WriteOptions, NodePatch, GraphTransaction, IndexDefinition, GraphStats, QueryResourceLimits, NodeTypeDefinition, EdgeTypeDefinition, EdgeCardinality, QueryMetrics, GraphResourceLimits, TransactionOptions, VerificationReport, MutationRecord } from './types.js'
 import { ConflictError } from './errors.js'
 import { UniqueConstraintError } from './index-errors.js'
 import { SchemaValidationError } from './schema-errors.js'
@@ -143,6 +143,7 @@ export class PolyGraph {
   private transactionMutationDepth = 0
   private transactionMutationCount = 0
   private currentTransactionId: string | undefined
+  private currentOperationId: string | undefined
   private currentTransactionOptions: TransactionOptions | undefined
 
   protected batchDepth = 0
@@ -171,6 +172,7 @@ export class PolyGraph {
     try {
       const id = `tx-${Date.now()}-${Math.random().toString(36).slice(2)}`
       this.currentTransactionId = id
+      this.currentOperationId = options?.operationId ?? id
       this.currentTransactionOptions = options
       const inTransaction = <R>(fn: () => R): R => {
         if (this.resourceLimits.maxBatchSize !== undefined && this.transactionMutationCount >= this.resourceLimits.maxBatchSize) {
@@ -206,6 +208,7 @@ export class PolyGraph {
       this.transactionActive = false
       this.transactionMutationCount = 0
       this.currentTransactionId = undefined
+      this.currentOperationId = undefined
       this.currentTransactionOptions = undefined
       release()
     }
@@ -871,7 +874,7 @@ export class PolyGraph {
     try {
       const changes: PersistenceChanges = {
         transactionId: this.currentTransactionId,
-        operationId: this.currentTransactionId,
+        operationId: this.currentOperationId,
         actor: this.currentTransactionOptions?.actor,
         baseRevision: this.currentTransactionOptions?.baseRevision,
         metadata: this.currentTransactionOptions?.metadata,
@@ -1632,6 +1635,30 @@ export class PolyGraph {
     if (!this.persistence.backup) throw new AdapterCapabilityError('snapshots')
     await this.flush()
     await this.persistence.backup(destination)
+  }
+
+  /** Return acknowledged logical mutations after an exclusive sequence cursor. */
+  async mutationLogSince(sequence: bigint = 0n): Promise<MutationRecord[]> {
+    if (!this.persistence.getMutationsSince) throw new AdapterCapabilityError('changeFeed')
+    await this.flush()
+    return this.persistence.getMutationsSince(sequence)
+  }
+
+  /** Return at most `limit` acknowledged logical mutations after a cursor. */
+  async mutationLogPage(sequence: bigint = 0n, limit = 1000): Promise<MutationRecord[]> {
+    if (!Number.isInteger(limit) || limit < 0) throw new RangeError('mutation log page limit must be a non-negative integer')
+    if (this.persistence.getMutationLogPage) {
+      await this.flush()
+      return this.persistence.getMutationLogPage(sequence, limit)
+    }
+    return (await this.mutationLogSince(sequence)).slice(0, limit)
+  }
+
+  /** Return the sequence of the latest acknowledged logical mutation. */
+  async latestMutationSequence(): Promise<bigint> {
+    if (!this.persistence.latestMutationSequence) throw new AdapterCapabilityError('changeFeed')
+    await this.flush()
+    return this.persistence.latestMutationSequence()
   }
 
   /** Verify durable storage and logical graph invariants when supported. */

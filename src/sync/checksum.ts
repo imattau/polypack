@@ -10,3 +10,8 @@ export function syncChecksum(ops: readonly SyncOp[]): string {
   }
   return (hash >>> 0).toString(16).padStart(8, '0')
 }
+
+/** Integrity marker for deduplication identities retained after compaction. */
+export function syncIdentityChecksum(operationIds: readonly string[], transactionIds: readonly string[]): string {
+  return syncChecksum([{ seq: 0, timestamp: 0, clientId: 'sync-identities', kind: 'addNode', payload: { operationIds: [...operationIds].sort(), transactionIds: [...transactionIds].sort() } }])
+}

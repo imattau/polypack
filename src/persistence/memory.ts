@@ -12,7 +12,7 @@ export class MemoryAdapter implements PersistenceAdapter {
     fsync: false,
     secondaryIndexes: true,
     snapshots: true,
-    changeFeed: false,
+    changeFeed: true,
     concurrentWriters: false,
     vectorSearch: 'exact' as const,
   }
@@ -134,8 +134,11 @@ export class MemoryAdapter implements PersistenceAdapter {
     for (const edge of changes.putEdges) { this.edges.set(edge.id, edge); this.indexEdge(edge) }
     for (const entry of changes.putVectors) this.vectors.set(entry.id, entry.vector)
     this.evictIfOverCap()
-    const record = mutationRecordFromChanges(changes, this.nextMutation++)
-    if (record) this.mutations.push(record)
+    const record = mutationRecordFromChanges(changes, this.nextMutation)
+    if (record) {
+      this.mutations.push(record)
+      this.nextMutation++
+    }
   }
 
   async getIndexDefinitions(): Promise<IndexDefinition[]> {
@@ -144,6 +147,11 @@ export class MemoryAdapter implements PersistenceAdapter {
 
   async getMutationsSince(sequence: bigint): Promise<MutationRecord[]> {
     return this.mutations.filter(record => record.sequence > sequence).map(record => ({ ...record, operations: record.operations.map(operation => ({ ...operation, payload: structuredClone(operation.payload) })) }))
+  }
+
+  async getMutationLogPage(sequence: bigint, limit: number): Promise<MutationRecord[]> {
+    if (!Number.isInteger(limit) || limit < 0) throw new RangeError('mutation log page limit must be a non-negative integer')
+    return (await this.getMutationsSince(sequence)).slice(0, limit)
   }
 
   async latestMutationSequence(): Promise<bigint> {

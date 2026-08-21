@@ -41,6 +41,7 @@ export interface PersistenceAdapter {
   getSchemaDefinitions?(): Promise<PersistedSchemaDefinitions>
   setSchemaDefinitions?(definitions: PersistedSchemaDefinitions): Promise<void>
   getMutationsSince?(sequence: bigint): Promise<MutationRecord[]>
+  getMutationLogPage?(sequence: bigint, limit: number): Promise<MutationRecord[]>
   latestMutationSequence?(): Promise<bigint>
   checkpoint?(): Promise<void>
   backup?(destination: FileIO): Promise<void>

@@ -19,10 +19,11 @@ Nested transactions are rejected in v1. Implementations may add savepoints in
 a later capability level, but must not silently treat nesting as an unrelated
 top-level transaction.
 
-Transactions may carry optional `actor`, `baseRevision`, and application
-`metadata`. These values are copied into the durable logical mutation record;
-they do not affect authorization or replace the revision checks on individual
-operations.
+Transactions may carry optional `operationId`, `actor`, `baseRevision`, and
+application `metadata`. These values are copied into the durable logical
+mutation record; `operationId` is the stable caller-supplied identity used for
+retry and audit correlation. They do not affect authorization or replace the
+revision checks on individual operations.
 
 An adapter used for transactions must declare both `atomicBatches` and
 `transactions`. Graphs must reject a transaction when either guarantee is

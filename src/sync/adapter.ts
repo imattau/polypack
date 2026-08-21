@@ -80,6 +80,12 @@ export class SyncAdapter implements PersistenceAdapter {
     return this.inner.latestMutationSequence ? this.inner.latestMutationSequence() : 0n
   }
 
+  async getMutationLogPage(sequence: bigint, limit: number) {
+    if (this.inner.getMutationLogPage) return this.inner.getMutationLogPage(sequence, limit)
+    const records = this.inner.getMutationsSince ? await this.inner.getMutationsSince(sequence) : []
+    return records.slice(0, limit)
+  }
+
   async stats() {
     return this.inner.stats ? this.inner.stats() : {}
   }

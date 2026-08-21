@@ -90,6 +90,18 @@ describe('durable sync operation logs', () => {
     await expect(new FileSyncOperationLog(io).load()).rejects.toThrow(/Invalid sync operation log state/)
   })
 
+  it('rejects corrupted durable identity tombstones', async () => {
+    const io = new MemoryFileIO()
+    await io.writeFile('sync-operations.json', new TextEncoder().encode(JSON.stringify({
+      baseCursor: 1,
+      ops: [],
+      operationIds: ['client:op-1'],
+      transactionIds: ['client:tx-1'],
+      identityChecksum: 'corrupt',
+    })))
+    await expect(new FileSyncOperationLog(io).load()).rejects.toThrow(/identity checksum mismatch/)
+  })
+
   it('flushes a durable batch before returning', async () => {
     const io = new MemoryFileIO()
     const server = new SyncServer({ operationLog: new FileSyncOperationLog(io) })
@@ -122,6 +134,22 @@ describe('durable sync operation logs', () => {
     await restored.flush()
     expect(restored.cursor).toBe(2)
     expect(sent).toHaveLength(3)
+  })
+
+  it('reports durable cursor and identity retention statistics', async () => {
+    const io = new MemoryFileIO()
+    const server = new SyncServer({ operationLog: new FileSyncOperationLog(io), maxOps: 1 })
+    const handle = server.addClient({ send: () => undefined })
+    handle(message([{ ...op(1), transactionId: 'tx-1' }]))
+    handle(message([{ ...op(2), transactionId: 'tx-2' }]))
+
+    await expect(server.logStats()).resolves.toEqual({
+      baseCursor: 1,
+      cursor: 2,
+      operationCount: 1,
+      operationIdentityCount: 2,
+      transactionIdentityCount: 2,
+    })
   })
 
   it('rejects durable submissions when the pending queue is full', async () => {

@@ -1,6 +1,6 @@
 import type { SyncConflictResult, SyncContext, SyncError, SyncMessage, SyncOp } from './types.js'
 import { SYNC_PROTOCOL_VERSION } from './types.js'
-import type { SyncOperationLog } from './log.js'
+import type { SyncLogStats, SyncOperationLog } from './log.js'
 import { syncChecksum } from './checksum.js'
 
 export interface SyncServerOptions {
@@ -283,6 +283,15 @@ export class SyncServer {
   async flush(): Promise<void> {
     await this.ready()
     await this.durableQueue
+  }
+
+  /** Inspect cursor retention and deduplication state for accepted operations. */
+  async logStats(): Promise<SyncLogStats> {
+    await this.flush()
+    if (this.options.operationLog?.stats) return this.options.operationLog.stats()
+    const operationIds = new Set(this.opLog.flatMap(op => op.operationId ? [`${op.clientId}:${op.operationId}`] : []))
+    const transactionIds = new Set(this.opLog.flatMap(op => op.transactionId ? [`${op.clientId}:${op.transactionId}`] : []))
+    return { baseCursor: this.baseCursor, cursor: this.cursor, operationCount: this.opLog.length, operationIdentityCount: operationIds.size, transactionIdentityCount: transactionIds.size }
   }
 
   private forgetOperation(op: SyncOp): void {

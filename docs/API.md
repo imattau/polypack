@@ -52,6 +52,11 @@ Lifecycle:
 - `dispose()` flushes queued mutations, clears memory, then closes the adapter.
 - `clear()` only clears in-memory state; it does not delete adapter contents.
 - `prune(maxNodes)` removes the oldest loaded nodes and applies ownership rules.
+- `transaction(callback, options?)` provides atomic read-your-own-writes,
+  rollback, nested-transaction rejection, and post-commit events. Options may
+  include `operationId`, `actor`, `baseRevision`, and `metadata`; these values
+  are retained in the durable mutation record when the adapter supports a
+  change feed.
 
 Nodes:
 
@@ -312,6 +317,11 @@ comparisons reject vectors with mismatched dimensions.
   `deleteFile`, `fileExists`. Implement it to plug in any backing store.
 - `PersistenceAdapter` is the contract for custom storage. It contains node,
   edge, and vector single/bulk operations plus `clearAll()` and `close()`.
+- Adapters that expose `changeFeed` provide the durable logical log through
+  `graph.mutationLogSince(sequence)`, `graph.mutationLogPage(sequence, limit)`,
+  and `graph.latestMutationSequence()`.
+  Sequences are exclusive `bigint` cursors, so callers can resume replication
+  or audit scans without rereading acknowledged records.
 - Adapters may implement `getSchemaDefinitions()` and
   `setSchemaDefinitions()` to persist structural node/edge schema metadata.
   The canonical file shape is `nodeTypes[{ nodeType, ... }]` and
@@ -534,7 +544,9 @@ payloads** — activation is accumulated knowledge, not last-write-wins data.
   and repeated delivery, and serves full operation snapshots or cursor-based
   deltas for late and reconnecting clients. Authorization and conflict hooks
   validate transaction groups atomically: if one operation is rejected, none of
-  that transaction is committed or broadcast.
+  that transaction is committed or broadcast. `await server.logStats()` reports
+  cursor retention, retained operations, and operation/transaction identity
+  counts for monitoring and compaction tooling.
 - `SyncTransport` requires `send`, `onMessage`, and `close`.
 - `MemoryTransport.pair()` creates linked asynchronous in-process transports.
 
