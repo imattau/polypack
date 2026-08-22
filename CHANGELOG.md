@@ -5,6 +5,50 @@ All notable changes to this project are documented here. This project follows
 
 ## [3.0.1] - Unreleased
 
+### Added
+
+- Adaptive memory layer, extended across TypeScript, Rust, and Python:
+  - Per-context activation (`NodeActivation.context`): `reinforceNode`/
+    `reinforce_node` gain an optional `context` argument that reinforces an
+    independently-decaying, additional lens alongside the global score.
+    `getContextActivation`/`get_context_activation` reads it back.
+  - Inhibition (`NodeActivation.inhibition`/`lastInhibitedAt`): a new
+    `suppressNode`/`suppress_node` primitive with its own decay half-life,
+    subtracted from `score` only at the final read/ranking layer so a
+    suppressed node stays re-evaluable rather than permanently invisible.
+  - Budgeted, diversity-aware `ActivationEngine.workingMemory`/
+    `working_memory`: an options form (`tokenBudget`, `costOf`,
+    `diversityLambda`, `similarityOf`) implementing a memory-flavoured
+    maximal-marginal-relevance selection, backward compatible with the
+    existing `(limit, minScore)` call shape.
+  - Memory classes (`episodic`/`semantic`/`procedural`/`entity`): a
+    per-node `memoryClass` override falling back to a schema-level
+    `NodeTypeDefinition.memoryClass` default, driving differentiated
+    score/importance decay half-lives via `ActivationConfig.classHalfLives`.
+  - Confidence and provenance fields on `PolyNode`: `confidence`, `source`,
+    `observedAt`, `derivedFrom`, `supersedes`, `contradicts` — ordinary,
+    optional node fields (not activation state), settable via `addNode`,
+    `updateNode`, and `patchNode` (which now also supports these as
+    top-level `set`/`unset`/`increment`/`compareAndSet` paths, not only
+    `data.*`, in all three languages).
+  - `supersede(id, supersededId, amount?, reason?)`: a contradiction
+    primitive that records `supersedes`, adds a `SUPERSEDED_BY` edge, and
+    suppresses the superseded node without deleting it.
+  - `consolidate(node, sourceIds, options?)`: a consolidation primitive
+    that writes a higher-level node with `derivedFrom` merged from its
+    sources, adds `CONSOLIDATED_FROM` edges, and suppresses the sources.
+  - `ActivationEngine.recordFeedback(id, wasUseful, learningRate?)`:
+    learned scoring weights — nudges `pulse`'s composite
+    semantic/graph/recency/usage weights from outcome feedback instead of
+    requiring hand-tuning.
+  - Fixed a latent double-decay bug in the TypeScript
+    `ActivationEngine.effective`, found while adding class-resolved
+    half-lives: it re-decayed the already-decayed result of
+    `getActivationState` a second time, silently breaking any non-default
+    half-life under real elapsed time.
+  - See `specification/data-model.md` sections 1.5–1.10 and
+    [docs/API.md](docs/API.md) for full details.
+
 ### Fixed
 
 - Restored an edge-id integrity check in the Rust graph's `rebuild_edge_index`

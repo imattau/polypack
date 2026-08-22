@@ -48,15 +48,28 @@ cargo add polypack-graph
   `update_node_with_embedding`, `query_text`, `query_persisted_text`, and
   `search_nodes`.
 - **Activation (adaptive memory)** — durable per-node relevance
-  (`NodeActivation` with `score`/`importance`/`reinforcementCount`/
-  `lastMeaningfulActivation`) persisted through the core `Store`; graph
-  primitives `reinforce_node`/`reinforce_node_safe` (decay-correct, re-anchor,
-  emit `ActivationUpdated`), `get_activation`/`get_activation_state`,
-  `top_activated`, and `decay`; `where_activated`/`order_by_activation` on both
-  query builders; and an `ActivationEngine` composing spreading activation,
-  semantic `pulse`/`absorb`, transient attention, and `working_memory`. Decay
-  math and `merge_activation` live in `polypack_core::activation`, matching the
-  TypeScript and Python implementations exactly.
+  (`NodeActivation` with `score`/`importance`/`reinforcement_count`/
+  `last_meaningful_activation`, plus an independently-decaying `inhibition`
+  axis and per-context `context` entries) persisted through the core `Store`;
+  graph primitives `reinforce_node`/`reinforce_node_safe`/
+  `reinforce_node_in_context` (decay-correct, re-anchor, emit
+  `ActivationUpdated`), `suppress_node`/`suppress_node_safe` (the inhibition
+  axis, emits `InhibitionUpdated`), `get_activation`/`get_activation_state`/
+  `get_context_activation`, `top_activated`, `decay`, `supersede` (records a
+  contradiction and suppresses the superseded node), and `consolidate`
+  (promotes a group of nodes into a higher-level one via `derived_from` +
+  suppression); `where_activated`/`order_by_activation` on both query
+  builders; nodes also carry an optional `memory_class`
+  (`episodic`/`semantic`/`procedural`/`entity`, resolved from the node or its
+  type's `NodeTypeDefinition.memory_class`) driving differentiated decay
+  half-lives, and confidence/provenance fields (`confidence`, `source`,
+  `observed_at`, `derived_from`, `supersedes`, `contradicts`); and an
+  `ActivationEngine` composing spreading activation, semantic `pulse`/
+  `absorb`, transient attention, class-aware `effective`/`resolve_score_half_life`,
+  budgeted/diverse `working_memory_with_options`, and feedback-driven learned
+  scoring weights via `record_feedback`. Decay math and `merge_activation`
+  live in `polypack_core::activation`, matching the TypeScript and Python
+  implementations exactly.
 
 ## Quick start
 

@@ -70,7 +70,7 @@ migration notes.
 - **Configurable indexes** — compound and unique node-data indexes with persisted Python index metadata
 - **Cross-language contract** — shared conformance fixtures and compatibility levels for TypeScript, Rust, and Python
 - **Persisted queries** — asynchronous filtering, ordering, pagination, and similarity across the full backing store without loading the result set into the hot cache
-- **Adaptive memory** — activation model: durable, decayed relevance (`score`/`importance`) per node, spreading activation over edges, semantic pulses, and a live working-memory set — synced additively
+- **Adaptive memory** — durable, decayed relevance (`score`/`importance`/`inhibition`) per node with per-context activation lenses, spreading activation over edges, semantic pulses, a budgeted/diversity-aware working-memory set, memory classes with differentiated decay, confidence/provenance fields, contradiction (`supersede`) and consolidation (`consolidate`) primitives, and feedback-driven learned scoring weights — synced additively
 - **Real-time sync** — acknowledgements, retry, deduplication, reconnect recovery, and echo suppression
 
 For scale limits and reproducible 100K/1M/10M-node characterization, see the
@@ -149,7 +149,7 @@ graph.query()
 | `@0xx0lostcause0xx0/polypack/persistence/node` | BinaryStoreAdapter + `NodeFileIO` for the filesystem |
 | `@0xx0lostcause0xx0/polypack/persistence/opfs` | BinaryStoreAdapter + `OPFSFileIO` for the browser |
 | `@0xx0lostcause0xx0/polypack/react` | React hooks: `useGraphQuery`, `useLiveQuery`, `useWorkingMemory` |
-| `@0xx0lostcause0xx0/polypack/activation` | Adaptive memory: `ActivationEngine`, `mergeActivation`, activation config types |
+| `@0xx0lostcause0xx0/polypack/activation` | Adaptive memory: `ActivationEngine` (inhibition, per-context activation, budgeted/diverse `workingMemory`, learned weights via `recordFeedback`), `mergeActivation`, activation config types |
 | `@0xx0lostcause0xx0/polypack/sync` | Sync layer: OpLog, SyncAdapter, SyncClient, SyncServer |
 | `@0xx0lostcause0xx0/polypack-native` | Separate package: NAPI-RS bindings for native `VectorIndex`/`HNSWIndex` over the Rust core |
 | `polypack-db` (PyPI) | Separate package: PyO3/maturin bindings exposing `PolyGraph`, `GraphQuery`, `PersistedGraphQuery`, and vector indexes to Python — see [python/README.md](python/README.md) |

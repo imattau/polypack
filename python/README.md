@@ -110,6 +110,8 @@ from polypack import PolyGraph, ActivationEngine
 graph = PolyGraph()
 graph.add_node({"id": "a", "type": "doc", "data": {}, "insertedAt": 1, "updatedAt": 1})
 graph.reinforce_node("a", 0.6, "user_read")      # durable, persisted
+graph.reinforce_node("a", 0.3, "user_read", context="project-x")  # also reinforces a context
+graph.suppress_node("outdated", 1.0, "stale")    # durable inhibition
 graph.get_activation("a")                         # ~0.6, decay-corrected
 graph.top_activated(5)                            # working-memory primitive
 
@@ -119,11 +121,24 @@ engine.spread(["a"], depth=2, decay=0.5)         # relational spreading activati
 engine.pulse([1.0, 0.0, ...])                    # semantic region scoring (vector)
 engine.absorb([1.0, 0.0, ...])                   # pulse + reinforce above threshold
 engine.working_memory(5)                         # current "mental state"
+engine.working_memory(limit=8, token_budget=2000, diversity_lambda=0.5)  # budgeted + diverse
+engine.record_feedback("a", was_useful=True)     # nudge pulse's scoring weights
 ```
 
 `graph.query().where_activated(0.4)` and `graph.query().order_by_activation()`
 filter/order by current activation. `merge_activation` and `decay_factor` are
 exposed for parity with the TypeScript/Rust implementations.
+
+Nodes also support memory classes (`episodic`/`semantic`/`procedural`/`entity`,
+set via `register_node_type(type, memory_class=...)` as a type default or
+`memoryClass` on the node itself, driving differentiated decay half-lives) and
+confidence/provenance fields (`confidence`, `source`, `observedAt`,
+`derivedFrom`, `supersedes`, `contradicts`) — ordinary node fields, not
+activation state. `graph.supersede(id, superseded_id)` records a contradiction
+(suppresses the superseded node without deleting it) and
+`graph.consolidate(node, source_ids)` promotes a group of nodes into a
+higher-level one, both while keeping the sources in the graph. See
+[docs/API.md](../docs/API.md) for full parameter details.
 
 `save()` writes the complete current graph and flushes any deletions
 recorded since the last save. `close_store()` — and exiting the `with`

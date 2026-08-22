@@ -76,6 +76,12 @@ Nodes:
 - `updateNode(id, data, vector?, activation?)` shallow-merges data and optionally
   replaces its vector or durable activation.
 - `updateNodeSafe(id, data, vector?)` restores an evicted node before updating it.
+- `patchNode(id, patch, options?)` applies `set`/`unset`/`increment`/
+  `compareAndSet` operations atomically against a loaded node. Paths under
+  `data.` (or without a prefix) target node data; `updatedAt` and the
+  provenance fields below (`memoryClass`, `confidence`, `source`,
+  `observedAt`, `derivedFrom`, `supersedes`, `contradicts`) are also directly
+  patchable as top-level paths (not nested under `data.`).
 - `removeNodeVector(id)` and `removeNodeVectorSafe(id)` explicitly clear a
   loaded or potentially evicted node's vector while retaining the node.
 - `removeNode(id)` removes the node, all connected edges, and owned descendants.
@@ -96,25 +102,71 @@ Nodes:
   `updateNode`) does not schedule persistence; call `markVectorDirty(id)`
   afterwards so the change is picked up on the next flush.
 
+Schema (optional structural validation, opt-in per type — not a precondition
+for using a type or edge type):
+
+- `registerNodeType(type, definition?)` registers `requiredFields`,
+  `dataTypes`, a custom `validate` hook, convenience `indexes`, and a default
+  `memoryClass` for nodes of that type (overridable per node, see below).
+  Re-registering re-validates every currently loaded node of that type and
+  rolls back if any fails.
+- `registerEdgeType(type, definition?)` registers `sourceTypes`/`targetTypes`,
+  `cardinality`, `requiredFields`, `dataTypes`, and a custom `validate` hook.
+- `nodeTypes`/`edgeTypes` return defensive copies of the registered
+  definitions, keyed by type.
+
 Activation — durable primitives (see the `activation` subpath for the engine):
 
-- `reinforceNode(id, amount, reason?)` applies a durable reinforcement delta to
-  a loaded node: the prior state is decay-corrected to now, `amount` is added to
-  `score`, a fraction is folded into `importance`, `reinforcementCount`
-  increments, and `lastMeaningfulActivation` re-anchors to now. Persists and
-  emits an `activation_updated` change event (with `delta`/`reason`). Returns
-  the updated node, or `undefined` when the node isn't loaded.
-- `reinforceNodeSafe(id, amount, reason?)` restores an evicted node first.
+- `reinforceNode(id, amount, reason?, context?)` applies a durable
+  reinforcement delta to a loaded node: the prior state is decay-corrected to
+  now, `amount` is added to `score`, a fraction is folded into `importance`,
+  `reinforcementCount` increments, and `lastMeaningfulActivation` re-anchors
+  to now. When `context` is given, the same delta also reinforces
+  `activation.context[context]` — an independently-decaying additional lens
+  on top of (not a replacement for) the global score. Persists and emits an
+  `activation_updated` change event (with `delta`/`reason`/`context`).
+  Returns the updated node, or `undefined` when the node isn't loaded.
+- `reinforceNodeSafe(id, amount, reason?, context?)` restores an evicted node first.
+- `suppressNode(id, amount, reason?)` applies a durable suppression delta to a
+  loaded node's `inhibition` (mirrors `reinforceNode` but for the inhibition
+  axis, which decays on its own, shorter-by-default half-life and is
+  subtracted from `score` only at the final read/ranking layer — never inside
+  relational spreading — so a suppressed node stays re-evaluable rather than
+  permanently invisible). A negative `amount` releases suppression. Emits an
+  `inhibition_updated` change event.
+- `suppressNodeSafe(id, amount, reason?)` restores an evicted node first.
 - `getActivation(id, halfLifeMs?)` returns the current decay-corrected score
   (0 when the node has none). Decay is a pure function of elapsed time from
   `lastMeaningfulActivation`, so replicas with the same stored state converge.
-- `getActivationState(id)` returns the decay-corrected durable record or
-  `undefined`.
+- `getActivationState(id)` returns the decay-corrected durable record
+  (including `inhibition`/`lastInhibitedAt`/`context` when present) or `undefined`.
+- `getContextActivation(id, context)` returns the decay-corrected score within
+  one named context, or `0` — unlike `getActivation`, this never falls back to
+  the global score; a node with plenty of global activation but no history in
+  `context` reads cold in that context.
 - `topActivated(limit, minScore?)` returns loaded nodes ranked by current
   activation descending — the working-memory primitive.
 - `decay(now?)` materializes decayed values for all loaded nodes and re-anchors
   them. Reads already decay lazily, so this only matters for persisting fresh
   values (e.g. before eviction-driven lifecycle events).
+- `supersede(id, supersededId, amount = 1, reason = 'superseded')` — the
+  contradiction primitive: records `id.supersedes = supersededId`, adds a
+  `SUPERSEDED_BY` edge from `id` to `supersededId` (ownership `'reference'`,
+  no cascade delete), and suppresses the superseded node so retrieval prefers
+  the newer node without deleting the old one. Mechanism, not policy — it
+  doesn't detect contradictions, only records and acts on ones the caller
+  identifies. Returns `undefined` if either node isn't loaded.
+- `consolidate(node, sourceIds, options?)` — the consolidation primitive:
+  writes `node` via `addNode` (insert-or-replace — pass an existing id to
+  extend a previous consolidation), merges `sourceIds` into its `derivedFrom`
+  (deduplicated against any already-stored value, not overwritten, so
+  re-consolidating as more evidence accumulates is normal), adds a
+  `CONSOLIDATED_FROM` edge from `node` to each source, and suppresses each
+  source (`options.suppressAmount`, default 1; `options.reason`, default
+  `'consolidated'`). `node`'s content (including `memoryClass`, never forced)
+  and which sources belong together are entirely caller-decided. Returns
+  `undefined` (writing nothing) if any source isn't loaded, or throws if
+  `sourceIds` is empty.
 
 Convenience — graph traversal:
 
@@ -149,8 +201,9 @@ Ownership is stored on the edge:
 Reactivity and batching:
 
 - `changes` is an RxJS `Subject<GraphChangeEvent>` — emits `node_added`,
-  `node_updated`, `node_removed`, `edge_added`, `edge_removed`, and
-  `activation_updated` (the last carries optional `delta`/`reason`).
+  `node_updated`, `node_removed`, `edge_added`, `edge_removed`,
+  `activation_updated` (carries optional `delta`/`reason`/`context`), and
+  `inhibition_updated` (carries optional `delta`/`reason`).
 - `startBatch()` queues notifications until the matching `endBatch()`.
 - `endBatch()` throws if no batch is open.
 
@@ -348,9 +401,22 @@ path.
 
 The root exports `PolyNode`, `PolyEdge`, `EdgeOwnership`, `GraphChangeEvent`,
 `SerializedNode`, `SerializedEdge`, `VectorQuery`, `EdgeTypes`, `DataTransform`,
-`NodeActivation`, aggregate types, `DistanceFunction`, `PersistenceAdapter`,
-`ActivationEngine`, and `mergeActivation`. Persistence types and adapters beyond
-`MemoryAdapter` live under the `persistence` subpaths.
+`NodeActivation`, `ContextActivation`, `MemoryClass`, aggregate types,
+`DistanceFunction`, `PersistenceAdapter`, `ActivationEngine`,
+`WorkingMemoryOptions`, `ClassHalfLives`, `mergeActivation`,
+`SUPERSEDED_BY_EDGE`, and `CONSOLIDATED_FROM_EDGE`. Persistence types and
+adapters beyond `MemoryAdapter` live under the `persistence` subpaths.
+
+`PolyNode` also carries optional memory-class and confidence/provenance
+fields, none of which affect existing nodes that don't set them:
+`memoryClass` (`MemoryClass`, overrides `NodeTypeDefinition.memoryClass` for
+this node only), `confidence` (finite number in `[0, 1]`), `source` (non-empty
+string), `observedAt` (epoch ms, may predate `insertedAt`), `derivedFrom`
+(node ids this node was derived/consolidated from — a soft reference, not
+validated for existence), `supersedes` (a soft-reference node id), and
+`contradicts` (soft-reference node ids). These are ordinary node fields, not
+activation state — static until explicitly revised, riding the existing
+`addNode`/`updateNode`/`patchNode` write paths like `data`.
 
 `edgeId(source, type, target)` produces the persistence edge key. Source IDs and
 edge types must not contain `::`; target IDs may contain it.
@@ -456,8 +522,10 @@ if the view needs to reflect it immediately.
 The adaptive-memory layer. It splits activation into two tiers:
 
 - **Durable** — `NodeActivation` (`score`, `importance`, `reinforcementCount`,
-  `lastMeaningfulActivation`) rides as an optional field on every node, so it
-  persists through the snapshot/WAL and adapters and replicates through sync.
+  `lastMeaningfulActivation`, plus the optional `inhibition`/
+  `lastInhibitedAt`/`context` described below) rides as an optional field on
+  every node, so it persists through the snapshot/WAL and adapters and
+  replicates through sync.
 - **Transient** — runtime-only attention held by `ActivationEngine`, never
   serialized or synced.
 
@@ -468,50 +536,93 @@ const graph = new PolyGraph()
 const engine = new ActivationEngine(graph)
 
 graph.reinforceNode('article', 1.0, 'user_read')      // durable + synced
+graph.reinforceNode('article', 0.3, 'user_read', 'project-x') // also reinforces a context
+graph.suppressNode('outdated-note', 1.0, 'stale')     // durable inhibition
 engine.bumpAttention('article', 0.2)                  // local only
-engine.effective('article')                           // durable + attention
+engine.effective('article')                           // durable + attention − inhibition
+engine.effective('article', 'project-x')              // context-scoped lens instead of global
 
 const spread = engine.spread(['article'], { depth: 2, decay: 0.5 })  // neighbours warm up
 const scores = await engine.pulse('vector search')    // semantic region scoring
 await engine.absorb('vector search')                  // pulse + reinforce above threshold
 
 engine.workingMemory(5)                               // current "mental state"
+engine.workingMemory({ limit: 8, tokenBudget: 2000, diversityLambda: 0.5 }) // budgeted + diverse
 ```
 
 - `new ActivationEngine(graph, config?)` composes the scoring layer. `config`
   options: `scoreHalfLifeMs` (24 h default), `importanceHalfLifeMs` (30 days),
   `importanceGain` (0.05), `spreadDecay` (0.5), `spreadDepth` (2),
   `recencyHalfLifeMs` (7 days), `weights` (all 1), `minReinforceDelta` (0.05),
-  `pulseThreshold` (0), `absorbThreshold` (0.3), `absorbGain` (0.05).
-- `reinforce(id, amount, reason?)` / `reinforceAll(entries)` call through to
-  `PolyGraph.reinforceNode` (durable).
-- `bumpAttention(id, amount)`, `attentionOf(id)`, and `effective(id)` manage the
-  transient tier. `bumpAttention` accumulates locally and is promoted to durable
-  reinforcement once it clears `minReinforceDelta`, so tiny events (scrolls,
-  focus) stay local while meaningful ones become persisted and synced.
+  `pulseThreshold` (0), `absorbThreshold` (0.3), `absorbGain` (0.05), and
+  `classHalfLives` (per-`MemoryClass` score/importance half-life overrides,
+  see below).
+- `reinforce(id, amount, reason?, context?)` / `reinforceAll(entries)` call
+  through to `PolyGraph.reinforceNode` (durable).
+- `suppress(id, amount, reason?)` calls through to `PolyGraph.suppressNode`.
+  `inhibitionOf(id)` returns the current decayed inhibition (0 when none).
+- `bumpAttention(id, amount)`, `attentionOf(id)`, and `effective(id, context?)`
+  manage the transient tier. `bumpAttention` accumulates locally and is
+  promoted to durable reinforcement once it clears `minReinforceDelta`, so
+  tiny events (scrolls, focus) stay local while meaningful ones become
+  persisted and synced. `effective` is durable decayed score (or the
+  context-scoped score when `context` is given) plus attention, minus decayed
+  inhibition — decay uses the node's resolved memory-class half-life (see
+  `resolveHalfLives`) when it has one, else the flat config default.
+- `resolveHalfLives(node)` resolves a node's effective score/importance
+  half-lives: `node.memoryClass` if set, else the owning type's registered
+  `NodeTypeDefinition.memoryClass` default, else no class — the flat config
+  half-lives, unaffected by `classHalfLives`. Defaults per class: episodic 12h
+  score / 7d importance, semantic 7d / 90d, procedural 7d / 60d, entity 30d /
+  non-decaying.
 - `spread(seeds, { depth?, decay?, edgeTypes? })` implements spreading
   activation: each hop attenuates the contribution by `decay`; multiple paths to
   a node sum. Returns `{ nodeId: contribution }`.
-- `pulse(text | vector, { topK?, semanticThreshold?, pulseThreshold?, ... })`
+- `pulse(text | vector, { topK?, semanticThreshold?, pulseThreshold?, context?, ... })`
   scores the activated region around a query — semantic seeds via vector
   similarity (nodes with zero similarity never seed the region) plus outward
   spreading, folded with recency and usage. Read-only.
 - `absorb(input, options?)` runs `pulse` and durably reinforces every node whose
-  composite clears `absorbThreshold` by `absorbGain * score`.
-- `workingMemory(limit?, minScore?)` returns loaded nodes ranked by `effective`
-  activation descending.
+  composite clears `absorbThreshold` by `absorbGain * score`. When
+  `options.context` is given, the same reinforcement also reinforces that
+  context on every absorbed node.
+- `workingMemory(limit?, minScore?)` or `workingMemory(options)` returns loaded
+  nodes ranked by `effective` activation descending. The options form enables a
+  budgeted, diversity-aware selection — a memory-flavoured
+  maximal-marginal-relevance pass suited to LLM context assembly:
+  `{ limit?, minScore?, context?, tokenBudget?, costOf?, diversityLambda?, similarityOf? }`.
+  Greedily picks the highest `relevance − diversityLambda × similarity-to-already-selected`
+  candidate under `tokenBudget` (via caller-supplied `costOf`, default 1 per
+  node — the engine has no tokenizer). `similarityOf` defaults to cosine
+  similarity of `node.vector` (0 if either lacks one).
+- `recordFeedback(id, wasUseful, learningRate = 0.05)` — learned weights.
+  Nudges the composite `weights` (used by `pulse`) toward whichever signal
+  (semantic/graph/recency/usage) was strongest for `id` the last time it was
+  scored by `pulse`: each weight moves by `learningRate * direction * signal`,
+  clamped to stay non-negative. A simple exponential-moving-average-style
+  nudge, not a full online learner. A no-op if `id` has no cached signal
+  breakdown. Weights are in-memory only — not persisted or synced.
 - `dispose()` unsubscribes from graph changes and drops transient attention.
 - `mergeActivation(existing, incoming, now?)` merges two durable total-state
-  records: decay-corrects both to `now`, keeps the stronger component of each,
-  and re-anchors to `now`. Used by the sync layer (max-merge, idempotent for
-  re-delivered snapshots).
+  records: decay-corrects both to `now`, keeps the stronger component of each
+  (including a per-key max-merge over `context` and a max-merge of
+  `inhibition`), and re-anchors to `now`. Used by the sync layer (max-merge,
+  idempotent for re-delivered snapshots).
 
 Decay is a pure function of elapsed time anchored at
 `lastMeaningfulActivation` (`0.5 ** (elapsed / halfLife)`), so two replicas
-with the same stored state compute identical current scores. Synchronization is
-**additive for deltas** (the `activationUpdate` op, coalesced and gated by
-`activationSyncThreshold`, default 0.05) and **max for total-state node
-payloads** — activation is accumulated knowledge, not last-write-wins data.
+with the same stored state compute identical current scores. `inhibition`
+decays independently against `lastInhibitedAt` (12h default half-life,
+shorter than `score` so suppression fades unless reinforced), and is
+subtracted from `score` only at the final read/ranking layer (`effective`),
+never inside `pulse`'s composite or `spread` — a suppressed node stays
+re-evaluable, not permanently invisible. Each `context` entry decays
+independently against its own anchor (same curve as `score` by default) and
+is an additional lens on top of the global score, not a replacement.
+Synchronization is **additive for deltas** (the `activationUpdate`/
+`inhibitionUpdate` ops, coalesced and gated by `activationSyncThreshold`,
+default 0.05) and **max for total-state node payloads** — activation is
+accumulated knowledge, not last-write-wins data.
 
 ## `@0xx0lostcause0xx0/polypack/sync`
 
