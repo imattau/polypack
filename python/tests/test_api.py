@@ -323,6 +323,21 @@ def test_patch_compare_and_set_is_conditional():
         graph.patch_node("a", compare_and_set={"data.state": {"expected": "ready", "value": "stale"}})
 
 
+def test_patch_node_sets_and_unsets_top_level_provenance_fields():
+    graph = PolyGraph()
+    graph.add_node({"id": "a", "type": "t", "data": {}, "insertedAt": 1, "updatedAt": 1})
+
+    updated = graph.patch_node("a", set={"confidence": 0.6, "memoryClass": "episodic"})
+    assert updated["confidence"] == 0.6
+    assert updated["memoryClass"] == "episodic"
+
+    with pytest.raises(polypack.PolypackValueError, match="confidence must be a finite number"):
+        graph.patch_node("a", set={"confidence": 2.0})
+
+    updated = graph.patch_node("a", unset=["confidence"])
+    assert "confidence" not in updated
+
+
 def _seed_graph(graph):
     graph.add_node({"id": "n1", "type": "doc", "data": {"title": "Hello"}, "vector": [0.1, 0.2, 0.3], "insertedAt": 1, "updatedAt": 1})
     graph.add_node({"id": "n2", "type": "doc", "data": {}, "vector": None, "insertedAt": 2, "updatedAt": 2})

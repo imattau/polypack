@@ -59,6 +59,83 @@ fn get_data_path<'a>(root: &'a serde_json::Value, path: &[&str]) -> Option<&'a s
     get_data_path(object.get(path[0])?, &path[1..])
 }
 
+/// Provenance/memory-class fields settable directly via `patch_node` (not
+/// nested under `data.`), mirroring the TypeScript `patchNode`'s top-level
+/// patchable fields.
+const TOP_LEVEL_PATCHABLE_FIELDS: &[&str] =
+    &["memoryClass", "confidence", "source", "observedAt", "derivedFrom", "supersedes", "contradicts"];
+
+fn get_top_level_field(node: &Node, field: &str) -> Option<serde_json::Value> {
+    match field {
+        "memoryClass" => node.memory_class.map(|c| serde_json::to_value(c).expect("MemoryClass serializes")),
+        "confidence" => node.confidence.map(|v| serde_json::json!(v)),
+        "source" => node.source.clone().map(serde_json::Value::String),
+        "observedAt" => node.observed_at.map(|v| serde_json::json!(v)),
+        "derivedFrom" => node.derived_from.clone().map(|v| serde_json::json!(v)),
+        "supersedes" => node.supersedes.clone().map(serde_json::Value::String),
+        "contradicts" => node.contradicts.clone().map(|v| serde_json::json!(v)),
+        _ => None,
+    }
+}
+
+fn set_top_level_field(node: &mut Node, field: &str, value: serde_json::Value) -> Result<()> {
+    match field {
+        "memoryClass" => {
+            node.memory_class = Some(
+                serde_json::from_value(value)
+                    .map_err(|_| PolypackError::InvalidArgument("invalid memoryClass".into()))?,
+            )
+        }
+        "confidence" => {
+            node.confidence = Some(
+                value.as_f64().ok_or_else(|| PolypackError::InvalidArgument("confidence must be numeric".into()))?,
+            )
+        }
+        "source" => {
+            node.source = Some(
+                value.as_str().ok_or_else(|| PolypackError::InvalidArgument("source must be a string".into()))?.to_string(),
+            )
+        }
+        "observedAt" => {
+            node.observed_at = Some(
+                value.as_i64().ok_or_else(|| PolypackError::InvalidArgument("observedAt must be an integer".into()))?,
+            )
+        }
+        "derivedFrom" => {
+            node.derived_from = Some(
+                serde_json::from_value(value)
+                    .map_err(|_| PolypackError::InvalidArgument("derivedFrom must be an array of strings".into()))?,
+            )
+        }
+        "supersedes" => {
+            node.supersedes = Some(
+                value.as_str().ok_or_else(|| PolypackError::InvalidArgument("supersedes must be a string".into()))?.to_string(),
+            )
+        }
+        "contradicts" => {
+            node.contradicts = Some(
+                serde_json::from_value(value)
+                    .map_err(|_| PolypackError::InvalidArgument("contradicts must be an array of strings".into()))?,
+            )
+        }
+        _ => unreachable!("field checked against TOP_LEVEL_PATCHABLE_FIELDS by the caller"),
+    }
+    Ok(())
+}
+
+fn unset_top_level_field(node: &mut Node, field: &str) {
+    match field {
+        "memoryClass" => node.memory_class = None,
+        "confidence" => node.confidence = None,
+        "source" => node.source = None,
+        "observedAt" => node.observed_at = None,
+        "derivedFrom" => node.derived_from = None,
+        "supersedes" => node.supersedes = None,
+        "contradicts" => node.contradicts = None,
+        _ => unreachable!("field checked against TOP_LEVEL_PATCHABLE_FIELDS by the caller"),
+    }
+}
+
 fn patch_parts(path: &str) -> Result<Vec<&str>> {
     let mut parts: Vec<&str> = path.split('.').collect();
     if parts.first() == Some(&"data") {
@@ -1411,10 +1488,22 @@ impl Graph {
         }
 
         let mut candidate = serde_json::Value::Object(existing.data.clone());
+        let mut candidate_node = existing.clone();
         for (path, operation) in compare_and_set {
             let operation = operation.as_object().ok_or_else(|| PolypackError::InvalidArgument("compare-and-set entries must be objects".into()))?;
             let expected = operation.get("expected").ok_or_else(|| PolypackError::InvalidArgument("compare-and-set entries require expected".into()))?;
             let value = operation.get("value").ok_or_else(|| PolypackError::InvalidArgument("compare-and-set entries require value".into()))?;
+            if TOP_LEVEL_PATCHABLE_FIELDS.contains(&path.as_str()) {
+                if get_top_level_field(&candidate_node, &path).as_ref() != Some(expected) {
+                    return Err(PolypackError::Conflict {
+                        id: id.to_string(),
+                        expected: expected_revision.unwrap_or(existing.revision),
+                        actual: existing.revision,
+                    });
+                }
+                set_top_level_field(&mut candidate_node, &path, value.clone())?;
+                continue;
+            }
             let parts = patch_parts(&path)?;
             if get_data_path(&candidate, &parts) != Some(expected) {
                 return Err(PolypackError::Conflict {
@@ -1426,18 +1515,39 @@ impl Graph {
             set_data_path(&mut candidate, &parts, value.clone())?;
         }
         for (path, value) in set {
+            if TOP_LEVEL_PATCHABLE_FIELDS.contains(&path.as_str()) {
+                set_top_level_field(&mut candidate_node, &path, value)?;
+                continue;
+            }
             let parts = patch_parts(&path)?;
             set_data_path(&mut candidate, &parts, value)?;
         }
         for path in unset {
+            if TOP_LEVEL_PATCHABLE_FIELDS.contains(&path.as_str()) {
+                unset_top_level_field(&mut candidate_node, &path);
+                continue;
+            }
             let parts = patch_parts(&path)?;
             unset_data_path(&mut candidate, &parts);
         }
         for (path, delta) in increment {
-            let parts = patch_parts(&path)?;
             let delta = delta
                 .as_f64()
                 .ok_or_else(|| PolypackError::InvalidArgument("increment values must be numeric".into()))?;
+            if TOP_LEVEL_PATCHABLE_FIELDS.contains(&path.as_str()) {
+                let current = match get_top_level_field(&candidate_node, &path) {
+                    None => 0.0,
+                    Some(value) => value
+                        .as_f64()
+                        .ok_or_else(|| PolypackError::InvalidArgument("increment targets must be numeric".into()))?,
+                };
+                if !current.is_finite() || !delta.is_finite() {
+                    return Err(PolypackError::InvalidArgument("increment values must be finite".into()));
+                }
+                set_top_level_field(&mut candidate_node, &path, serde_json::json!(current + delta))?;
+                continue;
+            }
+            let parts = patch_parts(&path)?;
             let current = match get_data_path(&candidate, &parts) {
                 None => 0.0,
                 Some(value) => value
@@ -1459,13 +1569,13 @@ impl Graph {
             updated_at: now_millis(),
             revision: existing.revision.saturating_add(1),
             activation: existing.activation.clone(),
-            memory_class: existing.memory_class,
-            confidence: existing.confidence,
-            source: existing.source.clone(),
-            observed_at: existing.observed_at,
-            derived_from: existing.derived_from.clone(),
-            supersedes: existing.supersedes.clone(),
-            contradicts: existing.contradicts.clone(),
+            memory_class: candidate_node.memory_class,
+            confidence: candidate_node.confidence,
+            source: candidate_node.source,
+            observed_at: candidate_node.observed_at,
+            derived_from: candidate_node.derived_from,
+            supersedes: candidate_node.supersedes,
+            contradicts: candidate_node.contradicts,
         };
         self.validate_node_resource_limits(&candidate_node)?;
         self.validate_node_schema(&candidate_node)?;
@@ -1476,6 +1586,13 @@ impl Graph {
             self.unindex_node(id);
             let node = self.nodes.get_mut(id).expect("node checked above");
             node.data = candidate.as_object().cloned().expect("patch root is an object");
+            node.memory_class = candidate_node.memory_class;
+            node.confidence = candidate_node.confidence;
+            node.source = candidate_node.source.clone();
+            node.observed_at = candidate_node.observed_at;
+            node.derived_from = candidate_node.derived_from.clone();
+            node.supersedes = candidate_node.supersedes.clone();
+            node.contradicts = candidate_node.contradicts.clone();
             node.updated_at = now_millis();
             node.revision = node.revision.saturating_add(1);
             node.node_type.clone()
@@ -2572,7 +2689,7 @@ pub(crate) fn now_millis() -> i64 {
 mod tests {
     use super::*;
     use polypack_core::model::edge_id;
-    use polypack_core::InMemoryStorage;
+    use polypack_core::{InMemoryStorage, MemoryClass};
 
     fn test_graph() -> Graph {
         Graph::open(Box::new(InMemoryStorage::new()), StoreConfig::default(), GraphConfig::default())
@@ -3337,6 +3454,26 @@ mod tests {
         let mut stale_compare = serde_json::Map::new();
         stale_compare.insert("data.profile.name".into(), serde_json::json!({"expected": "new", "value": "stale"}));
         assert!(matches!(g.patch_node("a", serde_json::Map::new(), Vec::new(), serde_json::Map::new(), stale_compare, Some(2)), Err(PolypackError::Conflict { .. })));
+    }
+
+    #[test]
+    fn patch_node_sets_and_unsets_top_level_provenance_fields() {
+        let mut g = test_graph();
+        g.add_node(node("a")).unwrap();
+
+        let mut set = serde_json::Map::new();
+        set.insert("confidence".into(), serde_json::json!(0.6));
+        set.insert("memoryClass".into(), serde_json::json!("episodic"));
+        let updated = g.patch_node("a", set, Vec::new(), serde_json::Map::new(), serde_json::Map::new(), None).unwrap().unwrap();
+        assert_eq!(updated.confidence, Some(0.6));
+        assert_eq!(updated.memory_class, Some(MemoryClass::Episodic));
+
+        let mut bad_set = serde_json::Map::new();
+        bad_set.insert("confidence".into(), serde_json::json!(2.0));
+        assert!(matches!(g.patch_node("a", bad_set, Vec::new(), serde_json::Map::new(), serde_json::Map::new(), None), Err(PolypackError::RangeOutOfBounds(_))));
+
+        let updated = g.patch_node("a", serde_json::Map::new(), vec!["confidence".into()], serde_json::Map::new(), serde_json::Map::new(), None).unwrap().unwrap();
+        assert_eq!(updated.confidence, None);
     }
 
     #[test]

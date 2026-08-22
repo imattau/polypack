@@ -4,7 +4,7 @@
 //! tolerance, and version checking. Hosts own byte I/O via the `Storage` trait.
 
 use crate::error::{PolypackError, Result};
-use crate::model::{validate_batch, ChangeBatch, Edge, Node};
+use crate::model::{validate_batch, ChangeBatch, Edge, MemoryClass, Node};
 use crate::storage::format::{decode_snapshot, decode_wal, encode_snapshot, encode_wal};
 use crate::storage::wal::WalEntry;
 use serde::{Deserialize, Serialize};
@@ -146,6 +146,9 @@ pub struct NodeTypeDefinition {
     pub required_fields: Vec<String>,
     #[serde(default)]
     pub data_types: HashMap<String, String>,
+    /// Default memory class for nodes of this type. Overridable per node via `Node.memory_class`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_class: Option<MemoryClass>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -1771,6 +1774,7 @@ mod tests {
             node_type: "person".into(),
             required_fields: vec!["name".into()],
             data_types: HashMap::from([(String::from("age"), String::from("integer"))]),
+            memory_class: None,
         }).unwrap();
         s.register_edge_type(EdgeTypeDefinition {
             edge_type: "PARENT_OF".into(),
@@ -1797,6 +1801,27 @@ mod tests {
     }
 
     #[test]
+    fn node_type_memory_class_round_trips_through_schema_persistence() {
+        let storage = shared();
+        {
+            let mut s = Store::new(Box::new(storage.clone()), StoreConfig::default());
+            s.register_node_type(NodeTypeDefinition {
+                node_type: "episode".into(),
+                required_fields: Vec::new(),
+                data_types: HashMap::new(),
+                memory_class: Some(MemoryClass::Episodic),
+            }).unwrap();
+            s.close().unwrap();
+        }
+        let mut reopened = Store::new(Box::new(storage), StoreConfig::default());
+        reopened.ensure_loaded().unwrap();
+        assert_eq!(
+            reopened.node_type_definitions.get("episode").unwrap().memory_class,
+            Some(MemoryClass::Episodic),
+        );
+    }
+
+    #[test]
     fn schema_definitions_reject_invalid_metadata() {
         let storage = shared();
         let mut store = Store::new(Box::new(storage.clone()), StoreConfig::default());
@@ -1804,11 +1829,13 @@ mod tests {
             node_type: "".into(),
             required_fields: Vec::new(),
             data_types: HashMap::new(),
+            memory_class: None,
         }), Err(PolypackError::InvalidArgument(message)) if message.contains("invalid schema")));
         assert!(matches!(store.register_node_type(NodeTypeDefinition {
             node_type: "person".into(),
             required_fields: vec!["name".into(), "name".into()],
             data_types: HashMap::new(),
+            memory_class: None,
         }), Err(PolypackError::InvalidArgument(message)) if message.contains("invalid schema")));
         assert!(matches!(store.register_edge_type(EdgeTypeDefinition {
             edge_type: "RELATED".into(),

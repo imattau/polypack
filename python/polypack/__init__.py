@@ -531,6 +531,9 @@ def _validate_activation(activation: Any) -> dict:
 
 MEMORY_CLASSES = ("episodic", "semantic", "procedural", "entity")
 
+# Provenance/memory-class fields settable directly via `patch_node` (not nested under `data.`).
+TOP_LEVEL_PATCHABLE_FIELDS = ("memoryClass", "confidence", "source", "observedAt", "derivedFrom", "supersedes", "contradicts")
+
 # Default per-class score/importance half-lives. Episodic memories fade
 # fastest unless reinforced; semantic/procedural facts are far more durable;
 # entities barely decay. Only used for nodes whose resolved memoryClass (see
@@ -1747,21 +1750,43 @@ class PolyGraph:
             raise ConflictError(f"record {id_} has revision {actual}, expected {expected_revision}")
 
         candidate = copy.deepcopy(node.get("data") or {})
+        candidate_node = _copy_node(node)
         for path, operation in (compare_and_set or {}).items():
             if not isinstance(operation, dict) or "expected" not in operation or "value" not in operation:
                 raise PolypackValueError("compare_and_set entries require expected and value")
+            if path in TOP_LEVEL_PATCHABLE_FIELDS:
+                present = path in candidate_node
+                current = candidate_node.get(path)
+                if (not present and operation["expected"] is not None) or (present and current != operation["expected"]):
+                    raise ConflictError(f"compare-and-set failed for record {id_} at {path}")
+                candidate_node[path] = copy.deepcopy(operation["value"])
+                continue
             present = _patch_has(candidate, path)
             current = _patch_get(candidate, path)
             if (not present and operation["expected"] is not None) or (present and current != operation["expected"]):
                 raise ConflictError(f"compare-and-set failed for record {id_} at {path}")
             _patch_set(candidate, path, operation["value"])
         for path, value in (set or {}).items():
+            if path in TOP_LEVEL_PATCHABLE_FIELDS:
+                candidate_node[path] = copy.deepcopy(value)
+                continue
             _patch_set(candidate, path, value)
         for path in unset or ():
+            if path in TOP_LEVEL_PATCHABLE_FIELDS:
+                candidate_node.pop(path, None)
+                continue
             _patch_unset(candidate, path)
         for path, delta in (increment or {}).items():
             if not isinstance(delta, (int, float)) or not math.isfinite(float(delta)):
                 raise PolypackValueError("increment values must be finite numbers")
+            if path in TOP_LEVEL_PATCHABLE_FIELDS:
+                current = candidate_node.get(path)
+                if current is None:
+                    current = 0
+                if not isinstance(current, (int, float)) or isinstance(current, bool) or not math.isfinite(float(current)):
+                    raise PolypackValueError("increment targets must be numeric")
+                candidate_node[path] = float(current) + float(delta)
+                continue
             current = _patch_get(candidate, path)
             if current is None:
                 current = 0
@@ -1769,12 +1794,12 @@ class PolyGraph:
                 raise PolypackValueError("increment targets must be numeric")
             _patch_set(candidate, path, float(current) + float(delta))
 
-        candidate_node = _copy_node(node)
         candidate_node["data"] = candidate
         candidate_node["updatedAt"] = int(time.time() * 1000)
         candidate_node["revision"] = actual + 1
         self._validate_node_resource_limits(candidate_node)
         self._validate_node_schema(candidate_node)
+        candidate_node.update(_validate_provenance(candidate_node))
         node.clear()
         node.update(candidate_node)
         self._dirty_node_ids.add(id_)
