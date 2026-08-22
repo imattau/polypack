@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "lang": "rust",
+  "lang": "napi",
   "count": 5000,
   "seed": 42,
   "batchSizes": [
@@ -14,84 +14,84 @@
       "batchSize": 1,
       "count": 5000,
       "seed": 42,
-      "writeMs": 2476.76049,
-      "writeOpsPerSec": 2018.7660535557072,
+      "writeMs": 3559.901903,
+      "writeOpsPerSec": 1404.5330844050509,
       "mutationCount": 5000,
-      "compactMs": 15.246058,
+      "compactMs": 12.008030999999846,
       "verified": true,
       "nodeCount": 5000,
       "before": {
-        "walBytes": 805626,
+        "walBytes": 646736,
         "snapshotBytes": 0,
-        "mutationLogBytes": 1846455
+        "mutationLogBytes": 1557541
       },
       "after": {
         "walBytes": 0,
         "snapshotBytes": 565661,
-        "mutationLogBytes": 1846455
+        "mutationLogBytes": 1557541
       }
     },
     {
       "batchSize": 100,
       "count": 5000,
       "seed": 42,
-      "writeMs": 41.964658,
-      "writeOpsPerSec": 119147.8791510704,
+      "writeMs": 61.60939600000029,
+      "writeOpsPerSec": 81156.45217492437,
       "mutationCount": 50,
-      "compactMs": 13.914859,
+      "compactMs": 11.375738999999612,
       "verified": true,
       "nodeCount": 5000,
       "before": {
-        "walBytes": 805626,
+        "walBytes": 646736,
         "snapshotBytes": 0,
-        "mutationLogBytes": 1250499
+        "mutationLogBytes": 961585
       },
       "after": {
         "walBytes": 0,
         "snapshotBytes": 565661,
-        "mutationLogBytes": 1250499
+        "mutationLogBytes": 961585
       }
     },
     {
       "batchSize": 500,
       "count": 5000,
       "seed": 42,
-      "writeMs": 20.285573,
-      "writeOpsPerSec": 246480.5899246721,
+      "writeMs": 32.67708700000003,
+      "writeOpsPerSec": 153012.415090733,
       "mutationCount": 10,
-      "compactMs": 9.876121,
+      "compactMs": 11.18675600000006,
       "verified": true,
       "nodeCount": 5000,
       "before": {
-        "walBytes": 805626,
+        "walBytes": 646736,
         "snapshotBytes": 0,
-        "mutationLogBytes": 1245899
+        "mutationLogBytes": 956985
       },
       "after": {
         "walBytes": 0,
         "snapshotBytes": 565661,
-        "mutationLogBytes": 1245899
+        "mutationLogBytes": 956985
       }
     },
     {
       "batchSize": 5000,
       "count": 5000,
       "seed": 42,
-      "writeMs": 22.345212,
-      "writeOpsPerSec": 223761.5825707986,
+      "writeMs": 31.46673099999998,
+      "writeOpsPerSec": 158897.98021917188,
       "mutationCount": 1,
-      "compactMs": 13.124284999999999,
+      "compactMs": 10.491484000000128,
       "verified": true,
       "nodeCount": 5000,
       "before": {
-        "walBytes": 805626,
+        "walBytes": 646736,
         "snapshotBytes": 0,
-        "mutationLogBytes": 1244888
+        "mutationLogBytes": 955974
       },
       "after": {
         "walBytes": 0,
         "snapshotBytes": 565661,
-        "mutationLogBytes": 1244888
+        "mutationLogBytes": 955974
       }
     }
   ]

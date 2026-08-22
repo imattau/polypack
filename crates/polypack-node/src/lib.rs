@@ -281,9 +281,159 @@ impl NativeHnswIndex {
 
 // ── Storage / NativeStore ──
 
-use polypack_core::model::ChangeBatch as CoreChangeBatch;
+use polypack_core::model::{ChangeBatch as CoreChangeBatch, Edge as CoreEdgeModel, MemoryClass as CoreMemoryClass, Node as CoreNodeModel, VectorEntry as CoreVectorEntry};
 use polypack_core::storage::{AdapterCapabilities, Durability, NodeQuery, Store as CoreStore, StoreConfig, Storage, VectorSearchCapability};
 use std::path::{Path, PathBuf};
+
+/// Deserialize an optional napi-bridged JSON field, treating a JS `null`
+/// the same as an omitted (`undefined`) property.
+///
+/// `#[napi(object)]`'s generated getter for an `Option<T>` field only
+/// treats a genuinely *missing* JS property as `None` — if the property is
+/// present but explicitly `null`, it calls `T::from_napi_value` directly
+/// (bypassing `Option<T>`'s own null handling), which fails for any `T`
+/// that doesn't itself tolerate `null` (e.g. `Vec<f64>`, `String`, `f64`).
+/// This codebase's wire contract uses explicit `null` for absent
+/// `vector`/edge `data` (not omission), confirmed by grepping every
+/// `SerializedNode`/`SerializedEdge` call site — so every optional field
+/// here is typed `Option<serde_json::Value>` on the napi struct and routed
+/// through this helper instead.
+fn opt_json<T: serde::de::DeserializeOwned>(v: Option<serde_json::Value>, field: &str) -> Result<Option<T>> {
+    match v {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(value) => serde_json::from_value(value).map(Some).map_err(|e| Error::from_reason(format!("{field}: {e}"))),
+    }
+}
+
+/// Typed mirror of `polypack_core::model::Node` for `NativeStore::apply`.
+///
+/// `#[napi(object)]` gives the required fields (`id`, `type`, `insertedAt`,
+/// `updatedAt`) direct per-field conversion off the JS value with no
+/// intermediate JSON tree; every optional field still goes through a small,
+/// per-field `serde_json::Value` (see `opt_json`) rather than `data`'s old
+/// behavior of JSON-bridging the *entire* node (or the whole batch) at
+/// once. Confirmed via benchmarks/database-core-napi-report.md: the old
+/// whole-batch double-deserialize (napi's JS->JSON walk, then
+/// `serde_json::from_value` into `CoreChangeBatch`) was up to 17x slower
+/// than the equivalent TypeScript write path at small batch sizes.
+#[napi(object)]
+pub struct NapiNode {
+    pub id: String,
+    #[napi(js_name = "type")]
+    pub node_type: String,
+    pub data: Option<serde_json::Value>,
+    pub vector: Option<serde_json::Value>,
+    pub inserted_at: i64,
+    pub updated_at: i64,
+    pub revision: Option<serde_json::Value>,
+    pub activation: Option<serde_json::Value>,
+    pub memory_class: Option<serde_json::Value>,
+    pub confidence: Option<serde_json::Value>,
+    pub source: Option<serde_json::Value>,
+    pub observed_at: Option<serde_json::Value>,
+    pub derived_from: Option<serde_json::Value>,
+    pub supersedes: Option<serde_json::Value>,
+    pub contradicts: Option<serde_json::Value>,
+}
+
+impl TryFrom<NapiNode> for CoreNodeModel {
+    type Error = Error;
+    fn try_from(n: NapiNode) -> Result<Self> {
+        let data = match n.data {
+            Some(serde_json::Value::Object(map)) => map,
+            Some(serde_json::Value::Null) | None => Default::default(),
+            Some(_) => return Err(Error::from_reason("node data must be an object")),
+        };
+        Ok(CoreNodeModel {
+            id: n.id,
+            node_type: n.node_type,
+            data,
+            vector: opt_json(n.vector, "vector")?,
+            inserted_at: n.inserted_at,
+            updated_at: n.updated_at,
+            revision: opt_json::<u64>(n.revision, "revision")?.unwrap_or(0),
+            activation: opt_json::<CoreNodeActivation>(n.activation, "activation")?,
+            memory_class: opt_json::<CoreMemoryClass>(n.memory_class, "memoryClass")?,
+            confidence: opt_json(n.confidence, "confidence")?,
+            source: opt_json(n.source, "source")?,
+            observed_at: opt_json(n.observed_at, "observedAt")?,
+            derived_from: opt_json(n.derived_from, "derivedFrom")?,
+            supersedes: opt_json(n.supersedes, "supersedes")?,
+            contradicts: opt_json(n.contradicts, "contradicts")?,
+        })
+    }
+}
+
+/// Typed mirror of `polypack_core::model::Edge` for `NativeStore::apply` — see `NapiNode`.
+#[napi(object)]
+pub struct NapiEdge {
+    pub id: String,
+    pub source: String,
+    pub target: String,
+    #[napi(js_name = "type")]
+    pub edge_type: String,
+    pub data: Option<serde_json::Value>,
+    pub created_at: i64,
+    pub revision: Option<serde_json::Value>,
+}
+
+impl TryFrom<NapiEdge> for CoreEdgeModel {
+    type Error = Error;
+    fn try_from(e: NapiEdge) -> Result<Self> {
+        let data = match e.data {
+            Some(serde_json::Value::Object(map)) => Some(map),
+            Some(serde_json::Value::Null) | None => None,
+            Some(_) => return Err(Error::from_reason("edge data must be an object")),
+        };
+        Ok(CoreEdgeModel {
+            id: e.id,
+            source: e.source,
+            target: e.target,
+            edge_type: e.edge_type,
+            data,
+            created_at: e.created_at,
+            revision: opt_json::<u64>(e.revision, "revision")?.unwrap_or(0),
+        })
+    }
+}
+
+/// Typed mirror of `polypack_core::model::VectorEntry` for `NativeStore::apply`.
+#[napi(object)]
+pub struct NapiVectorEntry {
+    pub id: String,
+    pub vector: Vec<f64>,
+}
+
+impl From<NapiVectorEntry> for CoreVectorEntry {
+    fn from(v: NapiVectorEntry) -> Self {
+        CoreVectorEntry { id: v.id, vector: v.vector }
+    }
+}
+
+/// Typed mirror of `polypack_core::model::ChangeBatch` for `NativeStore::apply`.
+#[napi(object)]
+pub struct NapiChangeBatch {
+    pub put_nodes: Option<Vec<NapiNode>>,
+    pub delete_node_ids: Option<Vec<String>>,
+    pub put_edges: Option<Vec<NapiEdge>>,
+    pub delete_edge_ids: Option<Vec<String>>,
+    pub put_vectors: Option<Vec<NapiVectorEntry>>,
+    pub delete_vector_ids: Option<Vec<String>>,
+}
+
+impl TryFrom<NapiChangeBatch> for CoreChangeBatch {
+    type Error = Error;
+    fn try_from(b: NapiChangeBatch) -> Result<Self> {
+        Ok(CoreChangeBatch {
+            put_nodes: b.put_nodes.unwrap_or_default().into_iter().map(TryInto::try_into).collect::<Result<_>>()?,
+            delete_node_ids: b.delete_node_ids.unwrap_or_default(),
+            put_edges: b.put_edges.unwrap_or_default().into_iter().map(TryInto::try_into).collect::<Result<_>>()?,
+            delete_edge_ids: b.delete_edge_ids.unwrap_or_default(),
+            put_vectors: b.put_vectors.unwrap_or_default().into_iter().map(Into::into).collect(),
+            delete_vector_ids: b.delete_vector_ids.unwrap_or_default(),
+        })
+    }
+}
 
 /// Filesystem byte storage used by the native store (host adapter for Node).
 struct FsStorage {
@@ -481,10 +631,16 @@ impl NativeStore {
 
     /// Apply a change batch: `{ putNodes, deleteNodeIds, putEdges,
     /// deleteEdgeIds, putVectors, deleteVectorIds }`.
+    ///
+    /// Takes the typed `NapiChangeBatch` (per-field napi conversion, no
+    /// intermediate JSON tree for the batch as a whole) rather than
+    /// `serde_json::Value` — see `NapiNode`'s docs. Confirmed as a real fix
+    /// via benchmarks/database-core-napi-report.md, which measured the old
+    /// double-deserialize as up to 17x slower than the TS lane at small
+    /// batch sizes.
     #[napi]
-    pub fn apply(&self, changes: serde_json::Value) -> Result<()> {
-        let batch: CoreChangeBatch = serde_json::from_value(changes)
-            .map_err(|e| Error::from_reason(e.to_string()))?;
+    pub fn apply(&self, changes: NapiChangeBatch) -> Result<()> {
+        let batch: CoreChangeBatch = changes.try_into()?;
         self.inner.borrow_mut().apply(&batch).map_err(to_napi_err)
     }
 

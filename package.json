@@ -83,6 +83,7 @@
     "bench:database-core:batches": "tsx benchmarks/database-core-batches.ts",
     "bench:database-core:batches:rust": "cargo run --release --manifest-path crates/Cargo.toml -p polypack-graph --example database_core_batches",
     "bench:database-core:batches:python": "PYTHONPATH=python python -m polypack.bench_batches",
+    "bench:database-core:batches:napi": "tsx benchmarks/database-core-batches-napi.ts",
     "bench:database-core:batches:compare": "tsx benchmarks/database-core-batches-compare.ts",
     "bench:database-core:queries": "tsx benchmarks/database-core-queries.ts",
     "bench:database-core:queries:rust": "cargo run --release --manifest-path crates/Cargo.toml -p polypack-graph --example database_core_queries",
