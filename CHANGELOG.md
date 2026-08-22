@@ -3,6 +3,48 @@
 All notable changes to this project are documented here. This project follows
 [Semantic Versioning](https://semver.org/).
 
+## [3.3.0] - 2026-08-23
+
+### Added
+
+- `HnswIndex` supports Euclidean distance across all three bindings
+  (`HnswConfig.distance` in Rust, a `distance` option in the native Node
+  binding, and a `distance` parameter in Python's `HnswIndex`), matching the
+  TypeScript `HNSWIndex`'s existing pluggable `distanceFn` and closing a gap
+  where the Rust core silently only supported cosine.
+- `HnswIndex::query_with_ef_search` lets callers search with a different
+  `ef_search` than the index was built with, without rebuilding — enables
+  tracing a recall/speed curve against one built graph.
+- New benchmarks: `bench:database-core:edge-flush:rust` (isolates edge-heavy
+  flush cost), `bench:database-core:batches:napi` (exercises the real napi
+  binding rather than a standalone Rust process), and a comparative HNSW
+  benchmark against the public ann-benchmarks `sift-128-euclidean` dataset
+  (`crates/polypack-core/examples/ann_sift_bench.rs`,
+  `benchmarks/ann-sift-report.md`).
+
+### Fixed
+
+- `Graph::flush()` resolved each dirty edge id by scanning every source's
+  edge map — O(dirty_edges × total_edges) per flush. Fixed with a persistent
+  `edge_id_index`, also removing three other linear id-scans in
+  `crates/polypack-graph/src/graph.rs`.
+- `InMemoryStorage::append()` cloned the entire accumulated file on every
+  append (O(n²) over n flushes). Now extends in place.
+- `Store::validate_pending_schema` deep-cloned and rescanned every node and
+  edge in the store on every single `apply()`/flush, even when no schema
+  was registered. Now short-circuits when no node/edge type is registered —
+  this was the dominant cost behind Rust's durable-write throughput trailing
+  TypeScript's; Rust is now at parity (was 0.67×, now ~1.0×) and 1.1–2×
+  faster on the in-memory mixed workload.
+- `SyncServer::submit()` computed and discarded a whole-batch checksum, and
+  cloned each accepted operation twice across two passes. Fixed both,
+  ~15% faster sync throughput.
+- `NativeStore::apply()` deserialized every JS object twice per call (napi's
+  own JS→JSON walk, then `serde_json::from_value`). Replaced with typed
+  `#[napi(object)]` mirror structs converted via `TryFrom`, 1.14×–2× faster
+  across all batch sizes; at batch sizes ≥500 it now beats the TypeScript
+  write path instead of trailing it.
+
 ## [3.2.0] - 2026-08-22
 
 ### Added

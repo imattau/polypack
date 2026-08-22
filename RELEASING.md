@@ -9,10 +9,10 @@ stack, and the Python wheel — shares a single version number:
 
 | Package | Version (current) |
 |---|---|
-| `@0xx0lostcause0xx0/polypack` (TypeScript) | `3.2.0` |
-| `polypack-core` crate (`crates/polypack-core`) | `3.2.0` |
-| `@0xx0lostcause0xx0/polypack-native` + per-platform packages | `3.2.0` |
-| `polypack-db` Python wheel | `3.2.0` |
+| `@0xx0lostcause0xx0/polypack` (TypeScript) | `3.3.0` |
+| `polypack-core` crate (`crates/polypack-core`) | `3.3.0` |
+| `@0xx0lostcause0xx0/polypack-native` + per-platform packages | `3.3.0` |
+| `polypack-db` Python wheel | `3.3.0` |
 
 Bump all of them together for every release, even if only one language's code
 changed — registries need a fresh version to re-publish, and drift between
