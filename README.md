@@ -41,7 +41,7 @@ cargo add polypack-core
   underlying the TypeScript native addon and the Python bindings.
 - **GitHub releases:** [release notes, source archives, and tags](https://github.com/imattau/polypack/releases)
   are published from the repository. The current coordinated source version
-  is `3.1.0`.
+  is `3.2.0`.
 
 Stable GitHub releases run the complete test, build, export, and package checks
 before the corresponding packages are submitted to npm, PyPI, and crates.io

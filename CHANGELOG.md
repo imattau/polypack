@@ -3,6 +3,19 @@
 All notable changes to this project are documented here. This project follows
 [Semantic Versioning](https://semver.org/).
 
+## [3.2.0] - 2026-08-22
+
+### Added
+
+- Aligned the adaptive-memory layer across TypeScript, Rust, Python, and the
+  native bindings.
+- Added persisted/cold working-memory ranking, context fallback, built-in token
+  estimation, cost validation, explainable score breakdowns, and learned-weight
+  export/restore APIs.
+- Preserved adaptive and provenance metadata when reading persisted nodes.
+- Added native token-estimation and score-breakdown helpers, plus local native
+  binary preference during monorepo development.
+
 ## [3.1.0] - 2026-08-22
 
 ### Added

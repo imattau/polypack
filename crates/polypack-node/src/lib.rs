@@ -924,6 +924,7 @@ pub struct ActivationScoreBreakdown {
 /// Explain a composite activation score using explicit signal and weight
 /// values. The stateful graph-level implementation lives in polypack-graph.
 #[napi]
+#[allow(clippy::too_many_arguments)]
 pub fn score_breakdown(
   semantic: f64,
   graph: f64,
