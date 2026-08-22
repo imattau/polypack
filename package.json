@@ -92,6 +92,7 @@
     "bench:database-core:mixed:rust": "cargo run --release --manifest-path crates/Cargo.toml -p polypack-graph --example database_core_mixed",
     "bench:database-core:mixed:python": "PYTHONPATH=python python -m polypack.bench_mixed",
     "bench:database-core:mixed:compare": "tsx benchmarks/database-core-mixed-compare.ts",
+    "bench:database-core:edge-flush:rust": "cargo run --release --manifest-path crates/Cargo.toml -p polypack-graph --example database_core_edge_flush",
     "bench:scale": "tsx benchmarks/scale-characterization.ts",
     "bench:conformance": "npm run test:conformance"
   },

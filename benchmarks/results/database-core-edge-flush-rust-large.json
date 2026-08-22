@@ -1,0 +1,3010 @@
+{
+  "schemaVersion": 1,
+  "lang": "rust",
+  "nodes": 5000,
+  "batchSize": 200,
+  "batches": 500,
+  "totalEdges": 100000,
+  "perBatch": [
+    {
+      "batch": 0,
+      "totalEdgesBefore": 0,
+      "flushMs": 1.356747,
+      "msPerEdgeInBatch": 0.006783735
+    },
+    {
+      "batch": 1,
+      "totalEdgesBefore": 200,
+      "flushMs": 1.112514,
+      "msPerEdgeInBatch": 0.00556257
+    },
+    {
+      "batch": 2,
+      "totalEdgesBefore": 400,
+      "flushMs": 1.086483,
+      "msPerEdgeInBatch": 0.005432415
+    },
+    {
+      "batch": 3,
+      "totalEdgesBefore": 600,
+      "flushMs": 0.948202,
+      "msPerEdgeInBatch": 0.00474101
+    },
+    {
+      "batch": 4,
+      "totalEdgesBefore": 800,
+      "flushMs": 1.0195969999999999,
+      "msPerEdgeInBatch": 0.005097984999999999
+    },
+    {
+      "batch": 5,
+      "totalEdgesBefore": 1000,
+      "flushMs": 0.9335749999999999,
+      "msPerEdgeInBatch": 0.004667874999999999
+    },
+    {
+      "batch": 6,
+      "totalEdgesBefore": 1200,
+      "flushMs": 0.910242,
+      "msPerEdgeInBatch": 0.00455121
+    },
+    {
+      "batch": 7,
+      "totalEdgesBefore": 1400,
+      "flushMs": 0.912886,
+      "msPerEdgeInBatch": 0.0045644299999999995
+    },
+    {
+      "batch": 8,
+      "totalEdgesBefore": 1600,
+      "flushMs": 1.184496,
+      "msPerEdgeInBatch": 0.00592248
+    },
+    {
+      "batch": 9,
+      "totalEdgesBefore": 1800,
+      "flushMs": 0.934507,
+      "msPerEdgeInBatch": 0.004672535
+    },
+    {
+      "batch": 10,
+      "totalEdgesBefore": 2000,
+      "flushMs": 0.880802,
+      "msPerEdgeInBatch": 0.00440401
+    },
+    {
+      "batch": 11,
+      "totalEdgesBefore": 2200,
+      "flushMs": 0.852335,
+      "msPerEdgeInBatch": 0.0042616749999999995
+    },
+    {
+      "batch": 12,
+      "totalEdgesBefore": 2400,
+      "flushMs": 0.866212,
+      "msPerEdgeInBatch": 0.00433106
+    },
+    {
+      "batch": 13,
+      "totalEdgesBefore": 2600,
+      "flushMs": 0.859789,
+      "msPerEdgeInBatch": 0.004298945
+    },
+    {
+      "batch": 14,
+      "totalEdgesBefore": 2800,
+      "flushMs": 0.847625,
+      "msPerEdgeInBatch": 0.004238125
+    },
+    {
+      "batch": 15,
+      "totalEdgesBefore": 3000,
+      "flushMs": 0.853995,
+      "msPerEdgeInBatch": 0.004269975
+    },
+    {
+      "batch": 16,
+      "totalEdgesBefore": 3200,
+      "flushMs": 0.859023,
+      "msPerEdgeInBatch": 0.0042951149999999995
+    },
+    {
+      "batch": 17,
+      "totalEdgesBefore": 3400,
+      "flushMs": 2.231954,
+      "msPerEdgeInBatch": 0.01115977
+    },
+    {
+      "batch": 18,
+      "totalEdgesBefore": 3600,
+      "flushMs": 0.905149,
+      "msPerEdgeInBatch": 0.004525745
+    },
+    {
+      "batch": 19,
+      "totalEdgesBefore": 3800,
+      "flushMs": 0.837095,
+      "msPerEdgeInBatch": 0.004185475
+    },
+    {
+      "batch": 20,
+      "totalEdgesBefore": 4000,
+      "flushMs": 0.804782,
+      "msPerEdgeInBatch": 0.00402391
+    },
+    {
+      "batch": 21,
+      "totalEdgesBefore": 4200,
+      "flushMs": 0.915201,
+      "msPerEdgeInBatch": 0.004576005
+    },
+    {
+      "batch": 22,
+      "totalEdgesBefore": 4400,
+      "flushMs": 0.913468,
+      "msPerEdgeInBatch": 0.00456734
+    },
+    {
+      "batch": 23,
+      "totalEdgesBefore": 4600,
+      "flushMs": 0.918186,
+      "msPerEdgeInBatch": 0.00459093
+    },
+    {
+      "batch": 24,
+      "totalEdgesBefore": 4800,
+      "flushMs": 0.9978389999999999,
+      "msPerEdgeInBatch": 0.004989194999999999
+    },
+    {
+      "batch": 25,
+      "totalEdgesBefore": 5000,
+      "flushMs": 1.631708,
+      "msPerEdgeInBatch": 0.008158539999999999
+    },
+    {
+      "batch": 26,
+      "totalEdgesBefore": 5200,
+      "flushMs": 1.756735,
+      "msPerEdgeInBatch": 0.008783675
+    },
+    {
+      "batch": 27,
+      "totalEdgesBefore": 5400,
+      "flushMs": 0.884711,
+      "msPerEdgeInBatch": 0.004423555
+    },
+    {
+      "batch": 28,
+      "totalEdgesBefore": 5600,
+      "flushMs": 0.844695,
+      "msPerEdgeInBatch": 0.004223475
+    },
+    {
+      "batch": 29,
+      "totalEdgesBefore": 5800,
+      "flushMs": 0.850727,
+      "msPerEdgeInBatch": 0.004253635
+    },
+    {
+      "batch": 30,
+      "totalEdgesBefore": 6000,
+      "flushMs": 0.854897,
+      "msPerEdgeInBatch": 0.004274485
+    },
+    {
+      "batch": 31,
+      "totalEdgesBefore": 6200,
+      "flushMs": 0.895725,
+      "msPerEdgeInBatch": 0.004478625
+    },
+    {
+      "batch": 32,
+      "totalEdgesBefore": 6400,
+      "flushMs": 0.8486360000000001,
+      "msPerEdgeInBatch": 0.00424318
+    },
+    {
+      "batch": 33,
+      "totalEdgesBefore": 6600,
+      "flushMs": 0.902564,
+      "msPerEdgeInBatch": 0.00451282
+    },
+    {
+      "batch": 34,
+      "totalEdgesBefore": 6800,
+      "flushMs": 0.836909,
+      "msPerEdgeInBatch": 0.0041845450000000005
+    },
+    {
+      "batch": 35,
+      "totalEdgesBefore": 7000,
+      "flushMs": 1.878294,
+      "msPerEdgeInBatch": 0.009391469999999999
+    },
+    {
+      "batch": 36,
+      "totalEdgesBefore": 7200,
+      "flushMs": 1.9549070000000002,
+      "msPerEdgeInBatch": 0.009774535
+    },
+    {
+      "batch": 37,
+      "totalEdgesBefore": 7400,
+      "flushMs": 0.93083,
+      "msPerEdgeInBatch": 0.00465415
+    },
+    {
+      "batch": 38,
+      "totalEdgesBefore": 7600,
+      "flushMs": 0.865962,
+      "msPerEdgeInBatch": 0.00432981
+    },
+    {
+      "batch": 39,
+      "totalEdgesBefore": 7800,
+      "flushMs": 0.8368180000000001,
+      "msPerEdgeInBatch": 0.0041840900000000006
+    },
+    {
+      "batch": 40,
+      "totalEdgesBefore": 8000,
+      "flushMs": 0.880059,
+      "msPerEdgeInBatch": 0.004400295
+    },
+    {
+      "batch": 41,
+      "totalEdgesBefore": 8200,
+      "flushMs": 0.849548,
+      "msPerEdgeInBatch": 0.00424774
+    },
+    {
+      "batch": 42,
+      "totalEdgesBefore": 8400,
+      "flushMs": 0.8391149999999999,
+      "msPerEdgeInBatch": 0.004195575
+    },
+    {
+      "batch": 43,
+      "totalEdgesBefore": 8600,
+      "flushMs": 0.85421,
+      "msPerEdgeInBatch": 0.00427105
+    },
+    {
+      "batch": 44,
+      "totalEdgesBefore": 8800,
+      "flushMs": 0.866931,
+      "msPerEdgeInBatch": 0.004334655
+    },
+    {
+      "batch": 45,
+      "totalEdgesBefore": 9000,
+      "flushMs": 0.890525,
+      "msPerEdgeInBatch": 0.004452625
+    },
+    {
+      "batch": 46,
+      "totalEdgesBefore": 9200,
+      "flushMs": 0.85946,
+      "msPerEdgeInBatch": 0.0042973
+    },
+    {
+      "batch": 47,
+      "totalEdgesBefore": 9400,
+      "flushMs": 0.868154,
+      "msPerEdgeInBatch": 0.00434077
+    },
+    {
+      "batch": 48,
+      "totalEdgesBefore": 9600,
+      "flushMs": 0.911034,
+      "msPerEdgeInBatch": 0.00455517
+    },
+    {
+      "batch": 49,
+      "totalEdgesBefore": 9800,
+      "flushMs": 0.852294,
+      "msPerEdgeInBatch": 0.00426147
+    },
+    {
+      "batch": 50,
+      "totalEdgesBefore": 10000,
+      "flushMs": 0.918436,
+      "msPerEdgeInBatch": 0.00459218
+    },
+    {
+      "batch": 51,
+      "totalEdgesBefore": 10200,
+      "flushMs": 0.862498,
+      "msPerEdgeInBatch": 0.0043124899999999996
+    },
+    {
+      "batch": 52,
+      "totalEdgesBefore": 10400,
+      "flushMs": 0.854111,
+      "msPerEdgeInBatch": 0.004270555
+    },
+    {
+      "batch": 53,
+      "totalEdgesBefore": 10600,
+      "flushMs": 0.874417,
+      "msPerEdgeInBatch": 0.004372085
+    },
+    {
+      "batch": 54,
+      "totalEdgesBefore": 10800,
+      "flushMs": 0.884005,
+      "msPerEdgeInBatch": 0.004420025
+    },
+    {
+      "batch": 55,
+      "totalEdgesBefore": 11000,
+      "flushMs": 0.91855,
+      "msPerEdgeInBatch": 0.00459275
+    },
+    {
+      "batch": 56,
+      "totalEdgesBefore": 11200,
+      "flushMs": 0.92554,
+      "msPerEdgeInBatch": 0.0046277
+    },
+    {
+      "batch": 57,
+      "totalEdgesBefore": 11400,
+      "flushMs": 0.902658,
+      "msPerEdgeInBatch": 0.00451329
+    },
+    {
+      "batch": 58,
+      "totalEdgesBefore": 11600,
+      "flushMs": 0.987095,
+      "msPerEdgeInBatch": 0.004935475
+    },
+    {
+      "batch": 59,
+      "totalEdgesBefore": 11800,
+      "flushMs": 0.9365060000000001,
+      "msPerEdgeInBatch": 0.004682530000000001
+    },
+    {
+      "batch": 60,
+      "totalEdgesBefore": 12000,
+      "flushMs": 0.904211,
+      "msPerEdgeInBatch": 0.0045210549999999995
+    },
+    {
+      "batch": 61,
+      "totalEdgesBefore": 12200,
+      "flushMs": 0.924935,
+      "msPerEdgeInBatch": 0.004624675
+    },
+    {
+      "batch": 62,
+      "totalEdgesBefore": 12400,
+      "flushMs": 0.917784,
+      "msPerEdgeInBatch": 0.00458892
+    },
+    {
+      "batch": 63,
+      "totalEdgesBefore": 12600,
+      "flushMs": 0.9885129999999999,
+      "msPerEdgeInBatch": 0.0049425649999999995
+    },
+    {
+      "batch": 64,
+      "totalEdgesBefore": 12800,
+      "flushMs": 0.921019,
+      "msPerEdgeInBatch": 0.004605095
+    },
+    {
+      "batch": 65,
+      "totalEdgesBefore": 13000,
+      "flushMs": 0.924861,
+      "msPerEdgeInBatch": 0.004624305
+    },
+    {
+      "batch": 66,
+      "totalEdgesBefore": 13200,
+      "flushMs": 0.9534269999999999,
+      "msPerEdgeInBatch": 0.004767135
+    },
+    {
+      "batch": 67,
+      "totalEdgesBefore": 13400,
+      "flushMs": 0.918055,
+      "msPerEdgeInBatch": 0.0045902749999999996
+    },
+    {
+      "batch": 68,
+      "totalEdgesBefore": 13600,
+      "flushMs": 0.913578,
+      "msPerEdgeInBatch": 0.00456789
+    },
+    {
+      "batch": 69,
+      "totalEdgesBefore": 13800,
+      "flushMs": 0.920616,
+      "msPerEdgeInBatch": 0.00460308
+    },
+    {
+      "batch": 70,
+      "totalEdgesBefore": 14000,
+      "flushMs": 0.961755,
+      "msPerEdgeInBatch": 0.004808775
+    },
+    {
+      "batch": 71,
+      "totalEdgesBefore": 14200,
+      "flushMs": 5.19531,
+      "msPerEdgeInBatch": 0.02597655
+    },
+    {
+      "batch": 72,
+      "totalEdgesBefore": 14400,
+      "flushMs": 1.249976,
+      "msPerEdgeInBatch": 0.00624988
+    },
+    {
+      "batch": 73,
+      "totalEdgesBefore": 14600,
+      "flushMs": 0.969241,
+      "msPerEdgeInBatch": 0.004846205
+    },
+    {
+      "batch": 74,
+      "totalEdgesBefore": 14800,
+      "flushMs": 0.929972,
+      "msPerEdgeInBatch": 0.0046498600000000005
+    },
+    {
+      "batch": 75,
+      "totalEdgesBefore": 15000,
+      "flushMs": 1.108367,
+      "msPerEdgeInBatch": 0.005541835
+    },
+    {
+      "batch": 76,
+      "totalEdgesBefore": 15200,
+      "flushMs": 1.1285170000000002,
+      "msPerEdgeInBatch": 0.005642585000000001
+    },
+    {
+      "batch": 77,
+      "totalEdgesBefore": 15400,
+      "flushMs": 2.5079249999999997,
+      "msPerEdgeInBatch": 0.012539624999999999
+    },
+    {
+      "batch": 78,
+      "totalEdgesBefore": 15600,
+      "flushMs": 1.1155970000000002,
+      "msPerEdgeInBatch": 0.005577985000000001
+    },
+    {
+      "batch": 79,
+      "totalEdgesBefore": 15800,
+      "flushMs": 1.079302,
+      "msPerEdgeInBatch": 0.00539651
+    },
+    {
+      "batch": 80,
+      "totalEdgesBefore": 16000,
+      "flushMs": 1.240091,
+      "msPerEdgeInBatch": 0.0062004550000000005
+    },
+    {
+      "batch": 81,
+      "totalEdgesBefore": 16200,
+      "flushMs": 1.134701,
+      "msPerEdgeInBatch": 0.005673505
+    },
+    {
+      "batch": 82,
+      "totalEdgesBefore": 16400,
+      "flushMs": 1.080689,
+      "msPerEdgeInBatch": 0.005403445
+    },
+    {
+      "batch": 83,
+      "totalEdgesBefore": 16600,
+      "flushMs": 1.126463,
+      "msPerEdgeInBatch": 0.005632315
+    },
+    {
+      "batch": 84,
+      "totalEdgesBefore": 16800,
+      "flushMs": 1.090469,
+      "msPerEdgeInBatch": 0.005452345
+    },
+    {
+      "batch": 85,
+      "totalEdgesBefore": 17000,
+      "flushMs": 1.079892,
+      "msPerEdgeInBatch": 0.00539946
+    },
+    {
+      "batch": 86,
+      "totalEdgesBefore": 17200,
+      "flushMs": 1.081583,
+      "msPerEdgeInBatch": 0.005407915
+    },
+    {
+      "batch": 87,
+      "totalEdgesBefore": 17400,
+      "flushMs": 1.094362,
+      "msPerEdgeInBatch": 0.0054718100000000006
+    },
+    {
+      "batch": 88,
+      "totalEdgesBefore": 17600,
+      "flushMs": 1.077568,
+      "msPerEdgeInBatch": 0.0053878400000000005
+    },
+    {
+      "batch": 89,
+      "totalEdgesBefore": 17800,
+      "flushMs": 1.123862,
+      "msPerEdgeInBatch": 0.00561931
+    },
+    {
+      "batch": 90,
+      "totalEdgesBefore": 18000,
+      "flushMs": 1.137393,
+      "msPerEdgeInBatch": 0.005686965
+    },
+    {
+      "batch": 91,
+      "totalEdgesBefore": 18200,
+      "flushMs": 1.152806,
+      "msPerEdgeInBatch": 0.00576403
+    },
+    {
+      "batch": 92,
+      "totalEdgesBefore": 18400,
+      "flushMs": 1.141025,
+      "msPerEdgeInBatch": 0.005705125
+    },
+    {
+      "batch": 93,
+      "totalEdgesBefore": 18600,
+      "flushMs": 2.292737,
+      "msPerEdgeInBatch": 0.011463685
+    },
+    {
+      "batch": 94,
+      "totalEdgesBefore": 18800,
+      "flushMs": 1.135611,
+      "msPerEdgeInBatch": 0.0056780549999999996
+    },
+    {
+      "batch": 95,
+      "totalEdgesBefore": 19000,
+      "flushMs": 1.114225,
+      "msPerEdgeInBatch": 0.005571125
+    },
+    {
+      "batch": 96,
+      "totalEdgesBefore": 19200,
+      "flushMs": 1.116878,
+      "msPerEdgeInBatch": 0.00558439
+    },
+    {
+      "batch": 97,
+      "totalEdgesBefore": 19400,
+      "flushMs": 1.133558,
+      "msPerEdgeInBatch": 0.005667790000000001
+    },
+    {
+      "batch": 98,
+      "totalEdgesBefore": 19600,
+      "flushMs": 1.1125589999999999,
+      "msPerEdgeInBatch": 0.005562794999999999
+    },
+    {
+      "batch": 99,
+      "totalEdgesBefore": 19800,
+      "flushMs": 1.114024,
+      "msPerEdgeInBatch": 0.00557012
+    },
+    {
+      "batch": 100,
+      "totalEdgesBefore": 20000,
+      "flushMs": 1.077041,
+      "msPerEdgeInBatch": 0.005385205
+    },
+    {
+      "batch": 101,
+      "totalEdgesBefore": 20200,
+      "flushMs": 1.032013,
+      "msPerEdgeInBatch": 0.005160065
+    },
+    {
+      "batch": 102,
+      "totalEdgesBefore": 20400,
+      "flushMs": 0.966966,
+      "msPerEdgeInBatch": 0.00483483
+    },
+    {
+      "batch": 103,
+      "totalEdgesBefore": 20600,
+      "flushMs": 0.9659570000000001,
+      "msPerEdgeInBatch": 0.0048297850000000005
+    },
+    {
+      "batch": 104,
+      "totalEdgesBefore": 20800,
+      "flushMs": 0.9414669999999999,
+      "msPerEdgeInBatch": 0.004707335
+    },
+    {
+      "batch": 105,
+      "totalEdgesBefore": 21000,
+      "flushMs": 1.003512,
+      "msPerEdgeInBatch": 0.00501756
+    },
+    {
+      "batch": 106,
+      "totalEdgesBefore": 21200,
+      "flushMs": 0.99331,
+      "msPerEdgeInBatch": 0.00496655
+    },
+    {
+      "batch": 107,
+      "totalEdgesBefore": 21400,
+      "flushMs": 1.0664019999999999,
+      "msPerEdgeInBatch": 0.005332009999999999
+    },
+    {
+      "batch": 108,
+      "totalEdgesBefore": 21600,
+      "flushMs": 1.056746,
+      "msPerEdgeInBatch": 0.0052837299999999995
+    },
+    {
+      "batch": 109,
+      "totalEdgesBefore": 21800,
+      "flushMs": 1.004926,
+      "msPerEdgeInBatch": 0.0050246299999999995
+    },
+    {
+      "batch": 110,
+      "totalEdgesBefore": 22000,
+      "flushMs": 0.99301,
+      "msPerEdgeInBatch": 0.0049650499999999995
+    },
+    {
+      "batch": 111,
+      "totalEdgesBefore": 22200,
+      "flushMs": 1.046569,
+      "msPerEdgeInBatch": 0.005232845000000001
+    },
+    {
+      "batch": 112,
+      "totalEdgesBefore": 22400,
+      "flushMs": 1.012465,
+      "msPerEdgeInBatch": 0.0050623249999999995
+    },
+    {
+      "batch": 113,
+      "totalEdgesBefore": 22600,
+      "flushMs": 0.9889670000000002,
+      "msPerEdgeInBatch": 0.004944835000000001
+    },
+    {
+      "batch": 114,
+      "totalEdgesBefore": 22800,
+      "flushMs": 0.976115,
+      "msPerEdgeInBatch": 0.004880575
+    },
+    {
+      "batch": 115,
+      "totalEdgesBefore": 23000,
+      "flushMs": 0.968588,
+      "msPerEdgeInBatch": 0.0048429400000000004
+    },
+    {
+      "batch": 116,
+      "totalEdgesBefore": 23200,
+      "flushMs": 1.007192,
+      "msPerEdgeInBatch": 0.005035960000000001
+    },
+    {
+      "batch": 117,
+      "totalEdgesBefore": 23400,
+      "flushMs": 1.015018,
+      "msPerEdgeInBatch": 0.00507509
+    },
+    {
+      "batch": 118,
+      "totalEdgesBefore": 23600,
+      "flushMs": 1.024232,
+      "msPerEdgeInBatch": 0.0051211600000000005
+    },
+    {
+      "batch": 119,
+      "totalEdgesBefore": 23800,
+      "flushMs": 1.016381,
+      "msPerEdgeInBatch": 0.005081905
+    },
+    {
+      "batch": 120,
+      "totalEdgesBefore": 24000,
+      "flushMs": 1.052491,
+      "msPerEdgeInBatch": 0.005262455
+    },
+    {
+      "batch": 121,
+      "totalEdgesBefore": 24200,
+      "flushMs": 1.033413,
+      "msPerEdgeInBatch": 0.005167064999999999
+    },
+    {
+      "batch": 122,
+      "totalEdgesBefore": 24400,
+      "flushMs": 0.9908980000000001,
+      "msPerEdgeInBatch": 0.004954490000000001
+    },
+    {
+      "batch": 123,
+      "totalEdgesBefore": 24600,
+      "flushMs": 0.997503,
+      "msPerEdgeInBatch": 0.0049875150000000005
+    },
+    {
+      "batch": 124,
+      "totalEdgesBefore": 24800,
+      "flushMs": 0.986834,
+      "msPerEdgeInBatch": 0.00493417
+    },
+    {
+      "batch": 125,
+      "totalEdgesBefore": 25000,
+      "flushMs": 1.022243,
+      "msPerEdgeInBatch": 0.005111215
+    },
+    {
+      "batch": 126,
+      "totalEdgesBefore": 25200,
+      "flushMs": 0.9810019999999999,
+      "msPerEdgeInBatch": 0.00490501
+    },
+    {
+      "batch": 127,
+      "totalEdgesBefore": 25400,
+      "flushMs": 0.97729,
+      "msPerEdgeInBatch": 0.00488645
+    },
+    {
+      "batch": 128,
+      "totalEdgesBefore": 25600,
+      "flushMs": 0.9614419999999999,
+      "msPerEdgeInBatch": 0.004807209999999999
+    },
+    {
+      "batch": 129,
+      "totalEdgesBefore": 25800,
+      "flushMs": 0.987318,
+      "msPerEdgeInBatch": 0.00493659
+    },
+    {
+      "batch": 130,
+      "totalEdgesBefore": 26000,
+      "flushMs": 0.994197,
+      "msPerEdgeInBatch": 0.004970985
+    },
+    {
+      "batch": 131,
+      "totalEdgesBefore": 26200,
+      "flushMs": 1.042929,
+      "msPerEdgeInBatch": 0.005214645
+    },
+    {
+      "batch": 132,
+      "totalEdgesBefore": 26400,
+      "flushMs": 0.9841330000000001,
+      "msPerEdgeInBatch": 0.004920665000000001
+    },
+    {
+      "batch": 133,
+      "totalEdgesBefore": 26600,
+      "flushMs": 0.9938250000000001,
+      "msPerEdgeInBatch": 0.0049691250000000005
+    },
+    {
+      "batch": 134,
+      "totalEdgesBefore": 26800,
+      "flushMs": 0.990952,
+      "msPerEdgeInBatch": 0.00495476
+    },
+    {
+      "batch": 135,
+      "totalEdgesBefore": 27000,
+      "flushMs": 0.9887870000000001,
+      "msPerEdgeInBatch": 0.004943935
+    },
+    {
+      "batch": 136,
+      "totalEdgesBefore": 27200,
+      "flushMs": 1.0416480000000001,
+      "msPerEdgeInBatch": 0.00520824
+    },
+    {
+      "batch": 137,
+      "totalEdgesBefore": 27400,
+      "flushMs": 1.196021,
+      "msPerEdgeInBatch": 0.005980105
+    },
+    {
+      "batch": 138,
+      "totalEdgesBefore": 27600,
+      "flushMs": 1.0033850000000002,
+      "msPerEdgeInBatch": 0.005016925000000001
+    },
+    {
+      "batch": 139,
+      "totalEdgesBefore": 27800,
+      "flushMs": 0.97839,
+      "msPerEdgeInBatch": 0.00489195
+    },
+    {
+      "batch": 140,
+      "totalEdgesBefore": 28000,
+      "flushMs": 0.988374,
+      "msPerEdgeInBatch": 0.00494187
+    },
+    {
+      "batch": 141,
+      "totalEdgesBefore": 28200,
+      "flushMs": 1.0324589999999998,
+      "msPerEdgeInBatch": 0.005162294999999999
+    },
+    {
+      "batch": 142,
+      "totalEdgesBefore": 28400,
+      "flushMs": 0.984221,
+      "msPerEdgeInBatch": 0.004921105
+    },
+    {
+      "batch": 143,
+      "totalEdgesBefore": 28600,
+      "flushMs": 10.168744,
+      "msPerEdgeInBatch": 0.05084372
+    },
+    {
+      "batch": 144,
+      "totalEdgesBefore": 28800,
+      "flushMs": 1.181957,
+      "msPerEdgeInBatch": 0.005909785
+    },
+    {
+      "batch": 145,
+      "totalEdgesBefore": 29000,
+      "flushMs": 1.056579,
+      "msPerEdgeInBatch": 0.005282894999999999
+    },
+    {
+      "batch": 146,
+      "totalEdgesBefore": 29200,
+      "flushMs": 0.983966,
+      "msPerEdgeInBatch": 0.00491983
+    },
+    {
+      "batch": 147,
+      "totalEdgesBefore": 29400,
+      "flushMs": 0.9835099999999999,
+      "msPerEdgeInBatch": 0.00491755
+    },
+    {
+      "batch": 148,
+      "totalEdgesBefore": 29600,
+      "flushMs": 0.959865,
+      "msPerEdgeInBatch": 0.004799325
+    },
+    {
+      "batch": 149,
+      "totalEdgesBefore": 29800,
+      "flushMs": 0.961562,
+      "msPerEdgeInBatch": 0.00480781
+    },
+    {
+      "batch": 150,
+      "totalEdgesBefore": 30000,
+      "flushMs": 0.982901,
+      "msPerEdgeInBatch": 0.0049145050000000004
+    },
+    {
+      "batch": 151,
+      "totalEdgesBefore": 30200,
+      "flushMs": 0.9812259999999999,
+      "msPerEdgeInBatch": 0.00490613
+    },
+    {
+      "batch": 152,
+      "totalEdgesBefore": 30400,
+      "flushMs": 0.991387,
+      "msPerEdgeInBatch": 0.004956935
+    },
+    {
+      "batch": 153,
+      "totalEdgesBefore": 30600,
+      "flushMs": 0.929381,
+      "msPerEdgeInBatch": 0.004646905
+    },
+    {
+      "batch": 154,
+      "totalEdgesBefore": 30800,
+      "flushMs": 0.915085,
+      "msPerEdgeInBatch": 0.004575425
+    },
+    {
+      "batch": 155,
+      "totalEdgesBefore": 31000,
+      "flushMs": 0.96483,
+      "msPerEdgeInBatch": 0.00482415
+    },
+    {
+      "batch": 156,
+      "totalEdgesBefore": 31200,
+      "flushMs": 0.977401,
+      "msPerEdgeInBatch": 0.004887005
+    },
+    {
+      "batch": 157,
+      "totalEdgesBefore": 31400,
+      "flushMs": 1.0126169999999999,
+      "msPerEdgeInBatch": 0.005063084999999999
+    },
+    {
+      "batch": 158,
+      "totalEdgesBefore": 31600,
+      "flushMs": 1.002647,
+      "msPerEdgeInBatch": 0.0050132350000000004
+    },
+    {
+      "batch": 159,
+      "totalEdgesBefore": 31800,
+      "flushMs": 1.0136800000000001,
+      "msPerEdgeInBatch": 0.005068400000000001
+    },
+    {
+      "batch": 160,
+      "totalEdgesBefore": 32000,
+      "flushMs": 1.03847,
+      "msPerEdgeInBatch": 0.00519235
+    },
+    {
+      "batch": 161,
+      "totalEdgesBefore": 32200,
+      "flushMs": 1.040379,
+      "msPerEdgeInBatch": 0.005201895
+    },
+    {
+      "batch": 162,
+      "totalEdgesBefore": 32400,
+      "flushMs": 1.035373,
+      "msPerEdgeInBatch": 0.005176865
+    },
+    {
+      "batch": 163,
+      "totalEdgesBefore": 32600,
+      "flushMs": 1.012518,
+      "msPerEdgeInBatch": 0.0050625900000000005
+    },
+    {
+      "batch": 164,
+      "totalEdgesBefore": 32800,
+      "flushMs": 0.9814459999999999,
+      "msPerEdgeInBatch": 0.004907229999999999
+    },
+    {
+      "batch": 165,
+      "totalEdgesBefore": 33000,
+      "flushMs": 0.975744,
+      "msPerEdgeInBatch": 0.00487872
+    },
+    {
+      "batch": 166,
+      "totalEdgesBefore": 33200,
+      "flushMs": 1.003916,
+      "msPerEdgeInBatch": 0.00501958
+    },
+    {
+      "batch": 167,
+      "totalEdgesBefore": 33400,
+      "flushMs": 0.9866759999999999,
+      "msPerEdgeInBatch": 0.004933379999999999
+    },
+    {
+      "batch": 168,
+      "totalEdgesBefore": 33600,
+      "flushMs": 0.975332,
+      "msPerEdgeInBatch": 0.00487666
+    },
+    {
+      "batch": 169,
+      "totalEdgesBefore": 33800,
+      "flushMs": 2.6442259999999997,
+      "msPerEdgeInBatch": 0.01322113
+    },
+    {
+      "batch": 170,
+      "totalEdgesBefore": 34000,
+      "flushMs": 1.131574,
+      "msPerEdgeInBatch": 0.005657870000000001
+    },
+    {
+      "batch": 171,
+      "totalEdgesBefore": 34200,
+      "flushMs": 1.078446,
+      "msPerEdgeInBatch": 0.0053922300000000005
+    },
+    {
+      "batch": 172,
+      "totalEdgesBefore": 34400,
+      "flushMs": 0.9766810000000001,
+      "msPerEdgeInBatch": 0.004883405
+    },
+    {
+      "batch": 173,
+      "totalEdgesBefore": 34600,
+      "flushMs": 0.9849850000000001,
+      "msPerEdgeInBatch": 0.004924925
+    },
+    {
+      "batch": 174,
+      "totalEdgesBefore": 34800,
+      "flushMs": 1.007258,
+      "msPerEdgeInBatch": 0.00503629
+    },
+    {
+      "batch": 175,
+      "totalEdgesBefore": 35000,
+      "flushMs": 1.323692,
+      "msPerEdgeInBatch": 0.0066184600000000005
+    },
+    {
+      "batch": 176,
+      "totalEdgesBefore": 35200,
+      "flushMs": 1.443883,
+      "msPerEdgeInBatch": 0.007219415
+    },
+    {
+      "batch": 177,
+      "totalEdgesBefore": 35400,
+      "flushMs": 1.331787,
+      "msPerEdgeInBatch": 0.006658935
+    },
+    {
+      "batch": 178,
+      "totalEdgesBefore": 35600,
+      "flushMs": 1.265262,
+      "msPerEdgeInBatch": 0.006326310000000001
+    },
+    {
+      "batch": 179,
+      "totalEdgesBefore": 35800,
+      "flushMs": 1.222374,
+      "msPerEdgeInBatch": 0.00611187
+    },
+    {
+      "batch": 180,
+      "totalEdgesBefore": 36000,
+      "flushMs": 1.3188760000000002,
+      "msPerEdgeInBatch": 0.00659438
+    },
+    {
+      "batch": 181,
+      "totalEdgesBefore": 36200,
+      "flushMs": 1.2868389999999998,
+      "msPerEdgeInBatch": 0.006434194999999999
+    },
+    {
+      "batch": 182,
+      "totalEdgesBefore": 36400,
+      "flushMs": 1.3137699999999999,
+      "msPerEdgeInBatch": 0.006568849999999999
+    },
+    {
+      "batch": 183,
+      "totalEdgesBefore": 36600,
+      "flushMs": 1.385299,
+      "msPerEdgeInBatch": 0.006926495
+    },
+    {
+      "batch": 184,
+      "totalEdgesBefore": 36800,
+      "flushMs": 1.39417,
+      "msPerEdgeInBatch": 0.00697085
+    },
+    {
+      "batch": 185,
+      "totalEdgesBefore": 37000,
+      "flushMs": 1.42871,
+      "msPerEdgeInBatch": 0.007143549999999999
+    },
+    {
+      "batch": 186,
+      "totalEdgesBefore": 37200,
+      "flushMs": 1.43401,
+      "msPerEdgeInBatch": 0.00717005
+    },
+    {
+      "batch": 187,
+      "totalEdgesBefore": 37400,
+      "flushMs": 1.46037,
+      "msPerEdgeInBatch": 0.0073018499999999995
+    },
+    {
+      "batch": 188,
+      "totalEdgesBefore": 37600,
+      "flushMs": 1.4066269999999998,
+      "msPerEdgeInBatch": 0.007033134999999999
+    },
+    {
+      "batch": 189,
+      "totalEdgesBefore": 37800,
+      "flushMs": 1.3803960000000002,
+      "msPerEdgeInBatch": 0.006901980000000001
+    },
+    {
+      "batch": 190,
+      "totalEdgesBefore": 38000,
+      "flushMs": 1.358466,
+      "msPerEdgeInBatch": 0.00679233
+    },
+    {
+      "batch": 191,
+      "totalEdgesBefore": 38200,
+      "flushMs": 1.446281,
+      "msPerEdgeInBatch": 0.007231405
+    },
+    {
+      "batch": 192,
+      "totalEdgesBefore": 38400,
+      "flushMs": 1.3713950000000001,
+      "msPerEdgeInBatch": 0.006856975
+    },
+    {
+      "batch": 193,
+      "totalEdgesBefore": 38600,
+      "flushMs": 1.343489,
+      "msPerEdgeInBatch": 0.006717445
+    },
+    {
+      "batch": 194,
+      "totalEdgesBefore": 38800,
+      "flushMs": 1.4430910000000001,
+      "msPerEdgeInBatch": 0.007215455000000001
+    },
+    {
+      "batch": 195,
+      "totalEdgesBefore": 39000,
+      "flushMs": 1.397427,
+      "msPerEdgeInBatch": 0.006987135
+    },
+    {
+      "batch": 196,
+      "totalEdgesBefore": 39200,
+      "flushMs": 1.365391,
+      "msPerEdgeInBatch": 0.006826955
+    },
+    {
+      "batch": 197,
+      "totalEdgesBefore": 39400,
+      "flushMs": 1.539752,
+      "msPerEdgeInBatch": 0.00769876
+    },
+    {
+      "batch": 198,
+      "totalEdgesBefore": 39600,
+      "flushMs": 1.706864,
+      "msPerEdgeInBatch": 0.00853432
+    },
+    {
+      "batch": 199,
+      "totalEdgesBefore": 39800,
+      "flushMs": 1.637726,
+      "msPerEdgeInBatch": 0.00818863
+    },
+    {
+      "batch": 200,
+      "totalEdgesBefore": 40000,
+      "flushMs": 1.141256,
+      "msPerEdgeInBatch": 0.00570628
+    },
+    {
+      "batch": 201,
+      "totalEdgesBefore": 40200,
+      "flushMs": 1.083716,
+      "msPerEdgeInBatch": 0.005418579999999999
+    },
+    {
+      "batch": 202,
+      "totalEdgesBefore": 40400,
+      "flushMs": 1.057242,
+      "msPerEdgeInBatch": 0.00528621
+    },
+    {
+      "batch": 203,
+      "totalEdgesBefore": 40600,
+      "flushMs": 0.9779800000000001,
+      "msPerEdgeInBatch": 0.0048899
+    },
+    {
+      "batch": 204,
+      "totalEdgesBefore": 40800,
+      "flushMs": 0.9823799999999999,
+      "msPerEdgeInBatch": 0.004911899999999999
+    },
+    {
+      "batch": 205,
+      "totalEdgesBefore": 41000,
+      "flushMs": 1.007441,
+      "msPerEdgeInBatch": 0.005037205
+    },
+    {
+      "batch": 206,
+      "totalEdgesBefore": 41200,
+      "flushMs": 1.018618,
+      "msPerEdgeInBatch": 0.00509309
+    },
+    {
+      "batch": 207,
+      "totalEdgesBefore": 41400,
+      "flushMs": 1.007002,
+      "msPerEdgeInBatch": 0.0050350099999999995
+    },
+    {
+      "batch": 208,
+      "totalEdgesBefore": 41600,
+      "flushMs": 1.0179500000000001,
+      "msPerEdgeInBatch": 0.0050897500000000005
+    },
+    {
+      "batch": 209,
+      "totalEdgesBefore": 41800,
+      "flushMs": 1.008646,
+      "msPerEdgeInBatch": 0.005043229999999999
+    },
+    {
+      "batch": 210,
+      "totalEdgesBefore": 42000,
+      "flushMs": 1.009975,
+      "msPerEdgeInBatch": 0.0050498750000000005
+    },
+    {
+      "batch": 211,
+      "totalEdgesBefore": 42200,
+      "flushMs": 1.04282,
+      "msPerEdgeInBatch": 0.0052141
+    },
+    {
+      "batch": 212,
+      "totalEdgesBefore": 42400,
+      "flushMs": 1.064847,
+      "msPerEdgeInBatch": 0.005324235
+    },
+    {
+      "batch": 213,
+      "totalEdgesBefore": 42600,
+      "flushMs": 1.032202,
+      "msPerEdgeInBatch": 0.005161010000000001
+    },
+    {
+      "batch": 214,
+      "totalEdgesBefore": 42800,
+      "flushMs": 1.0136290000000001,
+      "msPerEdgeInBatch": 0.0050681450000000005
+    },
+    {
+      "batch": 215,
+      "totalEdgesBefore": 43000,
+      "flushMs": 1.030675,
+      "msPerEdgeInBatch": 0.005153375
+    },
+    {
+      "batch": 216,
+      "totalEdgesBefore": 43200,
+      "flushMs": 0.995578,
+      "msPerEdgeInBatch": 0.00497789
+    },
+    {
+      "batch": 217,
+      "totalEdgesBefore": 43400,
+      "flushMs": 0.9837750000000001,
+      "msPerEdgeInBatch": 0.0049188750000000005
+    },
+    {
+      "batch": 218,
+      "totalEdgesBefore": 43600,
+      "flushMs": 1.021318,
+      "msPerEdgeInBatch": 0.005106589999999999
+    },
+    {
+      "batch": 219,
+      "totalEdgesBefore": 43800,
+      "flushMs": 0.990699,
+      "msPerEdgeInBatch": 0.004953495
+    },
+    {
+      "batch": 220,
+      "totalEdgesBefore": 44000,
+      "flushMs": 1.019707,
+      "msPerEdgeInBatch": 0.0050985349999999995
+    },
+    {
+      "batch": 221,
+      "totalEdgesBefore": 44200,
+      "flushMs": 1.0174649999999998,
+      "msPerEdgeInBatch": 0.005087324999999999
+    },
+    {
+      "batch": 222,
+      "totalEdgesBefore": 44400,
+      "flushMs": 1.010186,
+      "msPerEdgeInBatch": 0.00505093
+    },
+    {
+      "batch": 223,
+      "totalEdgesBefore": 44600,
+      "flushMs": 1.016715,
+      "msPerEdgeInBatch": 0.005083575
+    },
+    {
+      "batch": 224,
+      "totalEdgesBefore": 44800,
+      "flushMs": 1.032727,
+      "msPerEdgeInBatch": 0.005163635
+    },
+    {
+      "batch": 225,
+      "totalEdgesBefore": 45000,
+      "flushMs": 1.0101529999999999,
+      "msPerEdgeInBatch": 0.005050765
+    },
+    {
+      "batch": 226,
+      "totalEdgesBefore": 45200,
+      "flushMs": 0.97964,
+      "msPerEdgeInBatch": 0.0048982
+    },
+    {
+      "batch": 227,
+      "totalEdgesBefore": 45400,
+      "flushMs": 1.040813,
+      "msPerEdgeInBatch": 0.005204065
+    },
+    {
+      "batch": 228,
+      "totalEdgesBefore": 45600,
+      "flushMs": 0.976146,
+      "msPerEdgeInBatch": 0.00488073
+    },
+    {
+      "batch": 229,
+      "totalEdgesBefore": 45800,
+      "flushMs": 0.964183,
+      "msPerEdgeInBatch": 0.004820915
+    },
+    {
+      "batch": 230,
+      "totalEdgesBefore": 46000,
+      "flushMs": 1.028887,
+      "msPerEdgeInBatch": 0.005144435
+    },
+    {
+      "batch": 231,
+      "totalEdgesBefore": 46200,
+      "flushMs": 1.049847,
+      "msPerEdgeInBatch": 0.005249235
+    },
+    {
+      "batch": 232,
+      "totalEdgesBefore": 46400,
+      "flushMs": 0.9796349999999999,
+      "msPerEdgeInBatch": 0.004898174999999999
+    },
+    {
+      "batch": 233,
+      "totalEdgesBefore": 46600,
+      "flushMs": 0.9955210000000001,
+      "msPerEdgeInBatch": 0.004977605
+    },
+    {
+      "batch": 234,
+      "totalEdgesBefore": 46800,
+      "flushMs": 0.9855910000000001,
+      "msPerEdgeInBatch": 0.004927955
+    },
+    {
+      "batch": 235,
+      "totalEdgesBefore": 47000,
+      "flushMs": 0.975678,
+      "msPerEdgeInBatch": 0.00487839
+    },
+    {
+      "batch": 236,
+      "totalEdgesBefore": 47200,
+      "flushMs": 1.0009439999999998,
+      "msPerEdgeInBatch": 0.005004719999999999
+    },
+    {
+      "batch": 237,
+      "totalEdgesBefore": 47400,
+      "flushMs": 1.01352,
+      "msPerEdgeInBatch": 0.0050676
+    },
+    {
+      "batch": 238,
+      "totalEdgesBefore": 47600,
+      "flushMs": 0.9894470000000001,
+      "msPerEdgeInBatch": 0.004947235
+    },
+    {
+      "batch": 239,
+      "totalEdgesBefore": 47800,
+      "flushMs": 1.001217,
+      "msPerEdgeInBatch": 0.005006085
+    },
+    {
+      "batch": 240,
+      "totalEdgesBefore": 48000,
+      "flushMs": 0.9982089999999999,
+      "msPerEdgeInBatch": 0.0049910449999999995
+    },
+    {
+      "batch": 241,
+      "totalEdgesBefore": 48200,
+      "flushMs": 1.01924,
+      "msPerEdgeInBatch": 0.0050961999999999995
+    },
+    {
+      "batch": 242,
+      "totalEdgesBefore": 48400,
+      "flushMs": 0.985707,
+      "msPerEdgeInBatch": 0.004928535
+    },
+    {
+      "batch": 243,
+      "totalEdgesBefore": 48600,
+      "flushMs": 0.9887889999999999,
+      "msPerEdgeInBatch": 0.004943945
+    },
+    {
+      "batch": 244,
+      "totalEdgesBefore": 48800,
+      "flushMs": 0.982,
+      "msPerEdgeInBatch": 0.00491
+    },
+    {
+      "batch": 245,
+      "totalEdgesBefore": 49000,
+      "flushMs": 1.017352,
+      "msPerEdgeInBatch": 0.00508676
+    },
+    {
+      "batch": 246,
+      "totalEdgesBefore": 49200,
+      "flushMs": 1.002145,
+      "msPerEdgeInBatch": 0.005010725000000001
+    },
+    {
+      "batch": 247,
+      "totalEdgesBefore": 49400,
+      "flushMs": 1.002951,
+      "msPerEdgeInBatch": 0.005014754999999999
+    },
+    {
+      "batch": 248,
+      "totalEdgesBefore": 49600,
+      "flushMs": 0.9969359999999999,
+      "msPerEdgeInBatch": 0.00498468
+    },
+    {
+      "batch": 249,
+      "totalEdgesBefore": 49800,
+      "flushMs": 0.990653,
+      "msPerEdgeInBatch": 0.004953265
+    },
+    {
+      "batch": 250,
+      "totalEdgesBefore": 50000,
+      "flushMs": 1.028179,
+      "msPerEdgeInBatch": 0.0051408949999999995
+    },
+    {
+      "batch": 251,
+      "totalEdgesBefore": 50200,
+      "flushMs": 0.989331,
+      "msPerEdgeInBatch": 0.0049466549999999995
+    },
+    {
+      "batch": 252,
+      "totalEdgesBefore": 50400,
+      "flushMs": 0.996203,
+      "msPerEdgeInBatch": 0.004981015
+    },
+    {
+      "batch": 253,
+      "totalEdgesBefore": 50600,
+      "flushMs": 1.0123980000000001,
+      "msPerEdgeInBatch": 0.005061990000000001
+    },
+    {
+      "batch": 254,
+      "totalEdgesBefore": 50800,
+      "flushMs": 1.006016,
+      "msPerEdgeInBatch": 0.00503008
+    },
+    {
+      "batch": 255,
+      "totalEdgesBefore": 51000,
+      "flushMs": 0.989958,
+      "msPerEdgeInBatch": 0.00494979
+    },
+    {
+      "batch": 256,
+      "totalEdgesBefore": 51200,
+      "flushMs": 0.9965620000000001,
+      "msPerEdgeInBatch": 0.004982810000000001
+    },
+    {
+      "batch": 257,
+      "totalEdgesBefore": 51400,
+      "flushMs": 0.982491,
+      "msPerEdgeInBatch": 0.004912455
+    },
+    {
+      "batch": 258,
+      "totalEdgesBefore": 51600,
+      "flushMs": 0.992869,
+      "msPerEdgeInBatch": 0.004964345
+    },
+    {
+      "batch": 259,
+      "totalEdgesBefore": 51800,
+      "flushMs": 0.9733740000000001,
+      "msPerEdgeInBatch": 0.004866870000000001
+    },
+    {
+      "batch": 260,
+      "totalEdgesBefore": 52000,
+      "flushMs": 0.973009,
+      "msPerEdgeInBatch": 0.004865045
+    },
+    {
+      "batch": 261,
+      "totalEdgesBefore": 52200,
+      "flushMs": 0.991095,
+      "msPerEdgeInBatch": 0.004955475
+    },
+    {
+      "batch": 262,
+      "totalEdgesBefore": 52400,
+      "flushMs": 0.993669,
+      "msPerEdgeInBatch": 0.004968345
+    },
+    {
+      "batch": 263,
+      "totalEdgesBefore": 52600,
+      "flushMs": 0.98686,
+      "msPerEdgeInBatch": 0.0049343
+    },
+    {
+      "batch": 264,
+      "totalEdgesBefore": 52800,
+      "flushMs": 0.996693,
+      "msPerEdgeInBatch": 0.004983465
+    },
+    {
+      "batch": 265,
+      "totalEdgesBefore": 53000,
+      "flushMs": 1.0177319999999999,
+      "msPerEdgeInBatch": 0.005088659999999999
+    },
+    {
+      "batch": 266,
+      "totalEdgesBefore": 53200,
+      "flushMs": 1.0072919999999999,
+      "msPerEdgeInBatch": 0.0050364599999999995
+    },
+    {
+      "batch": 267,
+      "totalEdgesBefore": 53400,
+      "flushMs": 0.9839269999999999,
+      "msPerEdgeInBatch": 0.0049196349999999995
+    },
+    {
+      "batch": 268,
+      "totalEdgesBefore": 53600,
+      "flushMs": 0.9821179999999999,
+      "msPerEdgeInBatch": 0.004910589999999999
+    },
+    {
+      "batch": 269,
+      "totalEdgesBefore": 53800,
+      "flushMs": 0.9964259999999999,
+      "msPerEdgeInBatch": 0.0049821299999999995
+    },
+    {
+      "batch": 270,
+      "totalEdgesBefore": 54000,
+      "flushMs": 0.99241,
+      "msPerEdgeInBatch": 0.00496205
+    },
+    {
+      "batch": 271,
+      "totalEdgesBefore": 54200,
+      "flushMs": 0.985248,
+      "msPerEdgeInBatch": 0.00492624
+    },
+    {
+      "batch": 272,
+      "totalEdgesBefore": 54400,
+      "flushMs": 0.9834830000000001,
+      "msPerEdgeInBatch": 0.0049174150000000005
+    },
+    {
+      "batch": 273,
+      "totalEdgesBefore": 54600,
+      "flushMs": 0.9991760000000001,
+      "msPerEdgeInBatch": 0.00499588
+    },
+    {
+      "batch": 274,
+      "totalEdgesBefore": 54800,
+      "flushMs": 0.98898,
+      "msPerEdgeInBatch": 0.0049448999999999995
+    },
+    {
+      "batch": 275,
+      "totalEdgesBefore": 55000,
+      "flushMs": 1.0337210000000001,
+      "msPerEdgeInBatch": 0.005168605000000001
+    },
+    {
+      "batch": 276,
+      "totalEdgesBefore": 55200,
+      "flushMs": 0.993907,
+      "msPerEdgeInBatch": 0.004969535
+    },
+    {
+      "batch": 277,
+      "totalEdgesBefore": 55400,
+      "flushMs": 0.998479,
+      "msPerEdgeInBatch": 0.004992395
+    },
+    {
+      "batch": 278,
+      "totalEdgesBefore": 55600,
+      "flushMs": 1.00627,
+      "msPerEdgeInBatch": 0.00503135
+    },
+    {
+      "batch": 279,
+      "totalEdgesBefore": 55800,
+      "flushMs": 0.984802,
+      "msPerEdgeInBatch": 0.0049240099999999995
+    },
+    {
+      "batch": 280,
+      "totalEdgesBefore": 56000,
+      "flushMs": 1.0033889999999999,
+      "msPerEdgeInBatch": 0.005016944999999999
+    },
+    {
+      "batch": 281,
+      "totalEdgesBefore": 56200,
+      "flushMs": 1.0328819999999999,
+      "msPerEdgeInBatch": 0.0051644099999999995
+    },
+    {
+      "batch": 282,
+      "totalEdgesBefore": 56400,
+      "flushMs": 1.0209279999999998,
+      "msPerEdgeInBatch": 0.005104639999999999
+    },
+    {
+      "batch": 283,
+      "totalEdgesBefore": 56600,
+      "flushMs": 1.028391,
+      "msPerEdgeInBatch": 0.005141955
+    },
+    {
+      "batch": 284,
+      "totalEdgesBefore": 56800,
+      "flushMs": 1.003713,
+      "msPerEdgeInBatch": 0.005018565
+    },
+    {
+      "batch": 285,
+      "totalEdgesBefore": 57000,
+      "flushMs": 0.9797,
+      "msPerEdgeInBatch": 0.0048985
+    },
+    {
+      "batch": 286,
+      "totalEdgesBefore": 57200,
+      "flushMs": 20.789908,
+      "msPerEdgeInBatch": 0.10394954
+    },
+    {
+      "batch": 287,
+      "totalEdgesBefore": 57400,
+      "flushMs": 1.212529,
+      "msPerEdgeInBatch": 0.006062645
+    },
+    {
+      "batch": 288,
+      "totalEdgesBefore": 57600,
+      "flushMs": 1.129792,
+      "msPerEdgeInBatch": 0.00564896
+    },
+    {
+      "batch": 289,
+      "totalEdgesBefore": 57800,
+      "flushMs": 1.03127,
+      "msPerEdgeInBatch": 0.00515635
+    },
+    {
+      "batch": 290,
+      "totalEdgesBefore": 58000,
+      "flushMs": 1.1155279999999999,
+      "msPerEdgeInBatch": 0.005577639999999999
+    },
+    {
+      "batch": 291,
+      "totalEdgesBefore": 58200,
+      "flushMs": 1.086412,
+      "msPerEdgeInBatch": 0.00543206
+    },
+    {
+      "batch": 292,
+      "totalEdgesBefore": 58400,
+      "flushMs": 1.029751,
+      "msPerEdgeInBatch": 0.0051487550000000005
+    },
+    {
+      "batch": 293,
+      "totalEdgesBefore": 58600,
+      "flushMs": 1.50192,
+      "msPerEdgeInBatch": 0.0075096
+    },
+    {
+      "batch": 294,
+      "totalEdgesBefore": 58800,
+      "flushMs": 1.165829,
+      "msPerEdgeInBatch": 0.005829145
+    },
+    {
+      "batch": 295,
+      "totalEdgesBefore": 59000,
+      "flushMs": 1.114223,
+      "msPerEdgeInBatch": 0.005571115
+    },
+    {
+      "batch": 296,
+      "totalEdgesBefore": 59200,
+      "flushMs": 1.0945880000000001,
+      "msPerEdgeInBatch": 0.005472940000000001
+    },
+    {
+      "batch": 297,
+      "totalEdgesBefore": 59400,
+      "flushMs": 1.047891,
+      "msPerEdgeInBatch": 0.005239455
+    },
+    {
+      "batch": 298,
+      "totalEdgesBefore": 59600,
+      "flushMs": 1.0694560000000002,
+      "msPerEdgeInBatch": 0.005347280000000001
+    },
+    {
+      "batch": 299,
+      "totalEdgesBefore": 59800,
+      "flushMs": 1.020583,
+      "msPerEdgeInBatch": 0.005102915
+    },
+    {
+      "batch": 300,
+      "totalEdgesBefore": 60000,
+      "flushMs": 1.121215,
+      "msPerEdgeInBatch": 0.005606075
+    },
+    {
+      "batch": 301,
+      "totalEdgesBefore": 60200,
+      "flushMs": 1.026302,
+      "msPerEdgeInBatch": 0.005131510000000001
+    },
+    {
+      "batch": 302,
+      "totalEdgesBefore": 60400,
+      "flushMs": 1.068429,
+      "msPerEdgeInBatch": 0.005342145
+    },
+    {
+      "batch": 303,
+      "totalEdgesBefore": 60600,
+      "flushMs": 1.010869,
+      "msPerEdgeInBatch": 0.005054345
+    },
+    {
+      "batch": 304,
+      "totalEdgesBefore": 60800,
+      "flushMs": 1.0290110000000001,
+      "msPerEdgeInBatch": 0.005145055000000001
+    },
+    {
+      "batch": 305,
+      "totalEdgesBefore": 61000,
+      "flushMs": 1.029481,
+      "msPerEdgeInBatch": 0.005147405000000001
+    },
+    {
+      "batch": 306,
+      "totalEdgesBefore": 61200,
+      "flushMs": 1.04039,
+      "msPerEdgeInBatch": 0.0052019499999999995
+    },
+    {
+      "batch": 307,
+      "totalEdgesBefore": 61400,
+      "flushMs": 1.0057390000000002,
+      "msPerEdgeInBatch": 0.0050286950000000006
+    },
+    {
+      "batch": 308,
+      "totalEdgesBefore": 61600,
+      "flushMs": 0.9662229999999999,
+      "msPerEdgeInBatch": 0.0048311149999999995
+    },
+    {
+      "batch": 309,
+      "totalEdgesBefore": 61800,
+      "flushMs": 0.988559,
+      "msPerEdgeInBatch": 0.004942795
+    },
+    {
+      "batch": 310,
+      "totalEdgesBefore": 62000,
+      "flushMs": 1.03858,
+      "msPerEdgeInBatch": 0.0051929
+    },
+    {
+      "batch": 311,
+      "totalEdgesBefore": 62200,
+      "flushMs": 0.9724729999999999,
+      "msPerEdgeInBatch": 0.004862365
+    },
+    {
+      "batch": 312,
+      "totalEdgesBefore": 62400,
+      "flushMs": 0.9914609999999999,
+      "msPerEdgeInBatch": 0.0049573049999999995
+    },
+    {
+      "batch": 313,
+      "totalEdgesBefore": 62600,
+      "flushMs": 1.01268,
+      "msPerEdgeInBatch": 0.0050634
+    },
+    {
+      "batch": 314,
+      "totalEdgesBefore": 62800,
+      "flushMs": 1.065144,
+      "msPerEdgeInBatch": 0.005325720000000001
+    },
+    {
+      "batch": 315,
+      "totalEdgesBefore": 63000,
+      "flushMs": 1.0834620000000001,
+      "msPerEdgeInBatch": 0.005417310000000001
+    },
+    {
+      "batch": 316,
+      "totalEdgesBefore": 63200,
+      "flushMs": 1.053037,
+      "msPerEdgeInBatch": 0.005265185
+    },
+    {
+      "batch": 317,
+      "totalEdgesBefore": 63400,
+      "flushMs": 1.069207,
+      "msPerEdgeInBatch": 0.005346035
+    },
+    {
+      "batch": 318,
+      "totalEdgesBefore": 63600,
+      "flushMs": 1.064764,
+      "msPerEdgeInBatch": 0.00532382
+    },
+    {
+      "batch": 319,
+      "totalEdgesBefore": 63800,
+      "flushMs": 1.031302,
+      "msPerEdgeInBatch": 0.0051565099999999996
+    },
+    {
+      "batch": 320,
+      "totalEdgesBefore": 64000,
+      "flushMs": 1.0409869999999999,
+      "msPerEdgeInBatch": 0.005204934999999999
+    },
+    {
+      "batch": 321,
+      "totalEdgesBefore": 64200,
+      "flushMs": 1.038267,
+      "msPerEdgeInBatch": 0.005191335
+    },
+    {
+      "batch": 322,
+      "totalEdgesBefore": 64400,
+      "flushMs": 1.0345179999999998,
+      "msPerEdgeInBatch": 0.0051725899999999995
+    },
+    {
+      "batch": 323,
+      "totalEdgesBefore": 64600,
+      "flushMs": 1.039772,
+      "msPerEdgeInBatch": 0.00519886
+    },
+    {
+      "batch": 324,
+      "totalEdgesBefore": 64800,
+      "flushMs": 1.029402,
+      "msPerEdgeInBatch": 0.00514701
+    },
+    {
+      "batch": 325,
+      "totalEdgesBefore": 65000,
+      "flushMs": 1.069498,
+      "msPerEdgeInBatch": 0.00534749
+    },
+    {
+      "batch": 326,
+      "totalEdgesBefore": 65200,
+      "flushMs": 1.0553430000000001,
+      "msPerEdgeInBatch": 0.005276715
+    },
+    {
+      "batch": 327,
+      "totalEdgesBefore": 65400,
+      "flushMs": 1.0376999999999998,
+      "msPerEdgeInBatch": 0.0051884999999999995
+    },
+    {
+      "batch": 328,
+      "totalEdgesBefore": 65600,
+      "flushMs": 1.035252,
+      "msPerEdgeInBatch": 0.00517626
+    },
+    {
+      "batch": 329,
+      "totalEdgesBefore": 65800,
+      "flushMs": 1.014583,
+      "msPerEdgeInBatch": 0.005072915
+    },
+    {
+      "batch": 330,
+      "totalEdgesBefore": 66000,
+      "flushMs": 1.0526909999999998,
+      "msPerEdgeInBatch": 0.005263454999999999
+    },
+    {
+      "batch": 331,
+      "totalEdgesBefore": 66200,
+      "flushMs": 1.059801,
+      "msPerEdgeInBatch": 0.005299005
+    },
+    {
+      "batch": 332,
+      "totalEdgesBefore": 66400,
+      "flushMs": 1.053551,
+      "msPerEdgeInBatch": 0.005267755
+    },
+    {
+      "batch": 333,
+      "totalEdgesBefore": 66600,
+      "flushMs": 1.039871,
+      "msPerEdgeInBatch": 0.005199355
+    },
+    {
+      "batch": 334,
+      "totalEdgesBefore": 66800,
+      "flushMs": 1.0230409999999999,
+      "msPerEdgeInBatch": 0.005115204999999999
+    },
+    {
+      "batch": 335,
+      "totalEdgesBefore": 67000,
+      "flushMs": 1.0185170000000001,
+      "msPerEdgeInBatch": 0.005092585
+    },
+    {
+      "batch": 336,
+      "totalEdgesBefore": 67200,
+      "flushMs": 1.023358,
+      "msPerEdgeInBatch": 0.0051167899999999995
+    },
+    {
+      "batch": 337,
+      "totalEdgesBefore": 67400,
+      "flushMs": 1.024084,
+      "msPerEdgeInBatch": 0.00512042
+    },
+    {
+      "batch": 338,
+      "totalEdgesBefore": 67600,
+      "flushMs": 1.0237939999999999,
+      "msPerEdgeInBatch": 0.00511897
+    },
+    {
+      "batch": 339,
+      "totalEdgesBefore": 67800,
+      "flushMs": 1.009861,
+      "msPerEdgeInBatch": 0.005049305
+    },
+    {
+      "batch": 340,
+      "totalEdgesBefore": 68000,
+      "flushMs": 1.014463,
+      "msPerEdgeInBatch": 0.005072314999999999
+    },
+    {
+      "batch": 341,
+      "totalEdgesBefore": 68200,
+      "flushMs": 1.0362010000000001,
+      "msPerEdgeInBatch": 0.005181005000000001
+    },
+    {
+      "batch": 342,
+      "totalEdgesBefore": 68400,
+      "flushMs": 1.0093509999999999,
+      "msPerEdgeInBatch": 0.005046754999999999
+    },
+    {
+      "batch": 343,
+      "totalEdgesBefore": 68600,
+      "flushMs": 1.011848,
+      "msPerEdgeInBatch": 0.0050592400000000004
+    },
+    {
+      "batch": 344,
+      "totalEdgesBefore": 68800,
+      "flushMs": 0.9950950000000001,
+      "msPerEdgeInBatch": 0.004975475
+    },
+    {
+      "batch": 345,
+      "totalEdgesBefore": 69000,
+      "flushMs": 1.022123,
+      "msPerEdgeInBatch": 0.005110615
+    },
+    {
+      "batch": 346,
+      "totalEdgesBefore": 69200,
+      "flushMs": 1.0170979999999998,
+      "msPerEdgeInBatch": 0.005085489999999999
+    },
+    {
+      "batch": 347,
+      "totalEdgesBefore": 69400,
+      "flushMs": 1.0172569999999999,
+      "msPerEdgeInBatch": 0.005086284999999999
+    },
+    {
+      "batch": 348,
+      "totalEdgesBefore": 69600,
+      "flushMs": 1.029523,
+      "msPerEdgeInBatch": 0.0051476149999999995
+    },
+    {
+      "batch": 349,
+      "totalEdgesBefore": 69800,
+      "flushMs": 1.0555379999999999,
+      "msPerEdgeInBatch": 0.005277689999999999
+    },
+    {
+      "batch": 350,
+      "totalEdgesBefore": 70000,
+      "flushMs": 1.727845,
+      "msPerEdgeInBatch": 0.008639225
+    },
+    {
+      "batch": 351,
+      "totalEdgesBefore": 70200,
+      "flushMs": 1.781646,
+      "msPerEdgeInBatch": 0.00890823
+    },
+    {
+      "batch": 352,
+      "totalEdgesBefore": 70400,
+      "flushMs": 1.760508,
+      "msPerEdgeInBatch": 0.00880254
+    },
+    {
+      "batch": 353,
+      "totalEdgesBefore": 70600,
+      "flushMs": 1.750012,
+      "msPerEdgeInBatch": 0.008750059999999999
+    },
+    {
+      "batch": 354,
+      "totalEdgesBefore": 70800,
+      "flushMs": 1.723324,
+      "msPerEdgeInBatch": 0.00861662
+    },
+    {
+      "batch": 355,
+      "totalEdgesBefore": 71000,
+      "flushMs": 1.839727,
+      "msPerEdgeInBatch": 0.009198635
+    },
+    {
+      "batch": 356,
+      "totalEdgesBefore": 71200,
+      "flushMs": 1.806777,
+      "msPerEdgeInBatch": 0.009033885
+    },
+    {
+      "batch": 357,
+      "totalEdgesBefore": 71400,
+      "flushMs": 1.8221990000000001,
+      "msPerEdgeInBatch": 0.009110995
+    },
+    {
+      "batch": 358,
+      "totalEdgesBefore": 71600,
+      "flushMs": 1.814422,
+      "msPerEdgeInBatch": 0.00907211
+    },
+    {
+      "batch": 359,
+      "totalEdgesBefore": 71800,
+      "flushMs": 1.760054,
+      "msPerEdgeInBatch": 0.00880027
+    },
+    {
+      "batch": 360,
+      "totalEdgesBefore": 72000,
+      "flushMs": 1.7644,
+      "msPerEdgeInBatch": 0.008822
+    },
+    {
+      "batch": 361,
+      "totalEdgesBefore": 72200,
+      "flushMs": 1.871349,
+      "msPerEdgeInBatch": 0.009356745
+    },
+    {
+      "batch": 362,
+      "totalEdgesBefore": 72400,
+      "flushMs": 1.838771,
+      "msPerEdgeInBatch": 0.009193854999999999
+    },
+    {
+      "batch": 363,
+      "totalEdgesBefore": 72600,
+      "flushMs": 1.827078,
+      "msPerEdgeInBatch": 0.00913539
+    },
+    {
+      "batch": 364,
+      "totalEdgesBefore": 72800,
+      "flushMs": 1.790358,
+      "msPerEdgeInBatch": 0.00895179
+    },
+    {
+      "batch": 365,
+      "totalEdgesBefore": 73000,
+      "flushMs": 1.835026,
+      "msPerEdgeInBatch": 0.00917513
+    },
+    {
+      "batch": 366,
+      "totalEdgesBefore": 73200,
+      "flushMs": 1.782795,
+      "msPerEdgeInBatch": 0.008913975
+    },
+    {
+      "batch": 367,
+      "totalEdgesBefore": 73400,
+      "flushMs": 1.8951479999999998,
+      "msPerEdgeInBatch": 0.00947574
+    },
+    {
+      "batch": 368,
+      "totalEdgesBefore": 73600,
+      "flushMs": 1.862605,
+      "msPerEdgeInBatch": 0.009313025
+    },
+    {
+      "batch": 369,
+      "totalEdgesBefore": 73800,
+      "flushMs": 1.9456289999999998,
+      "msPerEdgeInBatch": 0.009728144999999999
+    },
+    {
+      "batch": 370,
+      "totalEdgesBefore": 74000,
+      "flushMs": 1.965461,
+      "msPerEdgeInBatch": 0.009827305
+    },
+    {
+      "batch": 371,
+      "totalEdgesBefore": 74200,
+      "flushMs": 2.130398,
+      "msPerEdgeInBatch": 0.01065199
+    },
+    {
+      "batch": 372,
+      "totalEdgesBefore": 74400,
+      "flushMs": 1.9540529999999998,
+      "msPerEdgeInBatch": 0.009770264999999998
+    },
+    {
+      "batch": 373,
+      "totalEdgesBefore": 74600,
+      "flushMs": 2.0448020000000002,
+      "msPerEdgeInBatch": 0.01022401
+    },
+    {
+      "batch": 374,
+      "totalEdgesBefore": 74800,
+      "flushMs": 1.9934710000000002,
+      "msPerEdgeInBatch": 0.009967355
+    },
+    {
+      "batch": 375,
+      "totalEdgesBefore": 75000,
+      "flushMs": 1.287711,
+      "msPerEdgeInBatch": 0.006438555
+    },
+    {
+      "batch": 376,
+      "totalEdgesBefore": 75200,
+      "flushMs": 1.181681,
+      "msPerEdgeInBatch": 0.005908405
+    },
+    {
+      "batch": 377,
+      "totalEdgesBefore": 75400,
+      "flushMs": 1.129867,
+      "msPerEdgeInBatch": 0.005649335
+    },
+    {
+      "batch": 378,
+      "totalEdgesBefore": 75600,
+      "flushMs": 1.129333,
+      "msPerEdgeInBatch": 0.0056466649999999995
+    },
+    {
+      "batch": 379,
+      "totalEdgesBefore": 75800,
+      "flushMs": 1.078072,
+      "msPerEdgeInBatch": 0.005390359999999999
+    },
+    {
+      "batch": 380,
+      "totalEdgesBefore": 76000,
+      "flushMs": 1.074541,
+      "msPerEdgeInBatch": 0.005372705
+    },
+    {
+      "batch": 381,
+      "totalEdgesBefore": 76200,
+      "flushMs": 1.066898,
+      "msPerEdgeInBatch": 0.00533449
+    },
+    {
+      "batch": 382,
+      "totalEdgesBefore": 76400,
+      "flushMs": 1.056897,
+      "msPerEdgeInBatch": 0.005284485
+    },
+    {
+      "batch": 383,
+      "totalEdgesBefore": 76600,
+      "flushMs": 1.062946,
+      "msPerEdgeInBatch": 0.00531473
+    },
+    {
+      "batch": 384,
+      "totalEdgesBefore": 76800,
+      "flushMs": 1.0897240000000001,
+      "msPerEdgeInBatch": 0.00544862
+    },
+    {
+      "batch": 385,
+      "totalEdgesBefore": 77000,
+      "flushMs": 1.040643,
+      "msPerEdgeInBatch": 0.005203215
+    },
+    {
+      "batch": 386,
+      "totalEdgesBefore": 77200,
+      "flushMs": 1.079994,
+      "msPerEdgeInBatch": 0.00539997
+    },
+    {
+      "batch": 387,
+      "totalEdgesBefore": 77400,
+      "flushMs": 1.062069,
+      "msPerEdgeInBatch": 0.005310344999999999
+    },
+    {
+      "batch": 388,
+      "totalEdgesBefore": 77600,
+      "flushMs": 1.056263,
+      "msPerEdgeInBatch": 0.005281315
+    },
+    {
+      "batch": 389,
+      "totalEdgesBefore": 77800,
+      "flushMs": 1.034178,
+      "msPerEdgeInBatch": 0.00517089
+    },
+    {
+      "batch": 390,
+      "totalEdgesBefore": 78000,
+      "flushMs": 1.031903,
+      "msPerEdgeInBatch": 0.005159515
+    },
+    {
+      "batch": 391,
+      "totalEdgesBefore": 78200,
+      "flushMs": 1.022345,
+      "msPerEdgeInBatch": 0.005111725
+    },
+    {
+      "batch": 392,
+      "totalEdgesBefore": 78400,
+      "flushMs": 1.248617,
+      "msPerEdgeInBatch": 0.006243085000000001
+    },
+    {
+      "batch": 393,
+      "totalEdgesBefore": 78600,
+      "flushMs": 1.0223820000000001,
+      "msPerEdgeInBatch": 0.005111910000000001
+    },
+    {
+      "batch": 394,
+      "totalEdgesBefore": 78800,
+      "flushMs": 1.035646,
+      "msPerEdgeInBatch": 0.005178230000000001
+    },
+    {
+      "batch": 395,
+      "totalEdgesBefore": 79000,
+      "flushMs": 1.062208,
+      "msPerEdgeInBatch": 0.00531104
+    },
+    {
+      "batch": 396,
+      "totalEdgesBefore": 79200,
+      "flushMs": 1.059118,
+      "msPerEdgeInBatch": 0.00529559
+    },
+    {
+      "batch": 397,
+      "totalEdgesBefore": 79400,
+      "flushMs": 1.036976,
+      "msPerEdgeInBatch": 0.005184879999999999
+    },
+    {
+      "batch": 398,
+      "totalEdgesBefore": 79600,
+      "flushMs": 1.042092,
+      "msPerEdgeInBatch": 0.00521046
+    },
+    {
+      "batch": 399,
+      "totalEdgesBefore": 79800,
+      "flushMs": 1.039148,
+      "msPerEdgeInBatch": 0.00519574
+    },
+    {
+      "batch": 400,
+      "totalEdgesBefore": 80000,
+      "flushMs": 1.070144,
+      "msPerEdgeInBatch": 0.00535072
+    },
+    {
+      "batch": 401,
+      "totalEdgesBefore": 80200,
+      "flushMs": 1.024582,
+      "msPerEdgeInBatch": 0.0051229100000000005
+    },
+    {
+      "batch": 402,
+      "totalEdgesBefore": 80400,
+      "flushMs": 1.018424,
+      "msPerEdgeInBatch": 0.00509212
+    },
+    {
+      "batch": 403,
+      "totalEdgesBefore": 80600,
+      "flushMs": 1.019941,
+      "msPerEdgeInBatch": 0.0050997049999999995
+    },
+    {
+      "batch": 404,
+      "totalEdgesBefore": 80800,
+      "flushMs": 1.025918,
+      "msPerEdgeInBatch": 0.005129590000000001
+    },
+    {
+      "batch": 405,
+      "totalEdgesBefore": 81000,
+      "flushMs": 1.033682,
+      "msPerEdgeInBatch": 0.00516841
+    },
+    {
+      "batch": 406,
+      "totalEdgesBefore": 81200,
+      "flushMs": 1.060353,
+      "msPerEdgeInBatch": 0.005301765000000001
+    },
+    {
+      "batch": 407,
+      "totalEdgesBefore": 81400,
+      "flushMs": 1.022581,
+      "msPerEdgeInBatch": 0.005112905
+    },
+    {
+      "batch": 408,
+      "totalEdgesBefore": 81600,
+      "flushMs": 1.041637,
+      "msPerEdgeInBatch": 0.005208185
+    },
+    {
+      "batch": 409,
+      "totalEdgesBefore": 81800,
+      "flushMs": 1.035669,
+      "msPerEdgeInBatch": 0.005178345
+    },
+    {
+      "batch": 410,
+      "totalEdgesBefore": 82000,
+      "flushMs": 1.0100230000000001,
+      "msPerEdgeInBatch": 0.005050115000000001
+    },
+    {
+      "batch": 411,
+      "totalEdgesBefore": 82200,
+      "flushMs": 1.0261319999999998,
+      "msPerEdgeInBatch": 0.005130659999999999
+    },
+    {
+      "batch": 412,
+      "totalEdgesBefore": 82400,
+      "flushMs": 1.020935,
+      "msPerEdgeInBatch": 0.0051046749999999995
+    },
+    {
+      "batch": 413,
+      "totalEdgesBefore": 82600,
+      "flushMs": 1.033523,
+      "msPerEdgeInBatch": 0.0051676149999999995
+    },
+    {
+      "batch": 414,
+      "totalEdgesBefore": 82800,
+      "flushMs": 1.0274800000000002,
+      "msPerEdgeInBatch": 0.005137400000000001
+    },
+    {
+      "batch": 415,
+      "totalEdgesBefore": 83000,
+      "flushMs": 1.001752,
+      "msPerEdgeInBatch": 0.00500876
+    },
+    {
+      "batch": 416,
+      "totalEdgesBefore": 83200,
+      "flushMs": 1.016031,
+      "msPerEdgeInBatch": 0.005080154999999999
+    },
+    {
+      "batch": 417,
+      "totalEdgesBefore": 83400,
+      "flushMs": 1.012447,
+      "msPerEdgeInBatch": 0.005062235000000001
+    },
+    {
+      "batch": 418,
+      "totalEdgesBefore": 83600,
+      "flushMs": 1.014634,
+      "msPerEdgeInBatch": 0.00507317
+    },
+    {
+      "batch": 419,
+      "totalEdgesBefore": 83800,
+      "flushMs": 1.029877,
+      "msPerEdgeInBatch": 0.005149384999999999
+    },
+    {
+      "batch": 420,
+      "totalEdgesBefore": 84000,
+      "flushMs": 1.032476,
+      "msPerEdgeInBatch": 0.005162379999999999
+    },
+    {
+      "batch": 421,
+      "totalEdgesBefore": 84200,
+      "flushMs": 1.031015,
+      "msPerEdgeInBatch": 0.005155075
+    },
+    {
+      "batch": 422,
+      "totalEdgesBefore": 84400,
+      "flushMs": 1.0314,
+      "msPerEdgeInBatch": 0.005157
+    },
+    {
+      "batch": 423,
+      "totalEdgesBefore": 84600,
+      "flushMs": 1.027388,
+      "msPerEdgeInBatch": 0.0051369399999999996
+    },
+    {
+      "batch": 424,
+      "totalEdgesBefore": 84800,
+      "flushMs": 1.039469,
+      "msPerEdgeInBatch": 0.005197345
+    },
+    {
+      "batch": 425,
+      "totalEdgesBefore": 85000,
+      "flushMs": 1.048497,
+      "msPerEdgeInBatch": 0.005242485
+    },
+    {
+      "batch": 426,
+      "totalEdgesBefore": 85200,
+      "flushMs": 1.028189,
+      "msPerEdgeInBatch": 0.005140945
+    },
+    {
+      "batch": 427,
+      "totalEdgesBefore": 85400,
+      "flushMs": 1.014702,
+      "msPerEdgeInBatch": 0.00507351
+    },
+    {
+      "batch": 428,
+      "totalEdgesBefore": 85600,
+      "flushMs": 1.02664,
+      "msPerEdgeInBatch": 0.0051332
+    },
+    {
+      "batch": 429,
+      "totalEdgesBefore": 85800,
+      "flushMs": 1.017298,
+      "msPerEdgeInBatch": 0.00508649
+    },
+    {
+      "batch": 430,
+      "totalEdgesBefore": 86000,
+      "flushMs": 1.021009,
+      "msPerEdgeInBatch": 0.005105045
+    },
+    {
+      "batch": 431,
+      "totalEdgesBefore": 86200,
+      "flushMs": 1.0333549999999998,
+      "msPerEdgeInBatch": 0.005166774999999999
+    },
+    {
+      "batch": 432,
+      "totalEdgesBefore": 86400,
+      "flushMs": 1.016664,
+      "msPerEdgeInBatch": 0.00508332
+    },
+    {
+      "batch": 433,
+      "totalEdgesBefore": 86600,
+      "flushMs": 1.086359,
+      "msPerEdgeInBatch": 0.0054317950000000005
+    },
+    {
+      "batch": 434,
+      "totalEdgesBefore": 86800,
+      "flushMs": 0.9991329999999999,
+      "msPerEdgeInBatch": 0.004995665
+    },
+    {
+      "batch": 435,
+      "totalEdgesBefore": 87000,
+      "flushMs": 1.0154400000000001,
+      "msPerEdgeInBatch": 0.0050772000000000005
+    },
+    {
+      "batch": 436,
+      "totalEdgesBefore": 87200,
+      "flushMs": 1.0628879999999998,
+      "msPerEdgeInBatch": 0.005314439999999999
+    },
+    {
+      "batch": 437,
+      "totalEdgesBefore": 87400,
+      "flushMs": 1.041112,
+      "msPerEdgeInBatch": 0.005205560000000001
+    },
+    {
+      "batch": 438,
+      "totalEdgesBefore": 87600,
+      "flushMs": 1.048656,
+      "msPerEdgeInBatch": 0.00524328
+    },
+    {
+      "batch": 439,
+      "totalEdgesBefore": 87800,
+      "flushMs": 1.054685,
+      "msPerEdgeInBatch": 0.005273425000000001
+    },
+    {
+      "batch": 440,
+      "totalEdgesBefore": 88000,
+      "flushMs": 1.390994,
+      "msPerEdgeInBatch": 0.00695497
+    },
+    {
+      "batch": 441,
+      "totalEdgesBefore": 88200,
+      "flushMs": 1.092797,
+      "msPerEdgeInBatch": 0.005463985
+    },
+    {
+      "batch": 442,
+      "totalEdgesBefore": 88400,
+      "flushMs": 1.098348,
+      "msPerEdgeInBatch": 0.00549174
+    },
+    {
+      "batch": 443,
+      "totalEdgesBefore": 88600,
+      "flushMs": 1.106712,
+      "msPerEdgeInBatch": 0.00553356
+    },
+    {
+      "batch": 444,
+      "totalEdgesBefore": 88800,
+      "flushMs": 1.115184,
+      "msPerEdgeInBatch": 0.00557592
+    },
+    {
+      "batch": 445,
+      "totalEdgesBefore": 89000,
+      "flushMs": 1.098366,
+      "msPerEdgeInBatch": 0.00549183
+    },
+    {
+      "batch": 446,
+      "totalEdgesBefore": 89200,
+      "flushMs": 1.091825,
+      "msPerEdgeInBatch": 0.0054591250000000004
+    },
+    {
+      "batch": 447,
+      "totalEdgesBefore": 89400,
+      "flushMs": 1.0627950000000002,
+      "msPerEdgeInBatch": 0.005313975000000001
+    },
+    {
+      "batch": 448,
+      "totalEdgesBefore": 89600,
+      "flushMs": 1.069429,
+      "msPerEdgeInBatch": 0.005347145
+    },
+    {
+      "batch": 449,
+      "totalEdgesBefore": 89800,
+      "flushMs": 1.063434,
+      "msPerEdgeInBatch": 0.0053171699999999995
+    },
+    {
+      "batch": 450,
+      "totalEdgesBefore": 90000,
+      "flushMs": 1.079145,
+      "msPerEdgeInBatch": 0.0053957250000000005
+    },
+    {
+      "batch": 451,
+      "totalEdgesBefore": 90200,
+      "flushMs": 1.077803,
+      "msPerEdgeInBatch": 0.0053890150000000005
+    },
+    {
+      "batch": 452,
+      "totalEdgesBefore": 90400,
+      "flushMs": 1.045481,
+      "msPerEdgeInBatch": 0.005227405000000001
+    },
+    {
+      "batch": 453,
+      "totalEdgesBefore": 90600,
+      "flushMs": 1.054009,
+      "msPerEdgeInBatch": 0.005270045
+    },
+    {
+      "batch": 454,
+      "totalEdgesBefore": 90800,
+      "flushMs": 1.059467,
+      "msPerEdgeInBatch": 0.005297334999999999
+    },
+    {
+      "batch": 455,
+      "totalEdgesBefore": 91000,
+      "flushMs": 1.0579669999999999,
+      "msPerEdgeInBatch": 0.005289835
+    },
+    {
+      "batch": 456,
+      "totalEdgesBefore": 91200,
+      "flushMs": 1.061207,
+      "msPerEdgeInBatch": 0.005306035
+    },
+    {
+      "batch": 457,
+      "totalEdgesBefore": 91400,
+      "flushMs": 1.041064,
+      "msPerEdgeInBatch": 0.00520532
+    },
+    {
+      "batch": 458,
+      "totalEdgesBefore": 91600,
+      "flushMs": 1.035739,
+      "msPerEdgeInBatch": 0.005178695
+    },
+    {
+      "batch": 459,
+      "totalEdgesBefore": 91800,
+      "flushMs": 1.030699,
+      "msPerEdgeInBatch": 0.005153495
+    },
+    {
+      "batch": 460,
+      "totalEdgesBefore": 92000,
+      "flushMs": 1.0448840000000001,
+      "msPerEdgeInBatch": 0.0052244200000000005
+    },
+    {
+      "batch": 461,
+      "totalEdgesBefore": 92200,
+      "flushMs": 1.065616,
+      "msPerEdgeInBatch": 0.00532808
+    },
+    {
+      "batch": 462,
+      "totalEdgesBefore": 92400,
+      "flushMs": 1.035817,
+      "msPerEdgeInBatch": 0.005179085
+    },
+    {
+      "batch": 463,
+      "totalEdgesBefore": 92600,
+      "flushMs": 1.033396,
+      "msPerEdgeInBatch": 0.00516698
+    },
+    {
+      "batch": 464,
+      "totalEdgesBefore": 92800,
+      "flushMs": 1.03952,
+      "msPerEdgeInBatch": 0.0051976
+    },
+    {
+      "batch": 465,
+      "totalEdgesBefore": 93000,
+      "flushMs": 1.045754,
+      "msPerEdgeInBatch": 0.005228770000000001
+    },
+    {
+      "batch": 466,
+      "totalEdgesBefore": 93200,
+      "flushMs": 1.030046,
+      "msPerEdgeInBatch": 0.00515023
+    },
+    {
+      "batch": 467,
+      "totalEdgesBefore": 93400,
+      "flushMs": 1.057142,
+      "msPerEdgeInBatch": 0.00528571
+    },
+    {
+      "batch": 468,
+      "totalEdgesBefore": 93600,
+      "flushMs": 1.031805,
+      "msPerEdgeInBatch": 0.005159025
+    },
+    {
+      "batch": 469,
+      "totalEdgesBefore": 93800,
+      "flushMs": 1.025456,
+      "msPerEdgeInBatch": 0.00512728
+    },
+    {
+      "batch": 470,
+      "totalEdgesBefore": 94000,
+      "flushMs": 1.032222,
+      "msPerEdgeInBatch": 0.00516111
+    },
+    {
+      "batch": 471,
+      "totalEdgesBefore": 94200,
+      "flushMs": 1.038375,
+      "msPerEdgeInBatch": 0.005191875
+    },
+    {
+      "batch": 472,
+      "totalEdgesBefore": 94400,
+      "flushMs": 1.031797,
+      "msPerEdgeInBatch": 0.0051589850000000005
+    },
+    {
+      "batch": 473,
+      "totalEdgesBefore": 94600,
+      "flushMs": 1.0349599999999999,
+      "msPerEdgeInBatch": 0.005174799999999999
+    },
+    {
+      "batch": 474,
+      "totalEdgesBefore": 94800,
+      "flushMs": 1.034403,
+      "msPerEdgeInBatch": 0.005172014999999999
+    },
+    {
+      "batch": 475,
+      "totalEdgesBefore": 95000,
+      "flushMs": 1.057934,
+      "msPerEdgeInBatch": 0.00528967
+    },
+    {
+      "batch": 476,
+      "totalEdgesBefore": 95200,
+      "flushMs": 1.045374,
+      "msPerEdgeInBatch": 0.00522687
+    },
+    {
+      "batch": 477,
+      "totalEdgesBefore": 95400,
+      "flushMs": 1.038533,
+      "msPerEdgeInBatch": 0.005192665
+    },
+    {
+      "batch": 478,
+      "totalEdgesBefore": 95600,
+      "flushMs": 1.035776,
+      "msPerEdgeInBatch": 0.00517888
+    },
+    {
+      "batch": 479,
+      "totalEdgesBefore": 95800,
+      "flushMs": 1.0204929999999999,
+      "msPerEdgeInBatch": 0.005102465
+    },
+    {
+      "batch": 480,
+      "totalEdgesBefore": 96000,
+      "flushMs": 1.044187,
+      "msPerEdgeInBatch": 0.0052209349999999995
+    },
+    {
+      "batch": 481,
+      "totalEdgesBefore": 96200,
+      "flushMs": 1.033508,
+      "msPerEdgeInBatch": 0.005167540000000001
+    },
+    {
+      "batch": 482,
+      "totalEdgesBefore": 96400,
+      "flushMs": 1.070905,
+      "msPerEdgeInBatch": 0.005354525
+    },
+    {
+      "batch": 483,
+      "totalEdgesBefore": 96600,
+      "flushMs": 1.089935,
+      "msPerEdgeInBatch": 0.005449675
+    },
+    {
+      "batch": 484,
+      "totalEdgesBefore": 96800,
+      "flushMs": 1.096363,
+      "msPerEdgeInBatch": 0.005481815
+    },
+    {
+      "batch": 485,
+      "totalEdgesBefore": 97000,
+      "flushMs": 1.09053,
+      "msPerEdgeInBatch": 0.00545265
+    },
+    {
+      "batch": 486,
+      "totalEdgesBefore": 97200,
+      "flushMs": 1.1531969999999998,
+      "msPerEdgeInBatch": 0.005765984999999999
+    },
+    {
+      "batch": 487,
+      "totalEdgesBefore": 97400,
+      "flushMs": 1.120506,
+      "msPerEdgeInBatch": 0.00560253
+    },
+    {
+      "batch": 488,
+      "totalEdgesBefore": 97600,
+      "flushMs": 1.0799670000000001,
+      "msPerEdgeInBatch": 0.005399835
+    },
+    {
+      "batch": 489,
+      "totalEdgesBefore": 97800,
+      "flushMs": 1.0550780000000002,
+      "msPerEdgeInBatch": 0.005275390000000001
+    },
+    {
+      "batch": 490,
+      "totalEdgesBefore": 98000,
+      "flushMs": 1.052045,
+      "msPerEdgeInBatch": 0.0052602249999999994
+    },
+    {
+      "batch": 491,
+      "totalEdgesBefore": 98200,
+      "flushMs": 1.0627550000000001,
+      "msPerEdgeInBatch": 0.005313775000000001
+    },
+    {
+      "batch": 492,
+      "totalEdgesBefore": 98400,
+      "flushMs": 1.04186,
+      "msPerEdgeInBatch": 0.0052093
+    },
+    {
+      "batch": 493,
+      "totalEdgesBefore": 98600,
+      "flushMs": 1.0326879999999998,
+      "msPerEdgeInBatch": 0.005163439999999999
+    },
+    {
+      "batch": 494,
+      "totalEdgesBefore": 98800,
+      "flushMs": 1.051413,
+      "msPerEdgeInBatch": 0.005257065
+    },
+    {
+      "batch": 495,
+      "totalEdgesBefore": 99000,
+      "flushMs": 1.040271,
+      "msPerEdgeInBatch": 0.0052013549999999995
+    },
+    {
+      "batch": 496,
+      "totalEdgesBefore": 99200,
+      "flushMs": 1.05303,
+      "msPerEdgeInBatch": 0.00526515
+    },
+    {
+      "batch": 497,
+      "totalEdgesBefore": 99400,
+      "flushMs": 1.053239,
+      "msPerEdgeInBatch": 0.005266195
+    },
+    {
+      "batch": 498,
+      "totalEdgesBefore": 99600,
+      "flushMs": 1.044918,
+      "msPerEdgeInBatch": 0.00522459
+    },
+    {
+      "batch": 499,
+      "totalEdgesBefore": 99800,
+      "flushMs": 1.05553,
+      "msPerEdgeInBatch": 0.00527765
+    }
+  ]
+}

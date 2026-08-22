@@ -5,7 +5,7 @@ Workload: 2000 initial nodes, 200 rounds. Each round performs write, update, hot
 | binding | total ms | write p50 | update p50 | hot query p50 | persisted p50 | vector p50 |
 |---|---:|---:|---:|---:|---:|---:|
 | ts | 317.4 | 0.074ms | 0.045ms | 0.240ms | 0.331ms | 0.357ms |
-| rust | 2457.6 | 2.733ms | 2.292ms | 0.260ms | 0.514ms | 1.036ms |
+| rust | 1568.3 | 1.161ms | 0.451ms | 0.142ms | 0.341ms | 0.626ms |
 | python | 932.5 | 1.352ms | 1.323ms | 0.196ms | 0.437ms | 0.075ms |
 
 ## Verification

@@ -268,6 +268,12 @@ pub struct Graph {
     // hot working set
     nodes: HashMap<String, Node>,
     edges: HashMap<String, HashMap<String, EdgeEntry>>,
+    /// Derived from `edges`: edge id -> (source, key into `edges[source]`).
+    /// Kept in sync by every `edges` mutation site so edge-by-id lookups
+    /// (`flush`, `update_edge_if_revision`, `remove_edge_if_revision`,
+    /// `add_edge_with_id`'s duplicate check) are O(1) instead of scanning
+    /// every source's edge map per lookup.
+    edge_id_index: HashMap<String, (String, String)>,
     node_to_edge: HashMap<String, HashSet<String>>,
     by_type: HashMap<String, HashSet<String>>,
     /// O(1) LRU order for hot-cache eviction (front = least-recently-used).
@@ -315,6 +321,7 @@ pub struct Graph {
 struct GraphCheckpoint {
     nodes: HashMap<String, Node>,
     edges: HashMap<String, HashMap<String, EdgeEntry>>,
+    edge_id_index: HashMap<String, (String, String)>,
     node_to_edge: HashMap<String, HashSet<String>>,
     by_type: HashMap<String, HashSet<String>>,
     hot_cache_order: LruList,
@@ -338,6 +345,7 @@ impl GraphCheckpoint {
         Self {
             nodes: graph.nodes.clone(),
             edges: graph.edges.clone(),
+            edge_id_index: graph.edge_id_index.clone(),
             node_to_edge: graph.node_to_edge.clone(),
             by_type: graph.by_type.clone(),
             hot_cache_order: graph.hot_cache_order.clone(),
@@ -360,6 +368,7 @@ impl GraphCheckpoint {
     fn restore(self, graph: &mut Graph) {
         graph.nodes = self.nodes;
         graph.edges = self.edges;
+        graph.edge_id_index = self.edge_id_index;
         graph.node_to_edge = self.node_to_edge;
         graph.by_type = self.by_type;
         graph.hot_cache_order = self.hot_cache_order;
@@ -390,6 +399,7 @@ impl Graph {
             config,
             nodes: HashMap::new(),
             edges: HashMap::new(),
+            edge_id_index: HashMap::new(),
             node_to_edge: HashMap::new(),
             by_type: HashMap::new(),
             hot_cache_order: LruList::new(),
@@ -1015,6 +1025,7 @@ impl Graph {
     /// `PolyGraph.rebuildEdgeIndex`.
     fn rebuild_edge_index(&mut self) -> Result<()> {
         self.edges.clear();
+        self.edge_id_index.clear();
         self.node_to_edge.clear();
         let all_edges = self.store.edges_snapshot()?;
         for (id, edge) in all_edges {
@@ -1024,6 +1035,7 @@ impl Graph {
             let legacy_key = format!("{}::{}", edge.edge_type, edge.target);
             let key = if id == edge_id(&edge.source, &edge.edge_type, &edge.target) { legacy_key } else { id.clone() };
             let (ownership, data) = decode_ownership(edge.data);
+            self.edge_id_index.insert(id.clone(), (edge.source.clone(), key.clone()));
             self.edges.entry(edge.source.clone()).or_default().insert(
                 key,
                 EdgeEntry { id, revision: edge.revision, target: edge.target.clone(), edge_type: edge.edge_type, data, ownership },
@@ -1070,12 +1082,18 @@ impl Graph {
             })
             .collect();
 
+        // Resolve dirty edge ids to their (source, entry) via `edge_id_index`
+        // (O(1) per id) rather than rescanning every source's edge map per
+        // dirty id: that scan is O(dirty_edges * total_edges) and dominated
+        // flush() on edge-heavy graphs (see
+        // benchmarks/database-core-edge-flush-rust.json — ~19x growth in
+        // per-edge flush cost from the first to the hundredth 200-edge
+        // batch, confirmed and fixed here).
         let put_edges: Vec<Edge> = dirty_edge_ids
             .iter()
             .filter_map(|id| {
-                let (source, entry) = self.edges.iter().find_map(|(source, edges)| {
-                    edges.values().find(|entry| entry.id == *id).map(|entry| (source, entry))
-                })?;
+                let (source, key) = self.edge_id_index.get(id)?;
+                let entry = self.edges.get(source)?.get(key)?;
                 Some(Edge {
                     id: id.clone(),
                     source: source.clone(),
@@ -1230,6 +1248,7 @@ impl Graph {
     pub fn clear(&mut self) {
         self.nodes.clear();
         self.edges.clear();
+        self.edge_id_index.clear();
         self.hnsw.clear();
         self.hot_cache_order = LruList::new();
         self.node_to_edge.clear();
@@ -1786,6 +1805,7 @@ impl Graph {
     /// Mirrors `PolyGraph.recordRemovedEdge`.
     fn record_removed_edge(&mut self, source: &str, edge: &EdgeEntry) {
         let id = edge.id.clone();
+        self.edge_id_index.remove(&id);
         self.dirty_edges.remove(&id);
         self.removed_edge_ids.insert(id);
         self.emit(GraphChangeEvent::EdgeRemoved {
@@ -1874,9 +1894,10 @@ impl Graph {
             return Ok(());
         }
         source_edges.insert(
-            inner,
+            inner.clone(),
                 EdgeEntry { id: id.clone(), revision: 0, target: target.to_string(), edge_type: edge_type.to_string(), data, ownership },
         );
+        self.edge_id_index.insert(id.clone(), (source.to_string(), inner));
         self.node_to_edge.entry(target.to_string()).or_default().insert(source.to_string());
         self.dirty_edges.insert(id.clone());
         self.emit(GraphChangeEvent::EdgeAdded {
@@ -1906,14 +1927,14 @@ impl Graph {
         }
         self.validate_edge_schema(source, edge_type, target, None)?;
         self.validate_edge_data_schema(edge_type, data.as_ref())?;
-        if self.edges.values().any(|edges| edges.values().any(|edge| edge.id == id)) {
+        if self.edge_id_index.contains_key(id) {
             return Ok(());
         }
         self.removed_edge_ids.remove(id);
         let legacy_id = edge_id(source, edge_type, target);
         let key = if id == legacy_id { format!("{edge_type}::{target}") } else { id.to_string() };
         self.edges.entry(source.to_string()).or_default().insert(
-            key,
+            key.clone(),
             EdgeEntry {
                 id: id.to_string(),
                 revision: 0,
@@ -1923,6 +1944,7 @@ impl Graph {
                 ownership,
             },
         );
+        self.edge_id_index.insert(id.to_string(), (source.to_string(), key));
         self.node_to_edge.entry(target.to_string()).or_default().insert(source.to_string());
         self.dirty_edges.insert(id.to_string());
         self.emit(GraphChangeEvent::EdgeAdded {
@@ -1944,9 +1966,7 @@ impl Graph {
         expected_revision: u64,
     ) -> Result<bool> {
         self.reserve_transaction_mutations(1)?;
-        let Some((source, key)) = self.edges.iter().find_map(|(source, edges)| {
-            edges.iter().find_map(|(key, edge)| (edge.id == id).then_some((source.clone(), key.clone())))
-        }) else {
+        let Some((source, key)) = self.edge_id_index.get(id).cloned() else {
             return Ok(false);
         };
         let edge = self.edges.get_mut(&source).and_then(|edges| edges.get_mut(&key)).expect("edge location checked");
@@ -1974,11 +1994,10 @@ impl Graph {
     /// Remove exactly one edge by independent ID when its revision matches.
     pub fn remove_edge_if_revision(&mut self, id: &str, expected_revision: u64) -> Result<bool> {
         self.reserve_transaction_mutations(1)?;
-        let Some((source, key, edge)) = self.edges.iter().find_map(|(source, edges)| {
-            edges.iter().find_map(|(key, edge)| (edge.id == id).then_some((source.clone(), key.clone(), edge.clone())))
-        }) else {
+        let Some((source, key)) = self.edge_id_index.get(id).cloned() else {
             return Ok(false);
         };
+        let edge = self.edges.get(&source).and_then(|edges| edges.get(&key)).expect("edge location checked").clone();
         if edge.revision != expected_revision {
             return Err(PolypackError::Conflict {
                 id: id.to_string(),
@@ -1996,6 +2015,7 @@ impl Graph {
                 self.edges.remove(&source);
             }
         }
+        self.edge_id_index.remove(id);
         let still_connected = self
             .edges
             .get(&source)
@@ -2126,6 +2146,7 @@ impl Graph {
                 set.remove(source);
             }
             let id = edge.id.clone();
+            self.edge_id_index.remove(&id);
             self.dirty_edges.remove(&id);
             self.removed_edge_ids.insert(id);
             self.emit(GraphChangeEvent::EdgeRemoved {
@@ -2865,9 +2886,10 @@ mod tests {
         let id = edge_id("a", "REL", "b");
         let inner = format!("{}::{}", "REL", "b");
         g.edges.entry("a".into()).or_default().insert(
-            inner,
+            inner.clone(),
             EdgeEntry { id: "a::REL::b".into(), revision: 0, target: "b".into(), edge_type: "REL".into(), data: None, ownership: EdgeOwnership::Reference },
         );
+        g.edge_id_index.insert(id.clone(), ("a".into(), inner));
         g.dirty_edges.insert(id.clone());
 
         g.flush().unwrap();

@@ -377,9 +377,12 @@ impl Storage for InMemoryStorage {
         Ok(())
     }
     fn append(&mut self, name: &str, data: &[u8]) -> Result<()> {
-        let mut existing = self.files.get(name).cloned().unwrap_or_default();
-        existing.extend_from_slice(data);
-        self.files.insert(name.to_string(), existing);
+        // `entry(..).or_default()` extends the buffer in place instead of
+        // cloning the full accumulated file on every append (that clone made
+        // append — and so every `flush()` — O(total appended bytes so far),
+        // i.e. O(n^2) over n flushes; see
+        // benchmarks/database-core-edge-flush-report.md).
+        self.files.entry(name.to_string()).or_default().extend_from_slice(data);
         Ok(())
     }
     fn delete(&mut self, name: &str) -> Result<()> {
@@ -699,6 +702,17 @@ impl Store {
     }
 
     fn validate_pending_schema(&self, changes: &ChangeBatch) -> Result<()> {
+        // With no registered node/edge type, every per-node/per-edge check
+        // below is a guaranteed no-op (`validate_node_schema`/
+        // `validate_edge_schema` early-return when there's no matching
+        // definition) — but reaching that no-op still costs a full clone of
+        // *every* node and edge in the store on *every* apply call, which
+        // dominates flush() cost regardless of batch size (see
+        // benchmarks/database-core-edge-flush-report.md). Skip entirely in
+        // the common no-schema case; this changes no observable behavior.
+        if self.node_type_definitions.is_empty() && self.edge_type_definitions.is_empty() {
+            return Ok(());
+        }
         let mut nodes = self.nodes.clone();
         let mut edges = self.edges.clone();
         for id in &changes.delete_edge_ids { edges.remove(id); }

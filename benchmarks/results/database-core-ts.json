@@ -4,13 +4,13 @@
       "lang": "ts",
       "count": 20000,
       "syncOps": 5000,
-      "writeMs": 261.734673,
-      "writeOpsPerSec": 76413.26145581027,
+      "writeMs": 302.283955,
+      "writeOpsPerSec": 66162.95595312031,
       "mutationCount": 40,
-      "mutationReplayMs": 43.658525,
-      "recoveryMs": 80.521007,
-      "syncSubmitMs": 3.089085999999952,
-      "syncOpsPerSec": 1618601.7482194013
+      "mutationReplayMs": 49.401799000000096,
+      "recoveryMs": 95.90925799999997,
+      "syncSubmitMs": 2.975920999999971,
+      "syncOpsPerSec": 1680152.1276942661
     }
   ]
 }

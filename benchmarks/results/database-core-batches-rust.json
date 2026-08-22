@@ -1,0 +1,98 @@
+{
+  "schemaVersion": 1,
+  "lang": "rust",
+  "count": 5000,
+  "seed": 42,
+  "batchSizes": [
+    1,
+    100,
+    500,
+    5000
+  ],
+  "cases": [
+    {
+      "batchSize": 1,
+      "count": 5000,
+      "seed": 42,
+      "writeMs": 2662.950342,
+      "writeOpsPerSec": 1877.6166874537985,
+      "mutationCount": 5000,
+      "compactMs": 13.191274,
+      "verified": true,
+      "nodeCount": 5000,
+      "before": {
+        "walBytes": 805626,
+        "snapshotBytes": 0,
+        "mutationLogBytes": 1846455
+      },
+      "after": {
+        "walBytes": 0,
+        "snapshotBytes": 565661,
+        "mutationLogBytes": 1846455
+      }
+    },
+    {
+      "batchSize": 100,
+      "count": 5000,
+      "seed": 42,
+      "writeMs": 40.692223,
+      "writeOpsPerSec": 122873.60167076642,
+      "mutationCount": 50,
+      "compactMs": 12.220399,
+      "verified": true,
+      "nodeCount": 5000,
+      "before": {
+        "walBytes": 805626,
+        "snapshotBytes": 0,
+        "mutationLogBytes": 1250499
+      },
+      "after": {
+        "walBytes": 0,
+        "snapshotBytes": 565661,
+        "mutationLogBytes": 1250499
+      }
+    },
+    {
+      "batchSize": 500,
+      "count": 5000,
+      "seed": 42,
+      "writeMs": 22.036687,
+      "writeOpsPerSec": 226894.36030016674,
+      "mutationCount": 10,
+      "compactMs": 10.760996,
+      "verified": true,
+      "nodeCount": 5000,
+      "before": {
+        "walBytes": 805626,
+        "snapshotBytes": 0,
+        "mutationLogBytes": 1245899
+      },
+      "after": {
+        "walBytes": 0,
+        "snapshotBytes": 565661,
+        "mutationLogBytes": 1245899
+      }
+    },
+    {
+      "batchSize": 5000,
+      "count": 5000,
+      "seed": 42,
+      "writeMs": 23.351719,
+      "writeOpsPerSec": 214116.99926673493,
+      "mutationCount": 1,
+      "compactMs": 11.828831,
+      "verified": true,
+      "nodeCount": 5000,
+      "before": {
+        "walBytes": 805626,
+        "snapshotBytes": 0,
+        "mutationLogBytes": 1244888
+      },
+      "after": {
+        "walBytes": 0,
+        "snapshotBytes": 565661,
+        "mutationLogBytes": 1244888
+      }
+    }
+  ]
+}

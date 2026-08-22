@@ -1,6 +1,6 @@
 # database-core benchmark report
 
-Generated 2026-08-21T09:35:32.655Z by `benchmarks/database-core-compare.ts`.
+Generated 2026-08-22T14:04:24.356Z by `benchmarks/database-core-compare.ts`.
 
 Measures durable write throughput, mutation-log replay + cold-store recovery,
 and in-process sync-server throughput, for the same workload
@@ -22,20 +22,20 @@ the TypeScript, Rust, and Python implementations of database-core.
 
 | metric | TypeScript | Rust | Python |
 |---|---|---|---|
-| durable write throughput (ops/sec) | 76413 | 51235 | 4521 |
-| durable write time | 261.7ms | 390.4ms | 4423.5ms |
+| durable write throughput (ops/sec) | 66163 | 65638 | 4521 |
+| durable write time | 302.3ms | 304.7ms | 4423.5ms |
 | mutation log records | 40 | 40 | 41 |
-| mutation log replay time | 43.66ms | 18.03ms | 2180.92ms |
-| cold-store recovery time | 80.52ms | 78.70ms | 1402.54ms |
-| sync throughput (ops/sec) | 1618602 | 564278 | 301787 |
-| sync submit time | 3.1ms | 8.9ms | 16.6ms |
+| mutation log replay time | 49.40ms | 18.99ms | 2180.92ms |
+| cold-store recovery time | 95.91ms | 80.30ms | 1402.54ms |
+| sync throughput (ops/sec) | 1680152 | 625739 | 301787 |
+| sync submit time | 3.0ms | 8.0ms | 16.6ms |
 
 ## Speedups relative to TypeScript
 
 | lane | write speedup vs TS | sync speedup vs TS |
 |------|----------------------|---------------------|
-| Rust | 0.67× | 0.35× |
-| Python | 0.06× | 0.19× |
+| Rust | 0.99× | 0.37× |
+| Python | 0.07× | 0.18× |
 
 ## Notes
 

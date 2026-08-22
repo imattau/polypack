@@ -87,7 +87,11 @@ impl SyncServer {
 
     pub fn submit(&mut self, operations: &[Value]) -> Result<Vec<Value>> {
         if self.max_batch_ops.is_some_and(|limit| operations.len() > limit) { return Err(PolypackError::ResourceLimit { name: "maxBatchOps".into(), limit: self.max_batch_ops.unwrap() }); }
-        validate_sync_batch(operations)?;
+        // `validate_sync_batch` also computes a whole-batch checksum (a full
+        // JSON serialize + UTF-16 hash pass) that submit() never uses —
+        // validate each operation directly instead of paying for a checksum
+        // that's immediately discarded.
+        for operation in operations { validate_sync_operation(operation)?; }
         let mut accepted = Vec::new();
         let mut accepted_transactions = HashSet::new();
         for operation in operations {
@@ -103,9 +107,14 @@ impl SyncServer {
             self.seen_ops.insert(seq_key);
             if let Some(key) = &operation_key { self.operation_ids.insert(key.clone()); }
             if let Some(key) = &transaction_key { self.transaction_ids.insert(key.clone()); accepted_transactions.insert(key.clone()); }
+            // One clone stays in `self.ops`, the other is returned to the
+            // caller — both are needed, but doing them together here (rather
+            // than cloning into `accepted` and then cloning `accepted` again
+            // into `self.ops` afterwards) avoids a second full pass over the
+            // accepted operations.
+            self.ops.push(operation.clone());
             accepted.push(operation.clone());
         }
-        self.ops.extend(accepted.iter().cloned());
         if let Some(limit) = self.max_ops {
             if self.ops.len() > limit {
                 let removed = self.ops.len() - limit;
