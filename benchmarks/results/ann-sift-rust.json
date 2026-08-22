@@ -1,0 +1,49 @@
+{
+  "schemaVersion": 1,
+  "dataset": "sift-128-euclidean",
+  "fullTrainCount": 1000000,
+  "indexedCount": 1000000,
+  "queries": 1000,
+  "dims": 128,
+  "m": 16,
+  "efConstruction": 200,
+  "buildMs": 2746301.210982,
+  "buildVectorsPerSec": 364.12611843200847,
+  "cases": [
+    {
+      "efSearch": 50,
+      "qps": 1082.3335586452356,
+      "queryMs": 923.929589,
+      "recallAt10Cosine": 0.8727999999999964,
+      "recallAt10Euclidean": 0.8702999999999962
+    },
+    {
+      "efSearch": 100,
+      "qps": 629.4784432689905,
+      "queryMs": 1588.6167520000001,
+      "recallAt10Cosine": 0.9329999999999973,
+      "recallAt10Euclidean": 0.9296999999999966
+    },
+    {
+      "efSearch": 200,
+      "qps": 340.9864641089134,
+      "queryMs": 2932.667731,
+      "recallAt10Cosine": 0.9629999999999976,
+      "recallAt10Euclidean": 0.9586999999999969
+    },
+    {
+      "efSearch": 400,
+      "qps": 187.77874356704507,
+      "queryMs": 5325.416397,
+      "recallAt10Cosine": 0.9797999999999982,
+      "recallAt10Euclidean": 0.9737999999999973
+    },
+    {
+      "efSearch": 800,
+      "qps": 103.13511118613653,
+      "queryMs": 9696.019023,
+      "recallAt10Cosine": 0.9868999999999988,
+      "recallAt10Euclidean": 0.9804999999999977
+    }
+  ]
+}
