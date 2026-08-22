@@ -24,6 +24,15 @@ task instructions remain authoritative.
   history rather than deleting it.
 - Use `mcp__polypack__graph_query` only for narrowly scoped graph inspection or
   escape-hatch operations when the memory tools do not provide what is needed.
+- Semantic retrieval and graph relationships are separate concerns: a memory
+  recall score does not create a persisted edge. Create or inspect relationships
+  explicitly with `mcp__polypack__graph_query` (or the relevant consolidate /
+  supersede operation), and verify the resulting edge when relationship state
+  matters.
+- `polypack` and `polypack-mcp` are separate repositories. This checkout owns
+  the database engine, bindings, persistence, activation, sync, and reference
+  examples; MCP server behavior and MCP-specific tests belong in
+  `polypack-mcp`, not here.
 
 If the MCP is unavailable or returns no useful context, continue using local
 repository evidence and do not block the task.
