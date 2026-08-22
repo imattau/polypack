@@ -3,7 +3,12 @@
 
 use crate::model::{Edge, Node};
 
+// `Node` carries several optional provenance/activation fields, making it far
+// larger than the other variants. Boxing it would ripple through every WAL
+// call site for no real benefit here — entries are appended one at a time,
+// not batched in a way where the size difference matters.
 #[derive(Debug, Clone, PartialEq)]
+#[allow(clippy::large_enum_variant)]
 pub enum WalEntry {
     PutNode(Node),
     DeleteNode(String),

@@ -138,6 +138,11 @@ pub struct PulseOptions {
     pub semantic_threshold: Option<f64>,
 }
 
+/// Per-node cost function for [`WorkingMemoryOptions::cost_of`].
+pub type CostOfFn = Box<dyn Fn(&Node) -> f64>;
+/// Redundancy metric for [`WorkingMemoryOptions::similarity_of`].
+pub type SimilarityOfFn = Box<dyn Fn(&Node, &Node) -> f64>;
+
 /// Options for [`ActivationEngine::working_memory_with_options`].
 pub struct WorkingMemoryOptions {
     /// Maximum nodes to return.
@@ -149,11 +154,11 @@ pub struct WorkingMemoryOptions {
     /// Sum of `cost_of(node)` across selected nodes must not exceed this. Default: unbounded.
     pub token_budget: Option<f64>,
     /// Per-node cost against `token_budget`. The engine has no tokenizer — callers own this. Default: 1 per node.
-    pub cost_of: Box<dyn Fn(&Node) -> f64>,
+    pub cost_of: CostOfFn,
     /// MMR trade-off: 0 = pure relevance (default), 1 = pure diversity.
     pub diversity_lambda: f64,
     /// Redundancy metric between two candidate nodes. Default: cosine similarity of `node.vector` (0 if either lacks one).
-    pub similarity_of: Box<dyn Fn(&Node, &Node) -> f64>,
+    pub similarity_of: SimilarityOfFn,
 }
 
 impl Default for WorkingMemoryOptions {
