@@ -516,6 +516,42 @@ describe('ActivationEngine', () => {
     expect(engine.attentionOf('n1')).toBe(0)
     engine.dispose()
   })
+
+  it('recordFeedback nudges weights toward the signals of a useful node', () => {
+    const graph = new PolyGraph()
+    graph.addNode(node('a', 0))
+    const engine = new ActivationEngine(graph)
+    engine.scoreOf(graph.getNode('a')!, 0.8, 0.2, 0)
+
+    engine.recordFeedback('a', true, 0.1)
+    expect(engine.weights.semantic).toBeCloseTo(1 + 0.1 * 0.8, 5)
+    expect(engine.weights.graph).toBeCloseTo(1 + 0.1 * 0.2, 5)
+    expect(engine.weights.recency).toBeCloseTo(1 + 0.1 * 1, 5) // no elapsed time: recency factor 1
+    expect(engine.weights.usage).toBeCloseTo(1, 5) // no activation: usage signal 0, unchanged
+    engine.dispose()
+  })
+
+  it('recordFeedback nudges weights down for a non-useful node, clamped at 0', () => {
+    const graph = new PolyGraph()
+    graph.addNode(node('a', 0))
+    const engine = new ActivationEngine(graph, { weights: { semantic: 0.05 } })
+    engine.scoreOf(graph.getNode('a')!, 0.8, 0, 0)
+
+    engine.recordFeedback('a', false, 0.1)
+    // 0.05 - 0.1*0.8 = -0.03, clamped to 0
+    expect(engine.weights.semantic).toBe(0)
+    engine.dispose()
+  })
+
+  it('recordFeedback is a no-op for a node with no cached signal breakdown', () => {
+    const graph = new PolyGraph()
+    graph.addNode(node('a'))
+    const engine = new ActivationEngine(graph)
+    const before = { ...engine.weights }
+    engine.recordFeedback('a', true)
+    expect(engine.weights).toEqual(before)
+    engine.dispose()
+  })
 })
 
 describe('activation sync', () => {

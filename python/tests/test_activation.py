@@ -295,3 +295,35 @@ def test_working_memory_with_diversity_lambda_penalises_redundant_neighbours():
     diverse = engine.working_memory(limit=2, diversity_lambda=0.8)
     assert [n["id"] for n in diverse] == ["a", "c"]
     engine.dispose()
+
+
+def test_record_feedback_nudges_weights_toward_the_signals_of_a_useful_node():
+    g = _vector_graph()
+    engine = ActivationEngine(g)
+    engine.pulse([1.0, 0.0])
+
+    before = engine.config["weights"]["semantic"]
+    engine.record_feedback("ai", True, 0.1)
+    assert engine.config["weights"]["semantic"] > before
+    engine.dispose()
+
+
+def test_record_feedback_nudges_weights_down_for_a_non_useful_node():
+    g = _vector_graph()
+    engine = ActivationEngine(g)
+    engine.pulse([1.0, 0.0])
+
+    before = engine.config["weights"]["semantic"]
+    engine.record_feedback("ai", False, 0.1)
+    assert engine.config["weights"]["semantic"] < before
+    engine.dispose()
+
+
+def test_record_feedback_is_a_noop_for_a_node_with_no_cached_signal_breakdown():
+    g = PolyGraph()
+    g.add_node(_node("a"))
+    engine = ActivationEngine(g)
+    before = dict(engine.config["weights"])
+    engine.record_feedback("a", True, 0.1)
+    assert engine.config["weights"] == before
+    engine.dispose()

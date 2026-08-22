@@ -185,6 +185,8 @@ export class ActivationEngine {
   readonly classHalfLives: Partial<Record<MemoryClass, ClassHalfLives>>
 
   private attention = new Map<string, number>()
+  /** Per-node signal breakdown from the most recent `scoreOf` call (via `pulse`), consumed by `recordFeedback`. */
+  private lastSignals = new Map<string, { semantic: number; graph: number; recency: number; usage: number }>()
   private subscription: Subscription
 
   constructor(graph: PolyGraph, config: ActivationConfig = {}) {
@@ -204,7 +206,10 @@ export class ActivationEngine {
     this.weights = { ...DEFAULT_CONFIG.weights, ...config.weights }
     this.classHalfLives = config.classHalfLives ?? DEFAULT_CONFIG.classHalfLives
     this.subscription = graph.changes.subscribe((event) => {
-      if (event.type === 'node_removed' && event.nodeId) this.attention.delete(event.nodeId)
+      if (event.type === 'node_removed' && event.nodeId) {
+        this.attention.delete(event.nodeId)
+        this.lastSignals.delete(event.nodeId)
+      }
     })
   }
 
@@ -212,6 +217,7 @@ export class ActivationEngine {
   dispose(): void {
     this.subscription.unsubscribe()
     this.attention.clear()
+    this.lastSignals.clear()
   }
 
   // ── Transient attention (local, never synced) ──
@@ -309,6 +315,33 @@ export class ActivationEngine {
     this.graph.suppressNode(id, amount, reason)
   }
 
+  // ── Learned weights ──
+
+  /**
+   * Record whether `nodeId` — previously scored by `pulse`/`absorb` — turned
+   * out useful, nudging the composite `weights` (`semantic`/`graph`/
+   * `recency`/`usage`, used by {@link scoreOf}) toward whichever signal was
+   * strongest for it: each weight moves by `learningRate * direction *
+   * signal`, where `direction` is +1 for useful and -1 for not, so a signal
+   * that was high for a useful node gets reinforced and a signal that was
+   * high for a useless one gets discounted. Weights are clamped to stay
+   * non-negative. A no-op if `nodeId` has no cached signal breakdown (i.e.
+   * wasn't scored by a `pulse` call since it was last cleared/scored) — this
+   * is a simple exponential-moving-average-style nudge, not a full online
+   * learner; `learningRate` defaults to 0.05, matching this codebase's other
+   * reinforcement gain constants (`importanceGain`, `absorbGain`). Weights
+   * are in-memory only — not persisted or synced.
+   */
+  recordFeedback(nodeId: string, wasUseful: boolean, learningRate = 0.05): void {
+    const signals = this.lastSignals.get(nodeId)
+    if (!signals) return
+    const direction = wasUseful ? 1 : -1
+    this.weights.semantic = Math.max(0, this.weights.semantic + learningRate * direction * signals.semantic)
+    this.weights.graph = Math.max(0, this.weights.graph + learningRate * direction * signals.graph)
+    this.weights.recency = Math.max(0, this.weights.recency + learningRate * direction * signals.recency)
+    this.weights.usage = Math.max(0, this.weights.usage + learningRate * direction * signals.usage)
+  }
+
   // ── Relational spreading activation ──
 
   /**
@@ -350,11 +383,13 @@ export class ActivationEngine {
   /** Composite score for a node given a semantic hit and a graph contribution. */
   scoreOf(node: PolyNode, semantic: number, graphContribution: number, now = Date.now()): number {
     const recency = decayFactor(now - node.insertedAt, this.config.recencyHalfLifeMs)
+    const usage = this.usageOf(node)
+    this.lastSignals.set(node.id, { semantic, graph: graphContribution, recency, usage })
     return (
       this.weights.semantic * semantic +
       this.weights.graph * graphContribution +
       this.weights.recency * recency +
-      this.weights.usage * this.usageOf(node)
+      this.weights.usage * usage
     )
   }
 

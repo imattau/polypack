@@ -3001,10 +3001,13 @@ class ActivationEngine:
         cfg["weights"] = weights
         self.config = cfg
         self.attention: dict = {}
+        # Per-node signal breakdown from the most recent `pulse` scoring, consumed by `record_feedback`.
+        self._last_signals: dict = {}
 
     def dispose(self) -> None:
         """Drop transient attention. Durable state is untouched."""
         self.attention.clear()
+        self._last_signals.clear()
 
     # ── transient attention (local, never synced) ──
 
@@ -3078,6 +3081,28 @@ class ActivationEngine:
         suppression."""
         return self.graph.suppress_node(id_, amount, reason)
 
+    # ── learned weights ──
+
+    def record_feedback(self, id_: str, was_useful: bool, learning_rate: float = 0.05) -> None:
+        """Record whether `id_` — previously scored by `pulse` — turned out
+        useful, nudging the composite `weights` (used by `pulse`'s scoring)
+        toward whichever signal was strongest for it: each weight moves by
+        `learning_rate * direction * signal`, where `direction` is +1 for
+        useful and -1 for not, so a signal that was high for a useful node
+        gets reinforced and a signal that was high for a useless one gets
+        discounted. Weights are clamped to stay non-negative. A no-op if
+        `id_` has no cached signal breakdown (i.e. wasn't scored by a `pulse`
+        call since it was last cleared/scored) — this is a simple
+        exponential-moving-average-style nudge, not a full online learner.
+        Weights are in-memory only — not persisted or synced."""
+        signals = self._last_signals.get(id_)
+        if signals is None:
+            return
+        direction = 1.0 if was_useful else -1.0
+        weights = self.config["weights"]
+        for key in ("semantic", "graph", "recency", "usage"):
+            weights[key] = max(0.0, weights[key] + learning_rate * direction * signals[key])
+
     # ── relational spreading activation ──
 
     def spread(
@@ -3146,6 +3171,7 @@ class ActivationEngine:
             recency = decay_factor(now - node["insertedAt"], self.config["recencyHalfLifeMs"])
             activation = node.get("activation")
             usage = activation["importance"] if activation else 0.0
+            self._last_signals[id_] = {"semantic": s, "graph": g, "recency": recency, "usage": usage}
             scores[id_] = w["semantic"] * s + w["graph"] * g + w["recency"] * recency + w["usage"] * usage
         return sorted(
             ((id_, score) for id_, score in scores.items() if score > threshold),

@@ -179,6 +179,30 @@ node behind — or throws/raises if `sourceIds` is empty (an empty-source
 it silently would let a caller believe provenance was recorded when it
 wasn't).
 
+### 1.10 Learned weights
+
+`ActivationEngine.pulse`'s composite score is a weighted sum of four signals
+(`weights.semantic`, `weights.graph`, `weights.recency`, `weights.usage`,
+defaulting to 1 each). `recordFeedback(id, wasUseful, learningRate = 0.05)`
+(`record_feedback` in Rust and Python) lets an application adjust those
+weights from outcome feedback instead of hand-tuning them: each weight moves
+by `learningRate * direction * signal`, where `direction` is +1 for useful
+feedback and -1 for not, and `signal` is that weight's component of `id`'s
+composite score the last time it was scored by `pulse` — so a signal that was
+strong for a node that turned out useful is reinforced, and one that was
+strong for a node that wasn't is discounted. Weights are clamped to stay
+non-negative.
+
+This is a simple exponential-moving-average-style nudge, not a full online
+learner — deliberately, since it needs no new dependencies and is easy to
+reason about and test deterministically. `learningRate` defaults to 0.05,
+matching this codebase's other reinforcement gain constants
+(`importanceGain`, `absorbGain`, 1.5). `recordFeedback` is a no-op for a node
+with no cached signal breakdown (i.e. one `pulse` hasn't scored since the
+engine was created or last disposed). Weights are held on the
+`ActivationEngine` instance only — in-memory, not persisted or synced; a
+fresh engine (or process restart) starts from the configured defaults again.
+
 ### 1.2 Edge
 
 A directed typed edge between two node IDs.

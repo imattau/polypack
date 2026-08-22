@@ -196,21 +196,14 @@ fn effective_activation(node: &Node, attention: f64, now: i64, score_half_life_m
     clamp01(base + attention - inhibition)
 }
 
-/// Composite score for a node given a semantic hit and a graph contribution.
-fn composite_score(
-    node: &Node,
+/// Per-node signal breakdown from the most recent [`ActivationEngine::pulse`]
+/// scoring, consumed by [`ActivationEngine::record_feedback`].
+#[derive(Clone, Copy, Debug, Default)]
+struct Signals {
     semantic: f64,
-    graph_contribution: f64,
-    now: i64,
-    weights: &ActivationWeights,
-    recency_half_life_ms: i64,
-) -> f64 {
-    let recency = decay_factor(now - node.inserted_at, recency_half_life_ms);
-    let usage = node.activation.as_ref().map(|a| a.importance).unwrap_or(0.0);
-    weights.semantic * semantic
-        + weights.graph * graph_contribution
-        + weights.recency * recency
-        + weights.usage * usage
+    graph: f64,
+    recency: f64,
+    usage: f64,
 }
 
 /// Composes the adaptive "activation" layer over a [`Graph`], mirroring the
@@ -220,16 +213,18 @@ pub struct ActivationEngine<'a> {
     graph: &'a mut Graph,
     config: ActivationConfig,
     attention: HashMap<String, f64>,
+    last_signals: HashMap<String, Signals>,
 }
 
 impl<'a> ActivationEngine<'a> {
     pub fn new(graph: &'a mut Graph, config: ActivationConfig) -> Self {
-        Self { graph, config, attention: HashMap::new() }
+        Self { graph, config, attention: HashMap::new(), last_signals: HashMap::new() }
     }
 
     /// Drop transient attention. Durable state is untouched.
     pub fn dispose(&mut self) {
         self.attention.clear();
+        self.last_signals.clear();
     }
 
     /// Access the configured engine parameters.
@@ -321,6 +316,28 @@ impl<'a> ActivationEngine<'a> {
     /// releases suppression. See `Graph::suppress_node`.
     pub fn suppress(&mut self, id: &str, amount: f64, reason: Option<&str>) -> Result<Option<&Node>> {
         self.graph.suppress_node(id, amount, reason)
+    }
+
+    // ── learned weights ──
+
+    /// Record whether `id` — previously scored by [`Self::pulse`] — turned out
+    /// useful, nudging the composite `weights` (used by `pulse`'s scoring)
+    /// toward whichever signal was strongest for it: each weight moves by
+    /// `learning_rate * direction * signal`, where `direction` is +1 for
+    /// useful and -1 for not, so a signal that was high for a useful node
+    /// gets reinforced and a signal that was high for a useless one gets
+    /// discounted. Weights are clamped to stay non-negative. A no-op if `id`
+    /// has no cached signal breakdown (i.e. wasn't scored by a `pulse` call
+    /// since it was last cleared/scored) — this is a simple
+    /// exponential-moving-average-style nudge, not a full online learner.
+    /// Weights are in-memory only — not persisted or synced.
+    pub fn record_feedback(&mut self, id: &str, was_useful: bool, learning_rate: f64) {
+        let Some(signals) = self.last_signals.get(id).copied() else { return };
+        let direction = if was_useful { 1.0 } else { -1.0 };
+        self.config.weights.semantic = (self.config.weights.semantic + learning_rate * direction * signals.semantic).max(0.0);
+        self.config.weights.graph = (self.config.weights.graph + learning_rate * direction * signals.graph).max(0.0);
+        self.config.weights.recency = (self.config.weights.recency + learning_rate * direction * signals.recency).max(0.0);
+        self.config.weights.usage = (self.config.weights.usage + learning_rate * direction * signals.usage).max(0.0);
     }
 
     /// Reinforce several nodes, coalescing change events into one batch.
@@ -416,10 +433,14 @@ impl<'a> ActivationEngine<'a> {
             let Some(node) = self.graph.get_node(&id) else { continue };
             let s = semantic.get(&id).copied().unwrap_or(0.0);
             let g = graph_contributions.get(&id).copied().unwrap_or(0.0);
-            scores.push((
-                id,
-                composite_score(node, s, g, now, &self.config.weights, self.config.recency_half_life_ms),
-            ));
+            let recency = decay_factor(now - node.inserted_at, self.config.recency_half_life_ms);
+            let usage = node.activation.as_ref().map(|a| a.importance).unwrap_or(0.0);
+            self.last_signals.insert(id.clone(), Signals { semantic: s, graph: g, recency, usage });
+            let score = self.config.weights.semantic * s
+                + self.config.weights.graph * g
+                + self.config.weights.recency * recency
+                + self.config.weights.usage * usage;
+            scores.push((id, score));
         }
         scores.retain(|(_, score)| *score > threshold);
         scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
@@ -768,6 +789,45 @@ mod tests {
         g.add_node(node_with_activation("n1", "t", NodeActivation { score: 0.8, importance: 0.0, reinforcement_count: 1, last_meaningful_activation: now - DAY, ..Default::default() })).unwrap();
         let mut engine = ActivationEngine::new(&mut g, ActivationConfig::default());
         assert!((engine.effective("n1", None) - 0.4).abs() < 1e-3);
+        engine.dispose();
+    }
+
+    #[test]
+    fn record_feedback_nudges_weights_toward_the_signals_of_a_useful_node() {
+        let mut g = test_graph();
+        g.add_node_with_embedding(node("a", "t"), "local AI model vector search").unwrap();
+        let vector = g.embed("local AI model vector search").unwrap();
+        let mut engine = ActivationEngine::new(&mut g, ActivationConfig::default());
+        engine.pulse(&vector, &PulseOptions::default()).unwrap();
+
+        let before = engine.config().weights.semantic;
+        engine.record_feedback("a", true, 0.1);
+        assert!(engine.config().weights.semantic > before);
+        engine.dispose();
+    }
+
+    #[test]
+    fn record_feedback_nudges_weights_down_for_a_non_useful_node() {
+        let mut g = test_graph();
+        g.add_node_with_embedding(node("a", "t"), "local AI model vector search").unwrap();
+        let vector = g.embed("local AI model vector search").unwrap();
+        let mut engine = ActivationEngine::new(&mut g, ActivationConfig::default());
+        engine.pulse(&vector, &PulseOptions::default()).unwrap();
+
+        let before = engine.config().weights.semantic;
+        engine.record_feedback("a", false, 0.1);
+        assert!(engine.config().weights.semantic < before);
+        engine.dispose();
+    }
+
+    #[test]
+    fn record_feedback_is_a_noop_for_a_node_with_no_cached_signal_breakdown() {
+        let mut g = test_graph();
+        g.add_node(node("a", "t")).unwrap();
+        let mut engine = ActivationEngine::new(&mut g, ActivationConfig::default());
+        let before = engine.config().weights.semantic;
+        engine.record_feedback("a", true, 0.1);
+        assert_eq!(engine.config().weights.semantic, before);
         engine.dispose();
     }
 }
