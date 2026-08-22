@@ -41,6 +41,9 @@ const MEMORY_CLASSES = ['episodic', 'semantic', 'procedural', 'entity'] as const
 /** Edge type used by {@link PolyGraph.supersede} for the contradiction axis. */
 export const SUPERSEDED_BY_EDGE = 'SUPERSEDED_BY'
 
+/** Edge type used by {@link PolyGraph.consolidate} linking a consolidated node to its sources. */
+export const CONSOLIDATED_FROM_EDGE = 'CONSOLIDATED_FROM'
+
 /** Provenance/memory-class fields settable directly via `patchNode`'s `set` (not nested under `data.`). */
 const TOP_LEVEL_PATCHABLE_FIELDS = [
   'memoryClass', 'confidence', 'source', 'observedAt', 'derivedFrom', 'supersedes', 'contradicts',
@@ -2211,6 +2214,35 @@ export class PolyGraph {
     this.addEdge(id, SUPERSEDED_BY_EDGE, supersededId, undefined, 'reference')
     this.suppressNode(supersededId, amount, reason)
     return this.getNode(id)
+  }
+
+  /**
+   * Consolidate `sourceIds` into `node`: writes `node` via {@link addNode}
+   * (insert-or-replace — pass an existing id to extend a previous
+   * consolidation), merging `sourceIds` into its `derivedFrom` (deduplicated,
+   * not overwritten, so re-consolidating the same node as more evidence
+   * accumulates is a normal use), adds a `CONSOLIDATED_FROM` edge from `node`
+   * to each source (ownership `'reference'` — no cascade delete either way),
+   * and suppresses each source (see {@link suppressNode}) so retrieval
+   * prefers the consolidated node without deleting the sources. Polypack only
+   * provides this mechanism — `node`'s content (including `memoryClass`,
+   * which is never forced) and which sources belong together are entirely
+   * caller-decided policy. Returns `undefined` (writing nothing) if any
+   * source isn't loaded, or throws if `sourceIds` is empty.
+   */
+  consolidate(node: PolyNode, sourceIds: string[], options?: { suppressAmount?: number; reason?: string }): PolyNode | undefined {
+    if (sourceIds.length === 0) throw new RangeError('consolidate requires at least one source id')
+    for (const sourceId of sourceIds) if (!this.nodes.has(sourceId)) return undefined
+    const amount = options?.suppressAmount ?? 1
+    const reason = options?.reason ?? 'consolidated'
+    const existing = this.nodes.get(node.id)?.derivedFrom ?? node.derivedFrom ?? []
+    const derivedFrom = [...new Set([...existing, ...sourceIds])]
+    this.addNode({ ...node, derivedFrom })
+    for (const sourceId of sourceIds) {
+      this.addEdge(node.id, CONSOLIDATED_FROM_EDGE, sourceId, undefined, 'reference')
+      this.suppressNode(sourceId, amount, reason)
+    }
+    return this.getNode(node.id)
   }
 
   /** Loaded nodes with the highest current activation, descending. The working-memory primitive. */

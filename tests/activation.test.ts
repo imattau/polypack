@@ -215,6 +215,59 @@ describe('PolyGraph activation', () => {
     expect(graph.supersede('new', 'missing')).toBeUndefined()
     expect(graph.supersede('missing', 'new')).toBeUndefined()
   })
+
+  it('consolidate writes derivedFrom, adds CONSOLIDATED_FROM edges, and suppresses each source', () => {
+    const graph = new PolyGraph()
+    graph.addNode(node('e1'))
+    graph.addNode(node('e2'))
+    graph.reinforceNode('e1', 0.8)
+    graph.reinforceNode('e2', 0.6)
+
+    const consolidated = graph.consolidate(
+      { id: 'summary', type: 'fact', data: { text: 'consolidated' }, insertedAt: 1, updatedAt: 1, memoryClass: 'semantic' },
+      ['e1', 'e2'],
+    )
+    expect(consolidated?.derivedFrom).toEqual(['e1', 'e2'])
+    expect(consolidated?.memoryClass).toBe('semantic')
+    expect(graph.getEdgeTargets('summary', 'CONSOLIDATED_FROM').sort()).toEqual(['e1', 'e2'])
+
+    const engine = new ActivationEngine(graph)
+    expect(engine.inhibitionOf('e1')).toBeCloseTo(1, 5)
+    expect(engine.inhibitionOf('e2')).toBeCloseTo(1, 5)
+    // Sources are suppressed, not deleted.
+    expect(graph.getNode('e1')).toBeDefined()
+    expect(graph.getNode('e2')).toBeDefined()
+    engine.dispose()
+  })
+
+  it('consolidate returns undefined when any source is not loaded, without writing anything', () => {
+    const graph = new PolyGraph()
+    graph.addNode(node('e1'))
+    const result = graph.consolidate(
+      { id: 'summary', type: 'fact', data: {}, insertedAt: 1, updatedAt: 1 },
+      ['e1', 'missing'],
+    )
+    expect(result).toBeUndefined()
+    expect(graph.getNode('summary')).toBeUndefined()
+  })
+
+  it('consolidate rejects an empty sourceIds list', () => {
+    const graph = new PolyGraph()
+    expect(() => graph.consolidate({ id: 'summary', type: 'fact', data: {}, insertedAt: 1, updatedAt: 1 }, []))
+      .toThrow(RangeError)
+  })
+
+  it('re-consolidating the same node merges derivedFrom without duplicating', () => {
+    const graph = new PolyGraph()
+    graph.addNode(node('e1'))
+    graph.addNode(node('e2'))
+    graph.addNode(node('e3'))
+
+    graph.consolidate({ id: 'summary', type: 'fact', data: {}, insertedAt: 1, updatedAt: 1 }, ['e1', 'e2'])
+    const updated = graph.consolidate({ id: 'summary', type: 'fact', data: {}, insertedAt: 1, updatedAt: 1 }, ['e2', 'e3'])
+    expect(updated?.derivedFrom).toEqual(['e1', 'e2', 'e3'])
+    expect(graph.getEdgeTargets('summary', 'CONSOLIDATED_FROM').sort()).toEqual(['e1', 'e2', 'e3'])
+  })
 })
 
 describe('decay helpers', () => {

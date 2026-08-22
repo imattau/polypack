@@ -136,6 +136,49 @@ Returns `undefined`/`None` if either node isn't loaded; the edge type is not
 pre-registered — like all edge types, `registerEdgeType('SUPERSEDED_BY', ...)`
 is opt-in schema validation, not a precondition for using it.
 
+### 1.9 Consolidation
+
+`consolidate(node, sourceIds, options?)` (`consolidate`/`consolidate` in Rust
+and Python) is the composition primitive for promoting a group of
+caller-identified nodes (typically episodic) into a single higher-level node
+(typically semantic, though `memoryClass` is never forced — a `'procedural'`
+consolidation of repeated steps into a summarized how-to is equally valid).
+Like `supersede` (1.8), it is mechanism, not policy: Polypack does not decide
+which nodes belong together or what the consolidated node should say — both
+are entirely caller-supplied. It:
+
+1. Writes `node` via `addNode` (insert-or-replace — passing an existing id
+   extends a previous consolidation rather than creating a new one),
+   merging `sourceIds` into its `derivedFrom` (1.7): deduplicated against both
+   the caller-supplied value and any already-stored node's `derivedFrom`, not
+   overwritten, so re-consolidating the same node as more evidence
+   accumulates is a normal, supported use — not a special case.
+2. Adds a `CONSOLIDATED_FROM` edge from `node` to each source, ownership
+   `reference` (never cascade-deletes either node). The edge exists alongside
+   the `derivedFrom` field for the same reason `SUPERSEDED_BY` exists
+   alongside `supersedes` (1.8): the field supports direct node-level reads,
+   the edge supports graph-shaped access (`getEdgeTargets`, traversal,
+   `ActivationEngine.spread`) — this matters more here than for `supersedes`
+   since `derivedFrom` is a list, and "which nodes have an edge to X" is a
+   graph query the field alone can't answer without scanning.
+3. Suppresses each source by `amount` (default 1 — fully suppressed, the same
+   default as `supersede`) via the existing inhibition primitive
+   (`suppressNode`, 1.5), so retrieval prefers the consolidated node without
+   deleting the sources.
+
+The consolidated node is not seeded with activation from its sources — it
+starts cold and earns activation through ordinary use, consistent with the
+rest of the activation model. No changes to `workingMemory`/`pulse` are
+needed: existing inhibition handling already keeps suppressed sources out of
+ranked results, and a caller wanting `pulse`/`spread` to traverse
+`CONSOLIDATED_FROM` edges can already pass it via `edgeTypes`. Returns
+`undefined`/`None` (writing nothing) if any source isn't loaded — checked
+before any write, so a bad source id never leaves a partially-consolidated
+node behind — or throws/raises if `sourceIds` is empty (an empty-source
+"consolidation" isn't consolidation, it's an ordinary `addNode`, and allowing
+it silently would let a caller believe provenance was recorded when it
+wasn't).
+
 ### 1.2 Edge
 
 A directed typed edge between two node IDs.

@@ -68,6 +68,9 @@ const TOP_LEVEL_PATCHABLE_FIELDS: &[&str] =
 /// Edge type used by [`Graph::supersede`] for the contradiction axis.
 pub const SUPERSEDED_BY_EDGE: &str = "SUPERSEDED_BY";
 
+/// Edge type used by [`Graph::consolidate`] linking a consolidated node to its sources.
+pub const CONSOLIDATED_FROM_EDGE: &str = "CONSOLIDATED_FROM";
+
 fn get_top_level_field(node: &Node, field: &str) -> Option<serde_json::Value> {
     match field {
         "memoryClass" => node.memory_class.map(|c| serde_json::to_value(c).expect("MemoryClass serializes")),
@@ -2506,6 +2509,57 @@ impl Graph {
         Ok(self.nodes.get(id))
     }
 
+    /// Consolidate `source_ids` into `node`: writes `node` via
+    /// [`Self::add_node`] (insert-or-replace — pass an existing id to extend
+    /// a previous consolidation), merging `source_ids` into its
+    /// `derived_from` (deduplicated against both the caller-supplied value
+    /// and any already-stored node, not overwritten — re-consolidating the
+    /// same node as more evidence accumulates is a normal use), adds a
+    /// [`CONSOLIDATED_FROM_EDGE`] edge from `node` to each source
+    /// (`EdgeOwnership::Reference` — no cascade delete either way), and
+    /// suppresses each source (see [`Self::suppress_node`]) so retrieval
+    /// prefers the consolidated node without deleting the sources. Polypack
+    /// only provides this mechanism — `node`'s content (including
+    /// `memory_class`, which is never forced) and which sources belong
+    /// together are entirely caller-decided policy. Returns `Ok(None)`
+    /// (writing nothing) if any source isn't loaded, or errs if `source_ids`
+    /// is empty.
+    pub fn consolidate(
+        &mut self,
+        mut node: Node,
+        source_ids: &[&str],
+        amount: f64,
+        reason: Option<&str>,
+    ) -> Result<Option<&Node>> {
+        if source_ids.is_empty() {
+            return Err(PolypackError::InvalidArgument("consolidate requires at least one source id".into()));
+        }
+        for id in source_ids {
+            if !self.nodes.contains_key(*id) {
+                return Ok(None);
+            }
+        }
+        let node_id = node.id.clone();
+        let mut derived_from: Vec<String> = self
+            .nodes
+            .get(&node_id)
+            .and_then(|existing| existing.derived_from.clone())
+            .or_else(|| node.derived_from.clone())
+            .unwrap_or_default();
+        for id in source_ids {
+            if !derived_from.iter().any(|d| d == id) {
+                derived_from.push(id.to_string());
+            }
+        }
+        node.derived_from = Some(derived_from);
+        self.add_node(node)?;
+        for id in source_ids {
+            self.add_edge(&node_id, CONSOLIDATED_FROM_EDGE, id, None, EdgeOwnership::Reference)?;
+            self.suppress_node(id, amount, reason)?;
+        }
+        Ok(self.nodes.get(&node_id))
+    }
+
     /// Loaded nodes with the highest current activation, descending. The
     /// working-memory primitive. Mirrors `PolyGraph.topActivated`.
     pub fn top_activated(&self, limit: usize, min_score: f64) -> Vec<&Node> {
@@ -3528,6 +3582,65 @@ mod tests {
         g.add_node(node("new")).unwrap();
         assert!(g.supersede("new", "missing", 1.0, None).unwrap().is_none());
         assert!(g.supersede("missing", "new", 1.0, None).unwrap().is_none());
+    }
+
+    #[test]
+    fn consolidate_writes_derived_from_adds_edges_and_suppresses_each_source() {
+        let mut g = test_graph();
+        g.add_node(node("e1")).unwrap();
+        g.add_node(node("e2")).unwrap();
+        g.reinforce_node("e1", 0.8, None).unwrap();
+        g.reinforce_node("e2", 0.6, None).unwrap();
+
+        let mut summary = node_of_type("summary", "fact");
+        summary.memory_class = Some(MemoryClass::Semantic);
+        let consolidated = g.consolidate(summary, &["e1", "e2"], 1.0, None).unwrap().unwrap();
+        assert_eq!(consolidated.derived_from, Some(vec!["e1".to_string(), "e2".to_string()]));
+        assert_eq!(consolidated.memory_class, Some(MemoryClass::Semantic));
+        let mut targets = g.get_edge_targets("summary", CONSOLIDATED_FROM_EDGE);
+        targets.sort();
+        assert_eq!(targets, vec!["e1", "e2"]);
+
+        let e1_state = g.get_activation_state("e1").unwrap();
+        assert!((e1_state.inhibition.unwrap_or(0.0) - 1.0).abs() < 1e-5);
+        let e2_state = g.get_activation_state("e2").unwrap();
+        assert!((e2_state.inhibition.unwrap_or(0.0) - 1.0).abs() < 1e-5);
+        // Sources are suppressed, not deleted.
+        assert!(g.get_node("e1").is_some());
+        assert!(g.get_node("e2").is_some());
+    }
+
+    #[test]
+    fn consolidate_returns_none_when_any_source_is_not_loaded_without_writing_anything() {
+        let mut g = test_graph();
+        g.add_node(node("e1")).unwrap();
+        let result = g.consolidate(node_of_type("summary", "fact"), &["e1", "missing"], 1.0, None).unwrap();
+        assert!(result.is_none());
+        assert!(g.get_node("summary").is_none());
+    }
+
+    #[test]
+    fn consolidate_rejects_an_empty_source_ids_list() {
+        let mut g = test_graph();
+        assert!(matches!(
+            g.consolidate(node_of_type("summary", "fact"), &[], 1.0, None),
+            Err(PolypackError::InvalidArgument(_))
+        ));
+    }
+
+    #[test]
+    fn re_consolidating_the_same_node_merges_derived_from_without_duplicating() {
+        let mut g = test_graph();
+        g.add_node(node("e1")).unwrap();
+        g.add_node(node("e2")).unwrap();
+        g.add_node(node("e3")).unwrap();
+
+        g.consolidate(node_of_type("summary", "fact"), &["e1", "e2"], 1.0, None).unwrap();
+        let updated = g.consolidate(node_of_type("summary", "fact"), &["e2", "e3"], 1.0, None).unwrap().unwrap();
+        assert_eq!(updated.derived_from, Some(vec!["e1".to_string(), "e2".to_string(), "e3".to_string()]));
+        let mut targets = g.get_edge_targets("summary", CONSOLIDATED_FROM_EDGE);
+        targets.sort();
+        assert_eq!(targets, vec!["e1", "e2", "e3"]);
     }
 
     #[test]

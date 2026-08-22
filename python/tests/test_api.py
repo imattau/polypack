@@ -361,6 +361,57 @@ def test_supersede_returns_none_when_either_node_is_not_loaded():
     assert graph.supersede("missing", "new") is None
 
 
+def test_consolidate_writes_derived_from_adds_edges_and_suppresses_each_source():
+    graph = PolyGraph()
+    graph.add_node({"id": "e1", "type": "t", "data": {}, "insertedAt": 1, "updatedAt": 1})
+    graph.add_node({"id": "e2", "type": "t", "data": {}, "insertedAt": 1, "updatedAt": 1})
+    graph.reinforce_node("e1", 0.8)
+    graph.reinforce_node("e2", 0.6)
+
+    consolidated = graph.consolidate(
+        {"id": "summary", "type": "fact", "data": {"text": "consolidated"}, "insertedAt": 1, "updatedAt": 1, "memoryClass": "semantic"},
+        ["e1", "e2"],
+    )
+    assert consolidated["derivedFrom"] == ["e1", "e2"]
+    assert consolidated["memoryClass"] == "semantic"
+    assert sorted(graph.get_edge_targets("summary", "CONSOLIDATED_FROM")) == ["e1", "e2"]
+
+    e1_state = graph.get_activation_state("e1")
+    e2_state = graph.get_activation_state("e2")
+    assert e1_state["inhibition"] == pytest.approx(1.0, abs=1e-5)
+    assert e2_state["inhibition"] == pytest.approx(1.0, abs=1e-5)
+    assert graph.get_node("e1") is not None
+    assert graph.get_node("e2") is not None
+
+
+def test_consolidate_returns_none_when_any_source_is_not_loaded():
+    graph = PolyGraph()
+    graph.add_node({"id": "e1", "type": "t", "data": {}, "insertedAt": 1, "updatedAt": 1})
+    result = graph.consolidate(
+        {"id": "summary", "type": "fact", "data": {}, "insertedAt": 1, "updatedAt": 1},
+        ["e1", "missing"],
+    )
+    assert result is None
+    assert graph.get_node("summary") is None
+
+
+def test_consolidate_rejects_empty_source_ids():
+    graph = PolyGraph()
+    with pytest.raises(polypack.PolypackValueError):
+        graph.consolidate({"id": "summary", "type": "fact", "data": {}, "insertedAt": 1, "updatedAt": 1}, [])
+
+
+def test_reconsolidating_the_same_node_merges_derived_from_without_duplicating():
+    graph = PolyGraph()
+    for id_ in ("e1", "e2", "e3"):
+        graph.add_node({"id": id_, "type": "t", "data": {}, "insertedAt": 1, "updatedAt": 1})
+
+    graph.consolidate({"id": "summary", "type": "fact", "data": {}, "insertedAt": 1, "updatedAt": 1}, ["e1", "e2"])
+    updated = graph.consolidate({"id": "summary", "type": "fact", "data": {}, "insertedAt": 1, "updatedAt": 1}, ["e2", "e3"])
+    assert updated["derivedFrom"] == ["e1", "e2", "e3"]
+    assert sorted(graph.get_edge_targets("summary", "CONSOLIDATED_FROM")) == ["e1", "e2", "e3"]
+
+
 def _seed_graph(graph):
     graph.add_node({"id": "n1", "type": "doc", "data": {"title": "Hello"}, "vector": [0.1, 0.2, 0.3], "insertedAt": 1, "updatedAt": 1})
     graph.add_node({"id": "n2", "type": "doc", "data": {}, "vector": None, "insertedAt": 2, "updatedAt": 2})

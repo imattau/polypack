@@ -537,6 +537,9 @@ TOP_LEVEL_PATCHABLE_FIELDS = ("memoryClass", "confidence", "source", "observedAt
 # Edge type used by `PolyGraph.supersede` for the contradiction axis.
 SUPERSEDED_BY_EDGE = "SUPERSEDED_BY"
 
+# Edge type used by `PolyGraph.consolidate` linking a consolidated node to its sources.
+CONSOLIDATED_FROM_EDGE = "CONSOLIDATED_FROM"
+
 # Default per-class score/importance half-lives. Episodic memories fade
 # fastest unless reinforced; semantic/procedural facts are far more durable;
 # entities barely decay. Only used for nodes whose resolved memoryClass (see
@@ -2279,6 +2282,41 @@ class PolyGraph:
         self.add_edge(id_, SUPERSEDED_BY_EDGE, superseded_id, ownership="reference")
         self.suppress_node(superseded_id, amount, reason)
         return self.get_node(id_)
+
+    def consolidate(
+        self,
+        node: dict,
+        source_ids: Sequence[str],
+        amount: float = 1.0,
+        reason: Optional[str] = "consolidated",
+    ) -> Optional[Node]:
+        """Consolidate `source_ids` into `node`: writes `node` via `add_node`
+        (insert-or-replace — pass an existing id to extend a previous
+        consolidation), merging `source_ids` into its `derivedFrom`
+        (deduplicated against both the caller-supplied value and any
+        already-stored node, not overwritten — re-consolidating the same node
+        as more evidence accumulates is a normal use), adds a
+        `CONSOLIDATED_FROM` edge from `node` to each source (ownership
+        "reference" — no cascade delete either way), and suppresses each
+        source (see `suppress_node`) so retrieval prefers the consolidated
+        node without deleting the sources. Polypack only provides this
+        mechanism — `node`'s content (including `memoryClass`, which is never
+        forced) and which sources belong together are entirely caller-decided
+        policy. Returns `None` (writing nothing) if any source isn't loaded,
+        or raises if `source_ids` is empty."""
+        if not source_ids:
+            raise PolypackValueError("consolidate requires at least one source id")
+        if any(sid not in self._nodes for sid in source_ids):
+            return None
+        node_id = node["id"]
+        existing = self._nodes.get(node_id, {}).get("derivedFrom") or node.get("derivedFrom") or []
+        derived_from = list(dict.fromkeys([*existing, *source_ids]))
+        node = {**node, "derivedFrom": derived_from}
+        self.add_node(node)
+        for sid in source_ids:
+            self.add_edge(node_id, CONSOLIDATED_FROM_EDGE, sid, ownership="reference")
+            self.suppress_node(sid, amount, reason)
+        return self.get_node(node_id)
 
     def get_activation(self, id_: str, half_life_ms: Optional[float] = None) -> float:
         """Current decayed activation score of a node (0 when it has none)."""

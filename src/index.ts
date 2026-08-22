@@ -1,4 +1,4 @@
-export { PolyGraph, GraphSnapshot, SUPERSEDED_BY_EDGE } from './graph.js'
+export { PolyGraph, GraphSnapshot, SUPERSEDED_BY_EDGE, CONSOLIDATED_FROM_EDGE } from './graph.js'
 export { ConflictError } from './errors.js'
 export { UniqueConstraintError } from './index-errors.js'
 export { SchemaValidationError } from './schema-errors.js'
