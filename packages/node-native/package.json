@@ -2,6 +2,10 @@
   "name": "@0xx0lostcause0xx0/polypack-native",
   "version": "3.1.0",
   "description": "NAPI-RS bindings exposing the polypack-core vector engine to Node.js",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/imattau/polypack.git"
+  },
   "type": "module",
   "main": "./dist/index.js",
   "types": "./src/index.d.ts",
