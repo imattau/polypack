@@ -151,6 +151,8 @@ pub struct HnswConfigInput {
   pub mmax0: Option<u32>,
   pub ef_construction: Option<u32>,
   pub ef_search: Option<u32>,
+  /// `"cosine"` (default) or `"euclidean"`.
+  pub distance: Option<String>,
 }
 
 #[napi]
@@ -176,6 +178,10 @@ impl NativeHnswIndex {
         .and_then(|c| c.ef_search)
         .map(|v| v as usize)
         .unwrap_or(base.ef_search),
+      distance: match config.as_ref().and_then(|c| c.distance.as_deref()) {
+        Some("euclidean") => DistanceFn::Euclidean,
+        _ => base.distance,
+      },
     };
     Ok(NativeHnswIndex {
       inner: RefCell::new(HnswIndex::new(cfg, level_seed.unwrap_or(7)).map_err(to_napi_err)?),

@@ -10,7 +10,7 @@
 import { createRequire } from 'node:module'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { cosineSimilarity as cosine } from '../../../src/vector-index.js'
+import { cosineSimilarity as cosine, euclideanSimilarity as euclidean } from '../../../src/vector-index.js'
 import type { DistanceFunction } from '../../../src/vector-index.js'
 import { setNativeQueryExecutor, isNativeQueryExecutorActive } from '../../../src/query.js'
 import type {
@@ -229,8 +229,10 @@ export class NativeVectorIndex {
 
 /**
  * Drop-in replacement for the TypeScript `HNSWIndex`, backed by the Rust
- * update-safe HNSW. Only the cosine distance is supported natively; passing a
- * custom distance function throws rather than silently diverging.
+ * update-safe HNSW. Cosine and Euclidean distance are supported natively
+ * (matching `cosineSimilarity`/`euclideanSimilarity` from `vector-index.js`);
+ * passing any other custom distance function throws rather than silently
+ * diverging.
  */
 export class NativeHnswIndex {
   private inner: NativeHnswIndexBinding
@@ -242,8 +244,8 @@ export class NativeHnswIndex {
     config?: { M?: number; Mmax0?: number; efConstruction?: number; efSearch?: number },
   ) {
     assertAvailable()
-    if (distanceFn && distanceFn !== cosine) {
-      throw new Error('polypack-native HNSW only supports the cosine distance function')
+    if (distanceFn && distanceFn !== cosine && distanceFn !== euclidean) {
+      throw new Error('polypack-native HNSW only supports the cosine and euclidean distance functions')
     }
     this.onChange = onChange
     this.inner = new native.NativeHnswIndex(
@@ -252,6 +254,7 @@ export class NativeHnswIndex {
         mmax0: config?.Mmax0,
         efConstruction: config?.efConstruction,
         efSearch: config?.efSearch,
+        distance: distanceFn === euclidean ? 'euclidean' : 'cosine',
       },
       7,
     )

@@ -13,6 +13,7 @@ import {
   scoreBreakdown,
 } from '../../packages/node-native/src/index'
 import { PolyGraph, VectorIndex } from '../../src/index'
+import { euclideanSimilarity } from '../../src/vector-index'
 import { loadFixtures, runFixture } from '../conformance/runner'
 
 const available = isNativeAvailable()
@@ -83,6 +84,37 @@ describe('NativeHnswIndex', () => {
       hits += hnsw.query(q, 10).filter(r => exactIds.has(r.id)).length
     }
     expect(hits / (20 * 10)).toBeGreaterThanOrEqual(0.95)
+  })
+
+  it('supports euclidean distance and matches exact top-k on a seeded dataset', () => {
+    if (!available) return
+    const hnsw = new NativeHnswIndex(undefined, euclideanSimilarity, { M: 16, efConstruction: 200, efSearch: 300 })
+    const exact = new VectorIndex(undefined, euclideanSimilarity)
+    const rand = mulberry32(42)
+    for (let i = 0; i < 500; i++) {
+      const v = Array.from({ length: 8 }, () => rand() * 2 - 1)
+      hnsw.add(`v${i}`, v)
+      exact.add(`v${i}`, v)
+    }
+    let hits = 0
+    for (let t = 0; t < 20; t++) {
+      const q = Array.from({ length: 8 }, () => rand() * 2 - 1)
+      const exactIds = new Set(exact.query(q, 10).map(r => r.id))
+      hits += hnsw.query(q, 10).filter(r => exactIds.has(r.id)).length
+    }
+    expect(hits / (20 * 10)).toBeGreaterThanOrEqual(0.95)
+  })
+
+  it('throws for a distance function that is neither cosine nor euclidean', () => {
+    if (!available) return
+    const manhattan = (a: ArrayLike<number>, b: ArrayLike<number>) => {
+      let sum = 0
+      for (let i = 0; i < a.length; i++) sum += Math.abs(a[i] - b[i])
+      return -sum
+    }
+    expect(() => new NativeHnswIndex(undefined, manhattan)).toThrow(
+      /only supports the cosine and euclidean distance functions/,
+    )
   })
 
   it('handles remove, re-add, and update churn', () => {

@@ -20,6 +20,9 @@ pub struct HnswConfig {
     pub ef_construction: usize,
     /// Candidate list size while querying. Higher = better recall, slower queries.
     pub ef_search: usize,
+    /// Which similarity function to score candidates with. Matches the
+    /// TypeScript `HNSWIndex`'s pluggable `distanceFn` (default cosine).
+    pub distance: DistanceFn,
 }
 
 impl Default for HnswConfig {
@@ -29,6 +32,7 @@ impl Default for HnswConfig {
             mmax0: 32,
             ef_construction: 200,
             ef_search: 200,
+            distance: DistanceFn::Cosine,
         }
     }
 }
@@ -118,7 +122,7 @@ impl HnswIndex {
             adjacency: HashMap::new(),
             entry_point: None,
             max_layer: -1,
-            distance: DistanceFn::Cosine,
+            distance: config.distance,
             ml: 1.0 / (config.m.max(2) as f64).ln(),
             config,
             level_rng: LevelRng(level_seed),
@@ -180,6 +184,21 @@ impl HnswIndex {
     }
 
     pub fn query(&self, vector: &[f64], top_k: usize, threshold: f64) -> Result<Vec<ScoredId>> {
+        self.query_with_ef_search(vector, top_k, threshold, self.config.ef_search)
+    }
+
+    /// Like [`query`](Self::query), but searches with `ef_search` instead of
+    /// the value the index was built with — no rebuild needed. Lets callers
+    /// trace a recall/speed curve (raise `ef_search` for better recall at a
+    /// latency cost, lower it for more speed) against one built graph, the
+    /// standard way ANN benchmarks characterize an index.
+    pub fn query_with_ef_search(
+        &self,
+        vector: &[f64],
+        top_k: usize,
+        threshold: f64,
+        ef_search: usize,
+    ) -> Result<Vec<ScoredId>> {
         if !vector.iter().all(|x| x.is_finite()) {
             return Err(PolypackError::InvalidArgument("query vector must contain finite values".into()));
         }
@@ -198,7 +217,7 @@ impl HnswIndex {
         for lc in (1..=self.max_layer).rev() {
             current = self.greedy_search(vector, &current, lc as u32);
         }
-        let candidates = self.search_layer(vector, &current, self.config.ef_search, 0);
+        let candidates = self.search_layer(vector, &current, ef_search, 0);
 
         let mut out: Vec<ScoredId> = candidates
             .into_iter()
@@ -489,6 +508,32 @@ mod tests {
     fn basic_recall_matches_exact() {
         let mut hnsw = HnswIndex::new(HnswConfig { ef_search: 300, ..Default::default() }, 7).unwrap();
         let mut exact = ExactIndex::new(DistanceFn::Cosine);
+        let mut rand = crate::rng::Mulberry32::new(42);
+        for i in 0..500 {
+            let v: Vec<f64> = (0..DIMS).map(|_| rand.next_f64() * 2.0 - 1.0).collect();
+            hnsw.add(&format!("v{i}"), &v).unwrap();
+            exact.add(&format!("v{i}"), &v).unwrap();
+        }
+        let mut hits = 0;
+        let trials = 50;
+        for _t in 0..trials {
+            let q: Vec<f64> = (0..DIMS).map(|_| rand.next_f64() * 2.0 - 1.0).collect();
+            let exact_ids: HashSet<String> = exact.query(&q, 10, 0.0).unwrap().into_iter().map(|s| s.id).collect();
+            let ann: Vec<String> = hnsw.query(&q, 10, 0.0).unwrap().into_iter().map(|s| s.id).collect();
+            hits += ann.iter().filter(|id| exact_ids.contains(*id)).count();
+        }
+        let recall = hits as f64 / (trials * 10) as f64;
+        assert!(recall >= 0.9, "recall@10 was {recall}");
+    }
+
+    #[test]
+    fn basic_recall_matches_exact_with_euclidean_distance() {
+        let mut hnsw = HnswIndex::new(
+            HnswConfig { ef_search: 300, distance: DistanceFn::Euclidean, ..Default::default() },
+            7,
+        )
+        .unwrap();
+        let mut exact = ExactIndex::new(DistanceFn::Euclidean);
         let mut rand = crate::rng::Mulberry32::new(42);
         for i in 0..500 {
             let v: Vec<f64> = (0..DIMS).map(|_| rand.next_f64() * 2.0 - 1.0).collect();

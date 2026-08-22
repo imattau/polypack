@@ -63,6 +63,22 @@ def test_hnsw_index_rejects_non_positive_config(kwarg):
         HnswIndex(**{kwarg: 0})
 
 
+def test_hnsw_index_euclidean_distance_matches_exact():
+    hnsw = HnswIndex(ef_search=300, distance="euclidean")
+    exact = ExactIndex("euclidean")
+    vectors = {
+        "a": [0.0, 0.0],
+        "b": [1.0, 0.0],
+        "c": [0.0, 1.0],
+        "d": [5.0, 5.0],
+    }
+    for id_, vector in vectors.items():
+        hnsw.add(id_, vector)
+        exact.add(id_, vector)
+    query = [0.1, 0.1]
+    assert [i for i, _ in hnsw.query(query, 4)] == [i for i, _ in exact.query(query, 4)]
+
+
 def test_graph_ownership_cascade():
     graph = PolyGraph()
     graph.add_node({"id": "a", "type": "user", "data": {}, "insertedAt": 1, "updatedAt": 1})

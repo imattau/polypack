@@ -685,8 +685,9 @@ class HnswIndex:
         ef_construction: int = 200,
         ef_search: int = 200,
         level_seed: int = 7,
+        distance: str = "cosine",
     ) -> None:
-        self._inner = _NativeHnswIndex(m, mmax0, ef_construction, ef_search, level_seed)
+        self._inner = _NativeHnswIndex(m, mmax0, ef_construction, ef_search, level_seed, distance)
         self._on_change = on_change
 
     def add(self, id_: str, vector: Any) -> None:

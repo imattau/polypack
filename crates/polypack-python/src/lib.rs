@@ -165,19 +165,25 @@ struct HnswIndex {
 #[pymethods]
 impl HnswIndex {
     #[new]
-    #[pyo3(signature = (m=16, mmax0=32, ef_construction=200, ef_search=200, level_seed=7))]
+    #[pyo3(signature = (m=16, mmax0=32, ef_construction=200, ef_search=200, level_seed=7, distance="cosine".to_string()))]
     fn new(
         m: usize,
         mmax0: usize,
         ef_construction: usize,
         ef_search: usize,
         level_seed: u32,
+        distance: String,
     ) -> PyResult<Self> {
+        let distance = match distance.as_str() {
+            "euclidean" => DistanceFn::Euclidean,
+            _ => DistanceFn::Cosine,
+        };
         let config = HnswConfig {
             m,
             mmax0,
             ef_construction,
             ef_search,
+            distance,
         };
         Ok(HnswIndex {
             inner: CoreHnswIndex::new(config, level_seed).map_err(to_pyerr)?,

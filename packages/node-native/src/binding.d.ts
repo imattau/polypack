@@ -18,6 +18,8 @@ export interface NativeHnswConfig {
   mmax0?: number
   efConstruction?: number
   efSearch?: number
+  /** `"cosine"` (default) or `"euclidean"`. */
+  distance?: string
 }
 
 export interface NativeNodeActivation {
