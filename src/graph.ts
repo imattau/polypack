@@ -38,6 +38,9 @@ const OWNERSHIP_KEY = '__ownership'
 
 const MEMORY_CLASSES = ['episodic', 'semantic', 'procedural', 'entity'] as const
 
+/** Edge type used by {@link PolyGraph.supersede} for the contradiction axis. */
+export const SUPERSEDED_BY_EDGE = 'SUPERSEDED_BY'
+
 /** Provenance/memory-class fields settable directly via `patchNode`'s `set` (not nested under `data.`). */
 const TOP_LEVEL_PATCHABLE_FIELDS = [
   'memoryClass', 'confidence', 'source', 'observedAt', 'derivedFrom', 'supersedes', 'contradicts',
@@ -2189,6 +2192,25 @@ export class PolyGraph {
     if (!Number.isFinite(amount)) throw new RangeError('Suppression amount must be finite')
     if (!await this.getNodeSafe(id)) return undefined
     return this.suppressNode(id, amount, reason)
+  }
+
+  /**
+   * Mark `id` as superseding `supersededId`: records `id.supersedes =
+   * supersededId`, adds a `SUPERSEDED_BY` edge from `id` to `supersededId`
+   * (ownership `'reference'` — deleting either node never cascades to the
+   * other), and suppresses the superseded node (see {@link suppressNode}) so
+   * retrieval prefers the newer node without deleting the old one. Both the
+   * historical relationship and the stale node remain in the graph — this is
+   * "contradiction", not deletion. `amount` is the suppression delta applied
+   * to `supersededId` (default 1 — fully suppressed). Returns the
+   * superseding node, or `undefined` if either node isn't loaded.
+   */
+  supersede(id: string, supersededId: string, amount = 1, reason = 'superseded'): PolyNode | undefined {
+    if (!this.nodes.has(id) || !this.nodes.has(supersededId)) return undefined
+    this.patchNode(id, { set: { supersedes: supersededId } })
+    this.addEdge(id, SUPERSEDED_BY_EDGE, supersededId, undefined, 'reference')
+    this.suppressNode(supersededId, amount, reason)
+    return this.getNode(id)
   }
 
   /** Loaded nodes with the highest current activation, descending. The working-memory primitive. */

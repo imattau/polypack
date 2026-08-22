@@ -338,6 +338,29 @@ def test_patch_node_sets_and_unsets_top_level_provenance_fields():
     assert "confidence" not in updated
 
 
+def test_supersede_records_supersedes_adds_edge_and_suppresses_the_old_node():
+    graph = PolyGraph()
+    graph.add_node({"id": "old", "type": "t", "data": {}, "insertedAt": 1, "updatedAt": 1})
+    graph.add_node({"id": "new", "type": "t", "data": {}, "insertedAt": 1, "updatedAt": 1})
+    graph.reinforce_node("old", 0.8)
+
+    updated = graph.supersede("new", "old")
+    assert updated["supersedes"] == "old"
+    assert graph.get_edge_targets("new", "SUPERSEDED_BY") == ["old"]
+
+    state = graph.get_activation_state("old")
+    assert state["inhibition"] == pytest.approx(1.0, abs=1e-5)
+    # The stale node is suppressed, not deleted.
+    assert graph.get_node("old") is not None
+
+
+def test_supersede_returns_none_when_either_node_is_not_loaded():
+    graph = PolyGraph()
+    graph.add_node({"id": "new", "type": "t", "data": {}, "insertedAt": 1, "updatedAt": 1})
+    assert graph.supersede("new", "missing") is None
+    assert graph.supersede("missing", "new") is None
+
+
 def _seed_graph(graph):
     graph.add_node({"id": "n1", "type": "doc", "data": {"title": "Hello"}, "vector": [0.1, 0.2, 0.3], "insertedAt": 1, "updatedAt": 1})
     graph.add_node({"id": "n2", "type": "doc", "data": {}, "vector": None, "insertedAt": 2, "updatedAt": 2})

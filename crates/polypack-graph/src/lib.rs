@@ -24,7 +24,7 @@ pub use embedding::{
     build_embedding_text, create_embedding, EmbeddingProvider, FeatureHashEmbedding, FeatureHashEmbeddingOptions,
 };
 pub use event::GraphChangeEvent;
-pub use graph::{EdgeTypeDefinition, Graph, GraphConfig, GraphResourceLimits, GraphStats, IndexDefinition, NodeTypeDefinition};
+pub use graph::{EdgeTypeDefinition, Graph, GraphConfig, GraphResourceLimits, GraphStats, IndexDefinition, NodeTypeDefinition, SUPERSEDED_BY_EDGE};
 pub use migration::{MigrationDefinition, MigrationOptions, MigrationProgress, MigrationRegistry, MigrationReport};
 pub use persisted_query::{PersistedGraphQuery, QueryExplain, QueryResourceLimits};
 pub use query::{AggregateOp, AggregateResult, GraphQuery, GroupedRow, OrderDirection};

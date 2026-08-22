@@ -113,6 +113,29 @@ existing full-node write paths (`addNode`/`updateNode`/`patchNode` and their
 sync operations) exactly like `data`; no additive-merge semantics apply to
 them, unlike activation deltas.
 
+### 1.8 Contradiction
+
+`supersede(id, supersededId, amount = 1, reason?)` (`supersede`/`supersede` in
+Rust and Python) is the composition primitive for the contradiction axis. It
+is mechanism, not policy — Polypack does not detect contradictions, only
+records and acts on ones the caller identifies. It:
+
+1. Records `id.supersedes = supersededId` (an ordinary provenance field write, 1.7).
+2. Adds a `SUPERSEDED_BY` edge from `id` to `supersededId`, ownership
+   `reference` (never cascade-deletes either node).
+3. Suppresses `supersededId` by `amount` (default 1 — fully suppressed) via
+   the existing inhibition primitive (`suppressNode`, 1.5), so retrieval
+   through `ActivationEngine.effective`/`workingMemory` prefers the newer
+   node without deleting the old one.
+
+The superseded node and the `SUPERSEDED_BY` edge both remain in the graph —
+contradiction is a retrieval-time preference (inhibition), not deletion. No
+new traversal-filtering or query behavior is added: existing inhibition
+handling already keeps a suppressed node out of `workingMemory` results.
+Returns `undefined`/`None` if either node isn't loaded; the edge type is not
+pre-registered — like all edge types, `registerEdgeType('SUPERSEDED_BY', ...)`
+is opt-in schema validation, not a precondition for using it.
+
 ### 1.2 Edge
 
 A directed typed edge between two node IDs.

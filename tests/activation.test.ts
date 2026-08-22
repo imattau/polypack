@@ -190,6 +190,31 @@ describe('PolyGraph activation', () => {
     const ordered = await graph.queryPersisted().orderByActivation('desc').ids()
     expect(ordered).toEqual(['a', 'b', 'c'])
   })
+
+  it('supersede records supersedes, adds a SUPERSEDED_BY edge, and suppresses the old node', () => {
+    const graph = new PolyGraph()
+    graph.addNode(node('old'))
+    graph.addNode(node('new'))
+    graph.reinforceNode('old', 0.8)
+
+    const updated = graph.supersede('new', 'old')
+    expect(updated?.supersedes).toBe('old')
+    expect(graph.getEdgeTargets('new', 'SUPERSEDED_BY')).toEqual(['old'])
+
+    const engine = new ActivationEngine(graph)
+    expect(engine.inhibitionOf('old')).toBeCloseTo(1, 5)
+    expect(engine.effective('old')).toBeCloseTo(0, 5)
+    // The stale node is suppressed, not deleted.
+    expect(graph.getNode('old')).toBeDefined()
+    engine.dispose()
+  })
+
+  it('supersede returns undefined when either node is not loaded', () => {
+    const graph = new PolyGraph()
+    graph.addNode(node('new'))
+    expect(graph.supersede('new', 'missing')).toBeUndefined()
+    expect(graph.supersede('missing', 'new')).toBeUndefined()
+  })
 })
 
 describe('decay helpers', () => {

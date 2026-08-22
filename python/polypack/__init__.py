@@ -534,6 +534,9 @@ MEMORY_CLASSES = ("episodic", "semantic", "procedural", "entity")
 # Provenance/memory-class fields settable directly via `patch_node` (not nested under `data.`).
 TOP_LEVEL_PATCHABLE_FIELDS = ("memoryClass", "confidence", "source", "observedAt", "derivedFrom", "supersedes", "contradicts")
 
+# Edge type used by `PolyGraph.supersede` for the contradiction axis.
+SUPERSEDED_BY_EDGE = "SUPERSEDED_BY"
+
 # Default per-class score/importance half-lives. Episodic memories fade
 # fastest unless reinforced; semantic/procedural facts are far more durable;
 # entities barely decay. Only used for nodes whose resolved memoryClass (see
@@ -2260,6 +2263,22 @@ class PolyGraph:
         """Alias for `suppress_node` — the Python graph has no hot cache or
         eviction, so there is nothing to restore."""
         return self.suppress_node(id_, amount, reason)
+
+    def supersede(self, id_: str, superseded_id: str, amount: float = 1.0, reason: Optional[str] = "superseded") -> Optional[Node]:
+        """Mark `id_` as superseding `superseded_id`: records `id_.supersedes =
+        superseded_id`, adds a `SUPERSEDED_BY` edge from `id_` to
+        `superseded_id` (ownership "reference" — deleting either node never
+        cascades to the other), and suppresses the superseded node (see
+        `suppress_node`) so retrieval prefers the newer node without deleting
+        the old one. Both the historical relationship and the stale node
+        remain in the graph — this is "contradiction", not deletion. Returns
+        `None` if either node isn't loaded."""
+        if id_ not in self._nodes or superseded_id not in self._nodes:
+            return None
+        self.patch_node(id_, set={"supersedes": superseded_id})
+        self.add_edge(id_, SUPERSEDED_BY_EDGE, superseded_id, ownership="reference")
+        self.suppress_node(superseded_id, amount, reason)
+        return self.get_node(id_)
 
     def get_activation(self, id_: str, half_life_ms: Optional[float] = None) -> float:
         """Current decayed activation score of a node (0 when it has none)."""

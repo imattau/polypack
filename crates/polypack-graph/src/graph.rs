@@ -65,6 +65,9 @@ fn get_data_path<'a>(root: &'a serde_json::Value, path: &[&str]) -> Option<&'a s
 const TOP_LEVEL_PATCHABLE_FIELDS: &[&str] =
     &["memoryClass", "confidence", "source", "observedAt", "derivedFrom", "supersedes", "contradicts"];
 
+/// Edge type used by [`Graph::supersede`] for the contradiction axis.
+pub const SUPERSEDED_BY_EDGE: &str = "SUPERSEDED_BY";
+
 fn get_top_level_field(node: &Node, field: &str) -> Option<serde_json::Value> {
     match field {
         "memoryClass" => node.memory_class.map(|c| serde_json::to_value(c).expect("MemoryClass serializes")),
@@ -2477,6 +2480,32 @@ impl Graph {
         self.suppress_node(id, amount, reason)
     }
 
+    /// Mark `id` as superseding `superseded_id`: records `id.supersedes =
+    /// superseded_id`, adds a [`SUPERSEDED_BY_EDGE`] edge from `id` to
+    /// `superseded_id` (`EdgeOwnership::Reference` — deleting either node
+    /// never cascades to the other), and suppresses the superseded node (see
+    /// [`Self::suppress_node`]) so retrieval prefers the newer node without
+    /// deleting the old one. Both the historical relationship and the stale
+    /// node remain in the graph — this is "contradiction", not deletion.
+    /// Returns `Ok(None)` if either node isn't loaded.
+    pub fn supersede(
+        &mut self,
+        id: &str,
+        superseded_id: &str,
+        amount: f64,
+        reason: Option<&str>,
+    ) -> Result<Option<&Node>> {
+        if !self.nodes.contains_key(id) || !self.nodes.contains_key(superseded_id) {
+            return Ok(None);
+        }
+        let mut set = serde_json::Map::new();
+        set.insert("supersedes".to_string(), serde_json::json!(superseded_id));
+        self.patch_node(id, set, Vec::new(), serde_json::Map::new(), serde_json::Map::new(), None)?;
+        self.add_edge(id, SUPERSEDED_BY_EDGE, superseded_id, None, EdgeOwnership::Reference)?;
+        self.suppress_node(superseded_id, amount, reason)?;
+        Ok(self.nodes.get(id))
+    }
+
     /// Loaded nodes with the highest current activation, descending. The
     /// working-memory primitive. Mirrors `PolyGraph.topActivated`.
     pub fn top_activated(&self, limit: usize, min_score: f64) -> Vec<&Node> {
@@ -3474,6 +3503,31 @@ mod tests {
 
         let updated = g.patch_node("a", serde_json::Map::new(), vec!["confidence".into()], serde_json::Map::new(), serde_json::Map::new(), None).unwrap().unwrap();
         assert_eq!(updated.confidence, None);
+    }
+
+    #[test]
+    fn supersede_records_supersedes_adds_edge_and_suppresses_the_old_node() {
+        let mut g = test_graph();
+        g.add_node(node("old")).unwrap();
+        g.add_node(node("new")).unwrap();
+        g.reinforce_node("old", 0.8, None).unwrap();
+
+        let updated = g.supersede("new", "old", 1.0, Some("superseded")).unwrap().unwrap();
+        assert_eq!(updated.supersedes.as_deref(), Some("old"));
+        assert_eq!(g.get_edge_targets("new", SUPERSEDED_BY_EDGE), vec!["old"]);
+
+        let state = g.get_activation_state("old").unwrap();
+        assert!((state.inhibition.unwrap_or(0.0) - 1.0).abs() < 1e-5);
+        // The stale node is suppressed, not deleted.
+        assert!(g.get_node("old").is_some());
+    }
+
+    #[test]
+    fn supersede_returns_none_when_either_node_is_not_loaded() {
+        let mut g = test_graph();
+        g.add_node(node("new")).unwrap();
+        assert!(g.supersede("new", "missing", 1.0, None).unwrap().is_none());
+        assert!(g.supersede("missing", "new", 1.0, None).unwrap().is_none());
     }
 
     #[test]
