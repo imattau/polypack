@@ -1,6 +1,6 @@
 {
   "name": "@0xx0lostcause0xx0/polypack-native-win32-x64-msvc",
-  "version": "3.0.1",
+  "version": "3.1.0",
   "cpu": [
     "x64"
   ],

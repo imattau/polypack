@@ -40,9 +40,8 @@ cargo add polypack-core
   is the portable Rust core (property graph, vector search, persistence)
   underlying the TypeScript native addon and the Python bindings.
 - **GitHub releases:** [release notes, source archives, and tags](https://github.com/imattau/polypack/releases)
-  are published from the repository. The latest GitHub release is
-  [`v3.0.0`](https://github.com/imattau/polypack/releases/tag/v3.0.0); the
-  current coordinated source version is `3.0.1`.
+  are published from the repository. The current coordinated source version
+  is `3.1.0`.
 
 Stable GitHub releases run the complete test, build, export, and package checks
 before the corresponding packages are submitted to npm, PyPI, and crates.io
