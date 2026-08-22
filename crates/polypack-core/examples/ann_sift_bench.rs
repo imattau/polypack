@@ -60,7 +60,7 @@ fn read_f32_matrix(path: &std::path::Path, rows: usize, dims: usize) -> Vec<Vec<
     assert_eq!(bytes.len(), rows * dims * 4, "unexpected file size for {}", path.display());
     bytes
         .chunks_exact(dims * 4)
-        .map(|row| row.chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]) as f64).collect())
+        .map(|row| (0..dims).map(|i| f32::from_le_bytes(row[i * 4..i * 4 + 4].try_into().unwrap()) as f64).collect())
         .collect()
 }
 
@@ -69,7 +69,7 @@ fn read_i32_matrix(path: &std::path::Path, rows: usize, cols: usize) -> Vec<Vec<
     assert_eq!(bytes.len(), rows * cols * 4, "unexpected file size for {}", path.display());
     bytes
         .chunks_exact(cols * 4)
-        .map(|row| row.chunks_exact(4).map(|b| i32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect())
+        .map(|row| (0..cols).map(|i| i32::from_le_bytes(row[i * 4..i * 4 + 4].try_into().unwrap())).collect())
         .collect()
 }
 
