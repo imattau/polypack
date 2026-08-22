@@ -107,14 +107,35 @@ export interface WorkingMemoryOptions {
   minScore?: number
   /** Rank/select within this context (see {@link ActivationEngine.effective}) instead of the global score. */
   context?: string
+  /** When true, use global activation for nodes with no score in `context`. Default false. */
+  contextFallback?: boolean
   /** Sum of `costOf(node)` across selected nodes must not exceed this. Default: unbounded. */
   tokenBudget?: number
-  /** Per-node cost against `tokenBudget`. The engine has no tokenizer — callers own this. Default: 1 per node. */
+  /** Per-node cost against `tokenBudget`. Defaults to {@link estimateNodeTokens}. */
   costOf?: (node: PolyNode) => number
   /** MMR trade-off: 0 = pure relevance (default), 1 = pure diversity. */
   diversityLambda?: number
   /** Redundancy metric between two candidate nodes. Default: cosine similarity of `node.vector` (0 if either lacks one). */
   similarityOf?: (a: PolyNode, b: PolyNode) => number
+}
+
+/** Explainable components of a composite semantic pulse score. */
+export interface ScoreBreakdown {
+  semantic: number
+  graph: number
+  recency: number
+  usage: number
+  weightedSemantic: number
+  weightedGraph: number
+  weightedRecency: number
+  weightedUsage: number
+  total: number
+}
+
+/** Conservative token estimate for a node when no model-specific tokenizer is available. */
+export function estimateNodeTokens(node: PolyNode): number {
+  const content = JSON.stringify({ id: node.id, type: node.type, data: node.data })
+  return Math.max(1, Math.ceil((content?.length ?? 0) / 4))
 }
 
 /** Rank a score map descending, discarding entries at or below `threshold`. */
@@ -272,14 +293,20 @@ export class ActivationEngine {
    */
   effective(id: string, context?: string): number {
     const node = this.graph.getNode(id)
-    if (!node?.activation) return this.attentionOf(id)
+    if (!node) return 0
+    return this.effectiveNode(node, context)
+  }
+
+  private effectiveNode(node: PolyNode, context?: string, contextFallback = false): number {
+    if (!node.activation) return this.attentionOf(node.id)
     // Decay the raw stored record exactly once, with the resolved half-life —
     // NOT `graph.getActivationState(id)`, which already decay-corrects with
     // the flat default and would double-decay a class-resolved half-life.
     const halfLives = this.resolveHalfLives(node)
     const decayed = decayActivationState(node.activation, Date.now(), halfLives.scoreHalfLifeMs, halfLives.importanceHalfLifeMs)
-    const base = context !== undefined ? (decayed.context?.[context]?.score ?? 0) : decayed.score
-    return clamp01(base + this.attentionOf(id) - (decayed.inhibition ?? 0))
+    const contextScore = context !== undefined ? decayed.context?.[context]?.score : undefined
+    const base = context !== undefined && (contextScore !== undefined || !contextFallback) ? (contextScore ?? 0) : decayed.score
+    return clamp01(base + this.attentionOf(node.id) - (decayed.inhibition ?? 0))
   }
 
   /** Current decayed inhibition for `id` (0 when none). */
@@ -342,6 +369,22 @@ export class ActivationEngine {
     this.weights.usage = Math.max(0, this.weights.usage + learningRate * direction * signals.usage)
   }
 
+  /** Return a defensive copy of the learned pulse weights for persistence by callers. */
+  getWeights(): Required<NonNullable<ActivationConfig['weights']>> {
+    return { ...this.weights }
+  }
+
+  /** Restore learned pulse weights supplied by a caller after loading persisted configuration. */
+  setWeights(weights: NonNullable<ActivationConfig['weights']>): void {
+    for (const key of ['semantic', 'graph', 'recency', 'usage'] as const) {
+      const value = weights[key]
+      if (value !== undefined) {
+        if (!Number.isFinite(value) || value < 0) throw new RangeError(`weights.${key} must be finite and non-negative`)
+        this.weights[key] = value
+      }
+    }
+  }
+
   // ── Relational spreading activation ──
 
   /**
@@ -382,15 +425,27 @@ export class ActivationEngine {
 
   /** Composite score for a node given a semantic hit and a graph contribution. */
   scoreOf(node: PolyNode, semantic: number, graphContribution: number, now = Date.now()): number {
+    return this.scoreBreakdownOf(node, semantic, graphContribution, now).total
+  }
+
+  /** Return the signal and weighted contribution breakdown used for a composite score. */
+  scoreBreakdownOf(node: PolyNode, semantic: number, graphContribution: number, now = Date.now()): ScoreBreakdown {
     const recency = decayFactor(now - node.insertedAt, this.config.recencyHalfLifeMs)
     const usage = this.usageOf(node)
+    const breakdown: ScoreBreakdown = {
+      semantic,
+      graph: graphContribution,
+      recency,
+      usage,
+      weightedSemantic: this.weights.semantic * semantic,
+      weightedGraph: this.weights.graph * graphContribution,
+      weightedRecency: this.weights.recency * recency,
+      weightedUsage: this.weights.usage * usage,
+      total: 0,
+    }
+    breakdown.total = breakdown.weightedSemantic + breakdown.weightedGraph + breakdown.weightedRecency + breakdown.weightedUsage
     this.lastSignals.set(node.id, { semantic, graph: graphContribution, recency, usage })
-    return (
-      this.weights.semantic * semantic +
-      this.weights.graph * graphContribution +
-      this.weights.recency * recency +
-      this.weights.usage * usage
-    )
+    return breakdown
   }
 
   // ── Semantic pulse / absorb ──
@@ -470,18 +525,32 @@ export class ActivationEngine {
     const options: WorkingMemoryOptions =
       typeof limitOrOptions === 'number' ? { limit: limitOrOptions, minScore: minScoreArg } : limitOrOptions
 
-    const limit = options.limit ?? 10
     const minScore = options.minScore ?? 0
-    const costOf = options.costOf ?? (() => 1)
+    const candidates: Array<{ node: PolyNode; score: number }> = []
+    for (const node of this.graph.query().toArray()) {
+      const score = this.effectiveNode(node, options.context, options.contextFallback)
+      if (score > minScore) candidates.push({ node, score })
+    }
+    return this.selectWorkingMemory(candidates, options)
+  }
+
+  /** Rank persisted nodes without requiring them to be loaded into the hot cache. */
+  async workingMemoryPersisted(options: WorkingMemoryOptions = {}): Promise<PolyNode[]> {
+    const minScore = options.minScore ?? 0
+    const candidates: Array<{ node: PolyNode; score: number }> = []
+    for (const node of await this.graph.queryPersisted().toArray()) {
+      const score = this.effectiveNode(node, options.context, options.contextFallback)
+      if (score > minScore) candidates.push({ node, score })
+    }
+    return this.selectWorkingMemory(candidates, options)
+  }
+
+  private selectWorkingMemory(candidates: Array<{ node: PolyNode; score: number }>, options: WorkingMemoryOptions): PolyNode[] {
+    const limit = options.limit ?? 10
+    const costOf = options.costOf ?? estimateNodeTokens
     const diversityLambda = options.diversityLambda ?? 0
     const similarityOf = options.similarityOf ?? defaultSimilarity
     const budget = options.tokenBudget ?? Infinity
-
-    const candidates: Array<{ node: PolyNode; score: number }> = []
-    for (const node of this.graph.query().toArray()) {
-      const score = this.effective(node.id, options.context)
-      if (score > minScore) candidates.push({ node, score })
-    }
     candidates.sort((a, b) => b.score - a.score)
 
     if (diversityLambda <= 0 && budget === Infinity) {
@@ -513,6 +582,7 @@ export class ActivationEngine {
       }
       const [chosen] = remaining.splice(bestIndex, 1)
       const cost = costOf(chosen.node)
+      if (!Number.isFinite(cost) || cost < 0) throw new RangeError('costOf(node) must return a finite non-negative number')
       if (spent + cost > budget) break
       spent += cost
       selected.push(chosen.node)

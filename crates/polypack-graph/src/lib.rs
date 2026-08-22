@@ -18,7 +18,7 @@ mod migration;
 mod persisted_query;
 mod query;
 
-pub use activation::{ActivationConfig, ActivationEngine, ActivationWeights, PulseOptions, SpreadOptions};
+pub use activation::{estimate_node_tokens, ActivationConfig, ActivationEngine, ActivationWeights, PulseOptions, ScoreBreakdown, SpreadOptions, WorkingMemoryOptions};
 pub use edge::{EdgeEntry, EdgeOwnership};
 pub use embedding::{
     build_embedding_text, create_embedding, EmbeddingProvider, FeatureHashEmbedding, FeatureHashEmbeddingOptions,

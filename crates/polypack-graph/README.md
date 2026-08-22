@@ -67,7 +67,10 @@ cargo add polypack-graph
   `ActivationEngine` composing spreading activation, semantic `pulse`/
   `absorb`, transient attention, class-aware `effective`/`resolve_score_half_life`,
   budgeted/diverse `working_memory_with_options`, and feedback-driven learned
-  scoring weights via `record_feedback`. Decay math and `merge_activation`
+  scoring weights via `record_feedback`, exportable/restorable through
+  `weights`/`set_weights`; `working_memory_persisted` ranks cold-store nodes,
+  `estimate_node_tokens` supplies a default budget cost, and
+  `score_breakdown_of` exposes explainable signal contributions. Decay math and `merge_activation`
   live in `polypack_core::activation`, matching the TypeScript and Python
   implementations exactly.
 

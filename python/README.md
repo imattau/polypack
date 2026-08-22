@@ -122,6 +122,10 @@ engine.pulse([1.0, 0.0, ...])                    # semantic region scoring (vect
 engine.absorb([1.0, 0.0, ...])                   # pulse + reinforce above threshold
 engine.working_memory(5)                         # current "mental state"
 engine.working_memory(limit=8, token_budget=2000, diversity_lambda=0.5)  # budgeted + diverse
+engine.working_memory(context="project-x", context_fallback=True)  # context lens with global fallback
+engine.working_memory_persisted(limit=8, token_budget=2000)  # rank cold persisted nodes
+engine.score_breakdown_of(graph.get_node("a"), 0.8, 0.2)  # explain pulse score
+engine.set_weights({"semantic": 1.2})  # restore application-persisted feedback weights
 engine.record_feedback("a", was_useful=True)     # nudge pulse's scoring weights
 ```
 

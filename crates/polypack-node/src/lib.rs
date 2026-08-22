@@ -899,3 +899,48 @@ pub fn suppress_activation(previous: Option<NodeActivation>, delta: f64, now: i6
 pub fn activation_score_of(score: f64, last_meaningful_activation: i64, now: i64, half_life_ms: i64) -> f64 {
   polypack_core::clamp01(score * polypack_core::decay_factor(now - last_meaningful_activation, half_life_ms))
 }
+
+/// Conservative token estimate for a serialized memory payload. Native
+/// callers can use this as the default `workingMemory` cost function when the
+/// application does not provide a model-specific tokenizer.
+#[napi]
+pub fn estimate_node_tokens(serialized_memory: String) -> u32 {
+  ((serialized_memory.len() as f64 / 4.0).ceil().max(1.0)) as u32
+}
+
+#[napi(object)]
+pub struct ActivationScoreBreakdown {
+  pub semantic: f64,
+  pub graph: f64,
+  pub recency: f64,
+  pub usage: f64,
+  pub weighted_semantic: f64,
+  pub weighted_graph: f64,
+  pub weighted_recency: f64,
+  pub weighted_usage: f64,
+  pub total: f64,
+}
+
+/// Explain a composite activation score using explicit signal and weight
+/// values. The stateful graph-level implementation lives in polypack-graph.
+#[napi]
+pub fn score_breakdown(
+  semantic: f64,
+  graph: f64,
+  recency: f64,
+  usage: f64,
+  semantic_weight: Option<f64>,
+  graph_weight: Option<f64>,
+  recency_weight: Option<f64>,
+  usage_weight: Option<f64>,
+) -> ActivationScoreBreakdown {
+  let ws = semantic_weight.unwrap_or(1.0);
+  let wg = graph_weight.unwrap_or(1.0);
+  let wr = recency_weight.unwrap_or(1.0);
+  let wu = usage_weight.unwrap_or(1.0);
+  let weighted_semantic = ws * semantic;
+  let weighted_graph = wg * graph;
+  let weighted_recency = wr * recency;
+  let weighted_usage = wu * usage;
+  ActivationScoreBreakdown { semantic, graph, recency, usage, weighted_semantic, weighted_graph, weighted_recency, weighted_usage, total: weighted_semantic + weighted_graph + weighted_recency + weighted_usage }
+}

@@ -9,6 +9,8 @@ import {
   decayFactor,
   reinforceActivation,
   activationScoreOf,
+  estimateNodeTokens,
+  scoreBreakdown,
 } from '../../packages/node-native/src/index'
 import { PolyGraph, VectorIndex } from '../../src/index'
 import { loadFixtures, runFixture } from '../conformance/runner'
@@ -158,6 +160,8 @@ describe('native activation helpers', () => {
     expect(reinforced.lastMeaningfulActivation).toBe(1000)
 
     expect(activationScoreOf(1, 0, DAY, DAY)).toBeCloseTo(0.5, 10)
+    expect(estimateNodeTokens('{"content":"hello world"}')).toBeGreaterThan(1)
+    expect(scoreBreakdown(0.8, 0.2, 1, 0).total).toBeCloseTo(2, 10)
   })
 })
 

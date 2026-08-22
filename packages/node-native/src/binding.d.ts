@@ -39,6 +39,18 @@ export interface EngineInfo {
   storage: string
 }
 
+export interface NativeActivationScoreBreakdown {
+  semantic: number
+  graph: number
+  recency: number
+  usage: number
+  weightedSemantic: number
+  weightedGraph: number
+  weightedRecency: number
+  weightedUsage: number
+  total: number
+}
+
 export interface NativeExactIndexBinding {
   constructor(distance?: string): NativeExactIndexBinding
   add(id: string, vector: Float64Array): void
@@ -100,6 +112,17 @@ export interface NativeBinding {
     now: number,
   ): NativeNodeActivation
   activationScoreOf(score: number, lastMeaningfulActivation: number, now: number, halfLifeMs: number): number
+  estimateNodeTokens(serializedMemory: string): number
+  scoreBreakdown(
+    semantic: number,
+    graph: number,
+    recency: number,
+    usage: number,
+    semanticWeight?: number,
+    graphWeight?: number,
+    recencyWeight?: number,
+    usageWeight?: number,
+  ): NativeActivationScoreBreakdown
 }
 
 export interface NativeChangeBatch {

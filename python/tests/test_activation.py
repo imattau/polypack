@@ -6,6 +6,7 @@ import pytest
 from polypack import (
     PolyGraph,
     ActivationEngine,
+    estimate_node_tokens,
     merge_activation,
     decay_factor,
     PolypackValueError,
@@ -274,8 +275,34 @@ def test_working_memory_with_token_budget_stops_once_spent():
         g.add_node(_node(id_))
         g.reinforce_node(id_, amount)
     engine = ActivationEngine(g)
-    selected = engine.working_memory(limit=10, token_budget=2)
+    selected = engine.working_memory(limit=10, token_budget=2, cost_of=lambda _n: 1.0)
     assert [n["id"] for n in selected] == ["a", "b"]
+    engine.dispose()
+
+
+def test_working_memory_supports_context_fallback_and_token_estimates():
+    g = PolyGraph()
+    g.add_node(_node("global"))
+    g.add_node(_node("context"))
+    g.reinforce_node("global", 0.8)
+    g.reinforce_node("context", 0.2, context="project-x")
+    engine = ActivationEngine(g)
+    assert [n["id"] for n in engine.working_memory(context="project-x", limit=10)] == ["context"]
+    assert [n["id"] for n in engine.working_memory(context="project-x", context_fallback=True, limit=10)] == ["global", "context"]
+    assert estimate_node_tokens({"id": "a", "type": "note", "data": {"content": "hello world"}}) > 1
+    engine.dispose()
+
+
+def test_score_breakdown_and_weight_round_trip():
+    g = PolyGraph()
+    g.add_node(_node("a"))
+    engine = ActivationEngine(g)
+    node = g.get_node("a")
+    breakdown = engine.score_breakdown_of(node, 0.8, 0.2, now=1)
+    assert breakdown["weightedSemantic"] == pytest.approx(0.8)
+    assert breakdown["total"] == pytest.approx(2.0)
+    engine.set_weights({"semantic": 2.0})
+    assert engine.get_weights()["semantic"] == pytest.approx(2.0)
     engine.dispose()
 
 

@@ -21,6 +21,13 @@ function restoreNode(node: SerializedNode, transform?: DataTransform, sidecarDat
     updatedAt: node.updatedAt,
     revision: node.revision ?? 0,
     activation: node.activation ? { ...node.activation } : undefined,
+    memoryClass: node.memoryClass,
+    confidence: node.confidence,
+    source: node.source,
+    observedAt: node.observedAt,
+    derivedFrom: node.derivedFrom ? [...node.derivedFrom] : undefined,
+    supersedes: node.supersedes,
+    contradicts: node.contradicts ? [...node.contradicts] : undefined,
   }, transform, sidecarData)
 }
 

@@ -188,6 +188,7 @@ __all__ = [
     "ActivationEngine",
     "ChangeBatch",
     "merge_activation",
+    "estimate_node_tokens",
     "decay_factor",
     "engine_info",
     "DirectoryStorage",
@@ -309,6 +310,12 @@ def _default_node_similarity(a: dict, b: dict) -> float:
     if not av or not bv:
         return 0.0
     return _cosine(av, bv)
+
+
+def estimate_node_tokens(node: Node) -> int:
+    """Conservative JSON-size token estimate without a model-specific tokenizer."""
+    content = json.dumps({"id": node.get("id"), "type": node.get("type"), "data": node.get("data", {})}, separators=(",", ":"), ensure_ascii=False)
+    return max(1, math.ceil(len(content) / 4))
 
 
 def _cosine(a: Sequence[float], b: Sequence[float]) -> float:
@@ -3037,6 +3044,19 @@ class ActivationEngine:
         importance_half_life_ms = (override or {}).get("importanceHalfLifeMs", self.config["importanceHalfLifeMs"])
         return score_half_life_ms, importance_half_life_ms
 
+    def _effective_node(self, node: Node, context: Optional[str] = None, context_fallback: bool = False) -> float:
+        if node.get("activation") is None:
+            return self.attention_of(node["id"])
+        score_half_life_ms, importance_half_life_ms = self.resolve_half_lives(node)
+        decayed = _decay_activation_state(
+            node["activation"], int(time.time() * 1000),
+            score_half_life_ms=score_half_life_ms, importance_half_life_ms=importance_half_life_ms,
+        )
+        context_score = (decayed.get("context") or {}).get(context, {}).get("score") if context is not None else None
+        base = context_score if context is not None and (context_score is not None or not context_fallback) else decayed["score"]
+        inhibition = decayed.get("inhibition") or 0.0
+        return _clamp01((base or 0.0) + self.attention_of(node["id"]) - inhibition)
+
     def effective(self, id_: str, context: Optional[str] = None) -> float:
         """Durable decayed score (using the node's resolved memory-class
         half-lives when it has one, else the flat config defaults), or the
@@ -3045,20 +3065,9 @@ class ActivationEngine:
         never inside `pulse`'s composite, so a suppressed node stays
         re-evaluable."""
         node = self.graph.get_node(id_)
-        if node is None or node.get("activation") is None:
+        if node is None:
             return self.attention_of(id_)
-        # Decay the raw stored record exactly once, with the resolved
-        # half-life — NOT `graph.get_activation_state`, which already
-        # decay-corrects with the flat default and would double-decay a
-        # class-resolved half-life.
-        score_half_life_ms, importance_half_life_ms = self.resolve_half_lives(node)
-        decayed = _decay_activation_state(
-            node["activation"], int(time.time() * 1000),
-            score_half_life_ms=score_half_life_ms, importance_half_life_ms=importance_half_life_ms,
-        )
-        base = (decayed.get("context") or {}).get(context, {}).get("score", 0.0) if context is not None else decayed["score"]
-        inhibition = decayed.get("inhibition") or 0.0
-        return _clamp01(base + self.attention_of(id_) - inhibition)
+        return self._effective_node(node, context)
 
     def inhibition_of(self, id_: str) -> float:
         """Current decayed inhibition for `id_` (0 when none)."""
@@ -3102,6 +3111,19 @@ class ActivationEngine:
         weights = self.config["weights"]
         for key in ("semantic", "graph", "recency", "usage"):
             weights[key] = max(0.0, weights[key] + learning_rate * direction * signals[key])
+
+    def get_weights(self) -> dict:
+        """Return a copy of learned pulse weights for application persistence."""
+        return dict(self.config["weights"])
+
+    def set_weights(self, weights: dict) -> None:
+        """Restore learned pulse weights supplied by an application."""
+        for key in ("semantic", "graph", "recency", "usage"):
+            if key in weights:
+                value = float(weights[key])
+                if not math.isfinite(value) or value < 0:
+                    raise PolypackValueError(f"weights.{key} must be finite and non-negative")
+                self.config["weights"][key] = value
 
     # ── relational spreading activation ──
 
@@ -3170,14 +3192,30 @@ class ActivationEngine:
             g = graph_contrib.get(id_, 0.0)
             recency = decay_factor(now - node["insertedAt"], self.config["recencyHalfLifeMs"])
             activation = node.get("activation")
-            usage = activation["importance"] if activation else 0.0
-            self._last_signals[id_] = {"semantic": s, "graph": g, "recency": recency, "usage": usage}
-            scores[id_] = w["semantic"] * s + w["graph"] * g + w["recency"] * recency + w["usage"] * usage
+            scores[id_] = self.score_breakdown_of(node, s, g, now)["total"]
         return sorted(
             ((id_, score) for id_, score in scores.items() if score > threshold),
             key=lambda x: x[1],
             reverse=True,
         )
+
+    def score_breakdown_of(self, node: Node, semantic: float, graph: float, now: Optional[int] = None) -> dict:
+        """Return raw and weighted signal components used by pulse scoring."""
+        now = now if now is not None else int(time.time() * 1000)
+        recency = decay_factor(now - node["insertedAt"], self.config["recencyHalfLifeMs"])
+        activation = node.get("activation")
+        usage = activation["importance"] if activation else 0.0
+        w = self.config["weights"]
+        result = {
+            "semantic": semantic, "graph": graph, "recency": recency, "usage": usage,
+            "weightedSemantic": w["semantic"] * semantic,
+            "weightedGraph": w["graph"] * graph,
+            "weightedRecency": w["recency"] * recency,
+            "weightedUsage": w["usage"] * usage,
+        }
+        result["total"] = sum(result[key] for key in ("weightedSemantic", "weightedGraph", "weightedRecency", "weightedUsage"))
+        self._last_signals[node["id"]] = {"semantic": semantic, "graph": graph, "recency": recency, "usage": usage}
+        return result
 
     def absorb(self, vector: Any, context: Optional[str] = None, **options) -> list:
         """`pulse` plus reinforcement: nodes whose composite clears
@@ -3197,6 +3235,7 @@ class ActivationEngine:
         limit: int = 10,
         min_score: float = 0.0,
         context: Optional[str] = None,
+        context_fallback: bool = False,
         token_budget: Optional[float] = None,
         cost_of: Optional[Callable[[Node], float]] = None,
         diversity_lambda: float = 0.0,
@@ -3212,12 +3251,12 @@ class ActivationEngine:
         `relevance - diversity_lambda * similarity-to-already-selected`
         candidate under a token budget, so the result isn't many
         near-duplicate highly-activated neighbours."""
-        cost_of = cost_of or (lambda _n: 1.0)
+        cost_of = cost_of or estimate_node_tokens
         similarity_of = similarity_of or _default_node_similarity
 
         candidates = []
         for node in self.graph._nodes.values():
-            score = self.effective(node["id"], context)
+            score = self._effective_node(node, context, context_fallback)
             if score > min_score:
                 candidates.append((score, _copy_node(node)))
         candidates.sort(key=lambda x: x[0], reverse=True)
@@ -3241,8 +3280,51 @@ class ActivationEngine:
                     best_index = i
             _, chosen = remaining.pop(best_index)
             cost = cost_of(chosen)
+            if not isinstance(cost, (int, float)) or not math.isfinite(cost) or cost < 0:
+                raise PolypackValueError("cost_of(node) must return a finite non-negative number")
             if spent + cost > budget:
                 break
+            spent += cost
+            selected.append(chosen)
+        return selected
+
+    def working_memory_persisted(self, **options) -> list:
+        """Rank persisted nodes without requiring them to be loaded into hot memory."""
+        nodes = self.graph.query_persisted().to_array()
+        limit = options.pop("limit", 10)
+        min_score = options.pop("min_score", 0.0)
+        context = options.pop("context", None)
+        context_fallback = options.pop("context_fallback", False)
+        token_budget = options.pop("token_budget", None)
+        cost_of = options.pop("cost_of", None)
+        diversity_lambda = options.pop("diversity_lambda", 0.0)
+        similarity_of = options.pop("similarity_of", None)
+        if options:
+            raise TypeError(f"unexpected working_memory_persisted options: {', '.join(options)}")
+        candidates = [(self._effective_node(node, context, context_fallback), _copy_node(node)) for node in nodes]
+        candidates = [(score, node) for score, node in candidates if score > min_score]
+        return self._select_working_memory(candidates, limit, token_budget, cost_of, diversity_lambda, similarity_of)
+
+    def _select_working_memory(self, candidates, limit, token_budget, cost_of, diversity_lambda, similarity_of):
+        cost_of = cost_of or estimate_node_tokens
+        similarity_of = similarity_of or _default_node_similarity
+        candidates.sort(key=lambda x: x[0], reverse=True)
+        if diversity_lambda <= 0.0 and token_budget is None:
+            return [n for _, n in candidates[:limit]]
+        remaining = list(candidates[: max(limit * 4, limit)])
+        budget = token_budget if token_budget is not None else float("inf")
+        selected, spent = [], 0.0
+        while len(selected) < limit and remaining:
+            best_index, best_mmr = 0, float("-inf")
+            for i, (score, node) in enumerate(remaining):
+                max_similarity = max((similarity_of(node, s) for s in selected), default=0.0)
+                mmr = (1 - diversity_lambda) * score - diversity_lambda * max_similarity if diversity_lambda > 0 else score
+                if mmr > best_mmr: best_mmr, best_index = mmr, i
+            _, chosen = remaining.pop(best_index)
+            cost = cost_of(chosen)
+            if not isinstance(cost, (int, float)) or not math.isfinite(cost) or cost < 0:
+                raise PolypackValueError("cost_of(node) must return a finite non-negative number")
+            if spent + cost > budget: break
             spent += cost
             selected.append(chosen)
         return selected

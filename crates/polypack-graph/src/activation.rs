@@ -151,9 +151,11 @@ pub struct WorkingMemoryOptions {
     pub min_score: f64,
     /// Rank/select within this context (see `ActivationEngine::effective`) instead of the global score.
     pub context: Option<String>,
+    /// When true, use global activation for nodes with no score in `context`.
+    pub context_fallback: bool,
     /// Sum of `cost_of(node)` across selected nodes must not exceed this. Default: unbounded.
     pub token_budget: Option<f64>,
-    /// Per-node cost against `token_budget`. The engine has no tokenizer — callers own this. Default: 1 per node.
+    /// Per-node cost against `token_budget`. Defaults to [`estimate_node_tokens`].
     pub cost_of: CostOfFn,
     /// MMR trade-off: 0 = pure relevance (default), 1 = pure diversity.
     pub diversity_lambda: f64,
@@ -167,12 +169,34 @@ impl Default for WorkingMemoryOptions {
             limit: 10,
             min_score: 0.0,
             context: None,
+            context_fallback: false,
             token_budget: None,
-            cost_of: Box::new(|_| 1.0),
+            cost_of: Box::new(estimate_node_tokens),
             diversity_lambda: 0.0,
             similarity_of: Box::new(default_similarity),
         }
     }
+}
+
+/// Conservative JSON-size token estimate for integrations without a model tokenizer.
+pub fn estimate_node_tokens(node: &Node) -> f64 {
+    serde_json::to_string(&serde_json::json!({ "id": node.id, "type": node.node_type, "data": node.data }))
+        .map(|s| (s.len() as f64 / 4.0).ceil().max(1.0))
+        .unwrap_or(1.0)
+}
+
+/// Explainable components of a composite pulse score.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ScoreBreakdown {
+    pub semantic: f64,
+    pub graph: f64,
+    pub recency: f64,
+    pub usage: f64,
+    pub weighted_semantic: f64,
+    pub weighted_graph: f64,
+    pub weighted_recency: f64,
+    pub weighted_usage: f64,
+    pub total: f64,
 }
 
 /// Cosine similarity between two nodes' vectors, or 0 when either lacks one.
@@ -183,17 +207,46 @@ fn default_similarity(a: &Node, b: &Node) -> f64 {
     }
 }
 
+fn select_working_memory(mut candidates: Vec<(f64, Node)>, options: &WorkingMemoryOptions) -> Result<Vec<Node>> {
+    if options.limit == 0 { return Ok(Vec::new()); }
+    candidates.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    if options.diversity_lambda <= 0.0 && options.token_budget.is_none() {
+        candidates.truncate(options.limit);
+        return Ok(candidates.into_iter().map(|(_, n)| n).collect());
+    }
+    candidates.truncate((options.limit * 4).max(options.limit));
+    let budget = options.token_budget.unwrap_or(f64::INFINITY);
+    let mut selected = Vec::new();
+    let mut spent = 0.0;
+    while selected.len() < options.limit && !candidates.is_empty() {
+        let mut best_index = 0;
+        let mut best_score = f64::NEG_INFINITY;
+        for (i, (score, node)) in candidates.iter().enumerate() {
+            let max_similarity = selected.iter().map(|s| (options.similarity_of)(node, s)).fold(0.0_f64, f64::max);
+            let mmr = if options.diversity_lambda > 0.0 { (1.0 - options.diversity_lambda) * score - options.diversity_lambda * max_similarity } else { *score };
+            if mmr > best_score { best_score = mmr; best_index = i; }
+        }
+        let (_, chosen) = candidates.remove(best_index);
+        let cost = (options.cost_of)(&chosen);
+        if !cost.is_finite() || cost < 0.0 { return Err(PolypackError::InvalidArgument("cost_of(node) must return a finite non-negative number".into())); }
+        if spent + cost > budget { break; }
+        spent += cost;
+        selected.push(chosen);
+    }
+    Ok(selected)
+}
+
 /// Effective activation of a node: its durable decayed score (using
 /// `score_half_life_ms`, or the context-scoped score when `context` is given)
 /// plus any transient attention, minus decayed inhibition. Free function so
 /// the engine can compute it without double-borrowing the graph.
-fn effective_activation(node: &Node, attention: f64, now: i64, score_half_life_ms: i64, context: Option<&str>) -> f64 {
+fn effective_activation(node: &Node, attention: f64, now: i64, score_half_life_ms: i64, context: Option<&str>, context_fallback: bool) -> f64 {
     let decayed = node
         .activation
         .as_ref()
         .map(|a| decay_activation_state(a, now, score_half_life_ms, DEFAULT_ACTIVATION.importance_half_life_ms));
     let base = match (&decayed, context) {
-        (Some(d), Some(ctx)) => d.context.as_ref().and_then(|c| c.get(ctx)).map(|e| e.score).unwrap_or(0.0),
+        (Some(d), Some(ctx)) => d.context.as_ref().and_then(|c| c.get(ctx)).map(|e| e.score).unwrap_or_else(|| if context_fallback { d.score } else { 0.0 }),
         (Some(d), None) => d.score,
         (None, _) => 0.0,
     };
@@ -294,7 +347,7 @@ impl<'a> ActivationEngine<'a> {
         };
         let score_half_life_ms = self.resolve_score_half_life(memory_class, &node_type);
         match self.graph.get_node(id) {
-            Some(node) => effective_activation(node, attention, now, score_half_life_ms, context),
+            Some(node) => effective_activation(node, attention, now, score_half_life_ms, context, false),
             None => 0.0,
         }
     }
@@ -343,6 +396,20 @@ impl<'a> ActivationEngine<'a> {
         self.config.weights.graph = (self.config.weights.graph + learning_rate * direction * signals.graph).max(0.0);
         self.config.weights.recency = (self.config.weights.recency + learning_rate * direction * signals.recency).max(0.0);
         self.config.weights.usage = (self.config.weights.usage + learning_rate * direction * signals.usage).max(0.0);
+    }
+
+    /// Return a copy of the learned pulse weights for application persistence.
+    pub fn weights(&self) -> ActivationWeights {
+        self.config.weights
+    }
+
+    /// Restore learned pulse weights supplied by an application.
+    pub fn set_weights(&mut self, weights: ActivationWeights) -> Result<()> {
+        if [weights.semantic, weights.graph, weights.recency, weights.usage].iter().any(|v| !v.is_finite() || *v < 0.0) {
+            return Err(PolypackError::InvalidArgument("activation weights must be finite and non-negative".into()));
+        }
+        self.config.weights = weights;
+        Ok(())
     }
 
     /// Reinforce several nodes, coalescing change events into one batch.
@@ -435,21 +502,27 @@ impl<'a> ActivationEngine<'a> {
         let ids: HashSet<String> = semantic.keys().chain(graph_contributions.keys()).cloned().collect();
         let mut scores: Vec<(String, f64)> = Vec::new();
         for id in ids {
-            let Some(node) = self.graph.get_node(&id) else { continue };
+            let Some(node) = self.graph.get_node(&id).cloned() else { continue };
             let s = semantic.get(&id).copied().unwrap_or(0.0);
             let g = graph_contributions.get(&id).copied().unwrap_or(0.0);
-            let recency = decay_factor(now - node.inserted_at, self.config.recency_half_life_ms);
-            let usage = node.activation.as_ref().map(|a| a.importance).unwrap_or(0.0);
-            self.last_signals.insert(id.clone(), Signals { semantic: s, graph: g, recency, usage });
-            let score = self.config.weights.semantic * s
-                + self.config.weights.graph * g
-                + self.config.weights.recency * recency
-                + self.config.weights.usage * usage;
+            let score = self.score_breakdown_of(&node, s, g, now).total;
             scores.push((id, score));
         }
         scores.retain(|(_, score)| *score > threshold);
         scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         Ok(scores)
+    }
+
+    /// Return the raw and weighted signal components used by pulse scoring.
+    pub fn score_breakdown_of(&mut self, node: &Node, semantic: f64, graph: f64, now: i64) -> ScoreBreakdown {
+        let recency = decay_factor(now - node.inserted_at, self.config.recency_half_life_ms);
+        let usage = node.activation.as_ref().map(|a| a.importance).unwrap_or(0.0);
+        self.last_signals.insert(node.id.clone(), Signals { semantic, graph, recency, usage });
+        let weighted_semantic = self.config.weights.semantic * semantic;
+        let weighted_graph = self.config.weights.graph * graph;
+        let weighted_recency = self.config.weights.recency * recency;
+        let weighted_usage = self.config.weights.usage * usage;
+        ScoreBreakdown { semantic, graph, recency, usage, weighted_semantic, weighted_graph, weighted_recency, weighted_usage, total: weighted_semantic + weighted_graph + weighted_recency + weighted_usage }
     }
 
     /// `pulse` for text: embeds `text` with the graph's provider first.
@@ -500,54 +573,26 @@ impl<'a> ActivationEngine<'a> {
         let now = now_millis();
         let mut candidates: Vec<(f64, Node)> = Vec::new();
         for node in self.graph.query().to_array() {
-            let score = effective_activation(&node, self.attention_of(&node.id), now, self.config.score_half_life_ms, options.context.as_deref());
+            let score_half_life = self.resolve_score_half_life(node.memory_class, &node.node_type);
+            let score = effective_activation(&node, self.attention_of(&node.id), now, score_half_life, options.context.as_deref(), options.context_fallback);
             if score > options.min_score {
                 candidates.push((score, node));
             }
         }
-        candidates.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        select_working_memory(candidates, options)
+    }
 
-        if options.diversity_lambda <= 0.0 && options.token_budget.is_none() {
-            candidates.truncate(options.limit);
-            return Ok(candidates.into_iter().map(|(_, n)| n).collect());
+    /// Rank persisted nodes without requiring them to be loaded into the hot cache.
+    pub fn working_memory_persisted(&mut self, options: &WorkingMemoryOptions) -> Result<Vec<Node>> {
+        let now = now_millis();
+        let nodes = self.graph.query_persisted().to_array()?;
+        let mut candidates = Vec::new();
+        for node in nodes {
+            let score_half_life = self.resolve_score_half_life(node.memory_class, &node.node_type);
+            let score = effective_activation(&node, 0.0, now, score_half_life, options.context.as_deref(), options.context_fallback);
+            if score > options.min_score { candidates.push((score, node)); }
         }
-
-        // Cap the candidate pool before the O(pool * selected) MMR pass, so a
-        // graph with many loaded nodes doesn't turn selection quadratic.
-        let pool_size = (options.limit * 4).max(options.limit);
-        candidates.truncate(pool_size);
-
-        let budget = options.token_budget.unwrap_or(f64::INFINITY);
-        let mut remaining = candidates;
-        let mut selected: Vec<Node> = Vec::new();
-        let mut spent = 0.0;
-        while selected.len() < options.limit && !remaining.is_empty() {
-            let mut best_index = 0;
-            let mut best_score = f64::NEG_INFINITY;
-            for (i, (score, node)) in remaining.iter().enumerate() {
-                let max_similarity = selected
-                    .iter()
-                    .map(|s| (options.similarity_of)(node, s))
-                    .fold(0.0_f64, f64::max);
-                let mmr = if options.diversity_lambda > 0.0 {
-                    (1.0 - options.diversity_lambda) * score - options.diversity_lambda * max_similarity
-                } else {
-                    *score
-                };
-                if mmr > best_score {
-                    best_score = mmr;
-                    best_index = i;
-                }
-            }
-            let (_, chosen) = remaining.remove(best_index);
-            let cost = (options.cost_of)(&chosen);
-            if spent + cost > budget {
-                break;
-            }
-            spent += cost;
-            selected.push(chosen);
-        }
-        Ok(selected)
+        select_working_memory(candidates, options)
     }
 
     /// Alias for querying the most-activated nodes by durable score only —
@@ -717,7 +762,7 @@ mod tests {
             g.reinforce_node(id, amount, None).unwrap();
         }
         let mut engine = ActivationEngine::new(&mut g, ActivationConfig::default());
-        let options = WorkingMemoryOptions { limit: 10, token_budget: Some(2.0), ..Default::default() };
+        let options = WorkingMemoryOptions { limit: 10, token_budget: Some(2.0), cost_of: Box::new(|_| 1.0), ..Default::default() };
         let selected = engine.working_memory_with_options(&options).unwrap();
         assert_eq!(selected.iter().map(|n| n.id.as_str()).collect::<Vec<_>>(), vec!["a", "b"]);
         engine.dispose();

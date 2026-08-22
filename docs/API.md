@@ -590,11 +590,21 @@ engine.workingMemory({ limit: 8, tokenBudget: 2000, diversityLambda: 0.5 }) // b
   nodes ranked by `effective` activation descending. The options form enables a
   budgeted, diversity-aware selection — a memory-flavoured
   maximal-marginal-relevance pass suited to LLM context assembly:
-  `{ limit?, minScore?, context?, tokenBudget?, costOf?, diversityLambda?, similarityOf? }`.
+  `{ limit?, minScore?, context?, contextFallback?, tokenBudget?, costOf?, diversityLambda?, similarityOf? }`.
   Greedily picks the highest `relevance − diversityLambda × similarity-to-already-selected`
-  candidate under `tokenBudget` (via caller-supplied `costOf`, default 1 per
-  node — the engine has no tokenizer). `similarityOf` defaults to cosine
+  candidate under `tokenBudget` (via caller-supplied `costOf`, defaulting to
+  `estimateNodeTokens`). `similarityOf` defaults to cosine
   similarity of `node.vector` (0 if either lacks one).
+- `workingMemoryPersisted(options?)` performs the same adaptive ranking over
+  all persisted nodes without requiring them to be loaded into the hot cache.
+  Transient attention is unavailable for cold nodes. `contextFallback: true`
+  uses global activation when a node has no history in the requested context;
+  the default remains strict context-lens ranking.
+- `estimateNodeTokens(node)` provides a conservative JSON-size token estimate
+  for integrations without a model-specific tokenizer. Pass it as `costOf`
+  when using a token budget.
+- `scoreBreakdownOf(node, semantic, graphContribution)` returns raw and
+  weighted semantic, graph, recency, and usage components plus their total.
 - `recordFeedback(id, wasUseful, learningRate = 0.05)` — learned weights.
   Nudges the composite `weights` (used by `pulse`) toward whichever signal
   (semantic/graph/recency/usage) was strongest for `id` the last time it was
@@ -602,6 +612,9 @@ engine.workingMemory({ limit: 8, tokenBudget: 2000, diversityLambda: 0.5 }) // b
   clamped to stay non-negative. A simple exponential-moving-average-style
   nudge, not a full online learner. A no-op if `id` has no cached signal
   breakdown. Weights are in-memory only — not persisted or synced.
+- `getWeights()` and `setWeights(weights)` export and restore learned weights;
+  applications that want cross-session learning should persist this snapshot
+  and restore it when constructing an engine.
 - `dispose()` unsubscribes from graph changes and drops transient attention.
 - `mergeActivation(existing, incoming, now?)` merges two durable total-state
   records: decay-corrects both to `now`, keeps the stronger component of each

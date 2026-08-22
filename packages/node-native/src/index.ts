@@ -19,6 +19,7 @@ import type {
   NativeExactIndexBinding,
   NativeHnswIndexBinding,
   NativeNodeActivation,
+  NativeActivationScoreBreakdown,
   NativeStoreBinding,
 } from './binding.js'
 
@@ -47,16 +48,8 @@ function loadNative(): NativeBinding | null {
     const triple = TRIPLES[`${process.platform}-${process.arch}`]
     if (!triple) return null
     const name = `polypack-native.${triple}.node`
-    // 1. Installed platform package (published distribution).
-    const platformPkg = PLATFORM_PACKAGES[triple]
-    if (platformPkg) {
-      try {
-        return require(platformPkg) as NativeBinding
-      } catch {
-        // not installed — fall through to the local monorepo build
-      }
-    }
-    // 2. Local monorepo build.
+    // Prefer a local monorepo build during development. Published packages do
+    // not ship this file, so they naturally fall through to the platform pkg.
     const candidates = [
       join(THIS_DIR, '..', 'dist', name),
       join(THIS_DIR, name),
@@ -66,6 +59,15 @@ function loadNative(): NativeBinding | null {
         return require(candidate) as NativeBinding
       } catch {
         // try the next candidate
+      }
+    }
+    // Installed platform package (published distribution).
+    const platformPkg = PLATFORM_PACKAGES[triple]
+    if (platformPkg) {
+      try {
+        return require(platformPkg) as NativeBinding
+      } catch {
+        // not installed
       }
     }
     return null
@@ -652,6 +654,33 @@ export function activationScoreOf(
 ): number {
   assertAvailable()
   return callNative(() => native.activationScoreOf(score, lastMeaningfulActivation, now, halfLifeMs))
+}
+
+/** Conservative token estimate for a serialized memory payload. */
+export function estimateNodeTokens(serializedMemory: string): number {
+  assertAvailable()
+  return callNative(() => native.estimateNodeTokens(serializedMemory))
+}
+
+/** Explain a composite activation score from its signal components. */
+export function scoreBreakdown(
+  semantic: number,
+  graph: number,
+  recency: number,
+  usage: number,
+  weights?: { semantic?: number; graph?: number; recency?: number; usage?: number },
+): NativeActivationScoreBreakdown {
+  assertAvailable()
+  return callNative(() => native.scoreBreakdown(
+    semantic,
+    graph,
+    recency,
+    usage,
+    weights?.semantic,
+    weights?.graph,
+    weights?.recency,
+    weights?.usage,
+  ))
 }
 
 function assertNonNegativeInteger(n: number, name: string): void {

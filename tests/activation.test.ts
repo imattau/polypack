@@ -4,7 +4,7 @@ import { MemoryAdapter } from '../src/persistence/memory'
 import { BinaryStoreAdapter } from '../src/persistence/binary-store'
 import { MemoryFileIO } from '../src/persistence/file-io'
 import { FeatureHashEmbedding } from '../src/embedding'
-import { ActivationEngine, mergeActivation } from '../src/activation'
+import { ActivationEngine, estimateNodeTokens, mergeActivation } from '../src/activation'
 import { decayFactor } from '../src/utils'
 import type { NodeActivation } from '../src/types'
 import { SyncServer } from '../src/sync/server'
@@ -419,6 +419,45 @@ describe('ActivationEngine', () => {
     const engine = new ActivationEngine(graph)
     const selected = engine.workingMemory({ limit: 10, tokenBudget: 2, costOf: () => 1 })
     expect(selected.map(n => n.id)).toEqual(['a', 'b'])
+    engine.dispose()
+  })
+
+  it('workingMemory can fall back to global activation for a context', () => {
+    const graph = new PolyGraph()
+    graph.addNode(node('global'))
+    graph.addNode(node('context'))
+    graph.reinforceNode('global', 0.8)
+    graph.reinforceNode('context', 0.2, undefined, 'project-x')
+    const engine = new ActivationEngine(graph)
+
+    expect(engine.workingMemory({ context: 'project-x', limit: 10 }).map(n => n.id)).toEqual(['context'])
+    expect(engine.workingMemory({ context: 'project-x', contextFallback: true, limit: 10 }).map(n => n.id)).toEqual(['global', 'context'])
+    engine.dispose()
+  })
+
+  it('provides token estimates and explainable score components', () => {
+    const graph = new PolyGraph()
+    const n = { ...node('a'), data: { content: 'A useful memory with several words.' } }
+    graph.addNode(n)
+    const engine = new ActivationEngine(graph)
+    const breakdown = engine.scoreBreakdownOf(graph.getNode('a')!, 0.8, 0.2, 1)
+
+    expect(estimateNodeTokens(graph.getNode('a')!)).toBeGreaterThan(1)
+    expect(breakdown.weightedSemantic).toBeCloseTo(0.8, 5)
+    expect(breakdown.weightedGraph).toBeCloseTo(0.2, 5)
+    expect(breakdown.total).toBeCloseTo(engine.scoreOf(graph.getNode('a')!, 0.8, 0.2, 1), 5)
+    engine.dispose()
+  })
+
+  it('ranks persisted nodes without requiring hot-cache selection', async () => {
+    const graph = new PolyGraph(new MemoryAdapter())
+    graph.addNode({ ...node('a'), memoryClass: 'semantic', source: 'test' })
+    graph.reinforceNode('a', 0.8)
+    await graph.flush()
+    const engine = new ActivationEngine(graph)
+
+    const selected = await engine.workingMemoryPersisted({ limit: 1 })
+    expect(selected[0]).toMatchObject({ id: 'a', memoryClass: 'semantic', source: 'test' })
     engine.dispose()
   })
 
