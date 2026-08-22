@@ -55,6 +55,12 @@ jobs:
         run: |
           node --input-type=module --eval "const pkg = (await import('./package.json', { with: { type: 'json' } })).default; const expected = 'v' + pkg.version; if (process.env.RELEASE_TAG !== expected) { console.error('Release tag ' + process.env.RELEASE_TAG + ' does not match ' + expected); process.exit(1) }"
       - run: npm ci
+      # Node 22's bundled npm (10.x) predates npm's OIDC trusted-publishing
+      # support (added in npm >=11.5.0). Without it, `npm publish` has no
+      # registry credentials at all (no NODE_AUTH_TOKEN secret is set here by
+      # design) and silently attempts an anonymous publish, which 404s on a
+      # scoped package instead of authenticating via the workflow's OIDC token.
+      - run: npm install -g npm@latest
       - name: Publish TypeScript package
         run: |
           VERSION=$(node -p "require('./package.json').version")
@@ -127,6 +133,9 @@ jobs:
           cache: npm
           registry-url: https://registry.npmjs.org/
       - run: npm ci
+      # See ts-publish: Node 22's bundled npm predates OIDC trusted-publishing
+      # support, so `npm publish` needs a newer npm to authenticate at all.
+      - run: npm install -g npm@latest
       - uses: actions/download-artifact@v4
         with:
           pattern: release-addon-*
