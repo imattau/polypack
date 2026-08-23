@@ -3,6 +3,21 @@
 All notable changes to this project are documented here. This project follows
 [Semantic Versioning](https://semver.org/).
 
+## [3.3.2] - 2026-08-23
+
+### Fixed
+
+- `Store::validate_pending_indexes` cloned the entire node map on every
+  `apply()` call even when no unique secondary index was defined, an
+  O(store size) cost per write. Added the same early-return guard its
+  sibling `validate_pending_schema` already had for the no-op case.
+- `Store::apply_with_identity`'s idempotency check re-read and re-parsed the
+  entire on-disk mutation log on every identity-bearing `apply()` — which
+  `Graph::transaction()` always triggers, since it synthesizes a
+  transaction id — turning transaction cost into O(total historical
+  mutation count) per call. Replaced with an in-memory identity cache kept
+  in sync with the durable log.
+
 ## [3.3.1] - 2026-08-23
 
 ### Fixed
