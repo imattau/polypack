@@ -442,6 +442,8 @@ pub struct Store {
     closed: bool,
     loaded: bool,
     mutation_sequence: u64,
+    seen_operation_ids: HashSet<String>,
+    seen_transaction_ids: HashSet<String>,
 }
 
 impl Store {
@@ -463,6 +465,8 @@ impl Store {
             closed: false,
             loaded: false,
             mutation_sequence: 0,
+            seen_operation_ids: HashSet::new(),
+            seen_transaction_ids: HashSet::new(),
         }
     }
 
@@ -947,6 +951,9 @@ impl Store {
     }
 
     fn validate_pending_indexes(&self, changes: &ChangeBatch) -> Result<()> {
+        if self.index_definitions.values().all(|definition| !definition.unique) {
+            return Ok(());
+        }
         let mut nodes = self.nodes.clone();
         for id in &changes.delete_node_ids { nodes.remove(id); }
         for node in &changes.put_nodes { nodes.insert(node.id.clone(), node.clone()); }
@@ -1105,7 +1112,10 @@ impl Store {
         self.assert_open()?;
         if !self.loaded {
             self.do_load()?;
-            self.mutation_sequence = self.mutation_log()?.last().map(|record| record.sequence).unwrap_or(0);
+            let log = self.mutation_log()?;
+            self.mutation_sequence = log.last().map(|record| record.sequence).unwrap_or(0);
+            self.seen_operation_ids = log.iter().map(|record| record.operation_id.clone()).collect();
+            self.seen_transaction_ids = log.iter().map(|record| record.transaction_id.clone()).collect();
             self.loaded = true;
         }
         Ok(())
@@ -1225,10 +1235,8 @@ impl Store {
         // the schema has since changed in a way that would reject the same
         // payload today. Validating first would break the idempotent-retry
         // guarantee this dedup check exists to provide.
-        if (operation_id.is_some() || transaction_id.is_some())
-            && self.mutation_log()?.iter().any(|record|
-                operation_id.is_some_and(|id| record.operation_id == id)
-                    || transaction_id.is_some_and(|id| record.transaction_id == id))
+        if operation_id.is_some_and(|id| self.seen_operation_ids.contains(id))
+            || transaction_id.is_some_and(|id| self.seen_transaction_ids.contains(id))
         {
             return Ok(());
         }
@@ -1281,6 +1289,8 @@ impl Store {
             self.storage.sync(MUTATION_LOG_FILE)?;
         }
         self.mutation_sequence = sequence;
+        self.seen_operation_ids.insert(record.operation_id.clone());
+        self.seen_transaction_ids.insert(record.transaction_id.clone());
         // WAL entries are durable (or at least accepted by the host); it is
         // now safe to mutate in-memory state to match.
         for id in &changes.delete_node_ids {
@@ -2002,6 +2012,50 @@ mod tests {
         assert!(store.get_node("once").unwrap().is_some());
         assert!(store.get_node("different").unwrap().is_none());
         assert_eq!(store.mutation_log().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn repeated_transaction_id_is_idempotent_after_reopen() {
+        let storage = shared();
+        let mut store = Store::new(Box::new(storage.clone()), StoreConfig::default());
+        store.apply_with_transaction(&batch(&[node("once")]), Some("tx-retry")).unwrap();
+        store.close().unwrap();
+
+        // The identity cache is rebuilt from the on-disk mutation log when a
+        // store is (re)loaded, so a retried transaction_id must still be
+        // recognized as already-applied after a fresh Store instance loads it.
+        let mut reopened = Store::new(Box::new(storage), StoreConfig::default());
+        reopened.apply_with_transaction(&batch(&[node("different")]), Some("tx-retry")).unwrap();
+        assert_eq!(reopened.node_count().unwrap(), 1);
+        assert!(reopened.get_node("once").unwrap().is_some());
+        assert!(reopened.get_node("different").unwrap().is_none());
+        assert_eq!(reopened.mutation_log().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn writes_succeed_without_cloning_nodes_when_no_unique_index_exists() {
+        let storage = shared();
+        let mut s = Store::new(Box::new(storage), StoreConfig::default());
+        // A non-unique secondary index must not force validate_pending_indexes
+        // to walk the fast (guarded) path; writes should still apply and stay
+        // queryable by the index.
+        s.define_index(SecondaryIndexDefinition {
+            name: "book-genre".into(),
+            fields: vec!["genre".into()],
+            node_type: Some("book".into()),
+            unique: false,
+            sparse: false,
+        }).unwrap();
+        s.apply(&ChangeBatch { put_nodes: vec![
+            Node { data: serde_json::json!({"genre": "fiction"}).as_object().unwrap().clone(), ..book("a", "fiction", 1.0) },
+            Node { data: serde_json::json!({"genre": "fiction"}).as_object().unwrap().clone(), ..book("b", "fiction", 2.0) },
+        ], ..Default::default() }).unwrap();
+        let query = NodeQuery {
+            node_types: Some(vec!["book".into()]),
+            attributes: Some(serde_json::json!({"genre": "fiction"}).as_object().unwrap().clone()),
+            ..Default::default()
+        };
+        assert_eq!(s.query_nodes(&query).unwrap().len(), 2);
     }
 
     #[test]
