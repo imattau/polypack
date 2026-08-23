@@ -199,7 +199,7 @@ describe('PolyGraph activation', () => {
 
     const updated = graph.supersede('new', 'old')
     expect(updated?.supersedes).toBe('old')
-    expect(graph.getEdgeTargets('new', 'SUPERSEDED_BY')).toEqual(['old'])
+    expect(graph.getEdgeTargets('old', 'SUPERSEDED_BY')).toEqual(['new'])
 
     const engine = new ActivationEngine(graph)
     expect(engine.inhibitionOf('old')).toBeCloseTo(1, 5)

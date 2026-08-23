@@ -18,7 +18,7 @@ describe('personal memory reference workflow', () => {
     expect(memory.graph.getNode('new')?.source).toBe('project:README')
     expect(memory.graph.getNode('new')?.supersedes).toBe('old')
     expect(memory.graph.getNode('old')?.activation?.inhibition).toBeGreaterThan(0)
-    expect(memory.graph.getEdgeTargets('new', 'SUPERSEDED_BY')).toEqual(['old'])
+    expect(memory.graph.getEdgeTargets('old', 'SUPERSEDED_BY')).toEqual(['new'])
 
     memory.engine.dispose()
     await memory.graph.dispose()

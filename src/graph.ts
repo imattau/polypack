@@ -2199,7 +2199,7 @@ export class PolyGraph {
 
   /**
    * Mark `id` as superseding `supersededId`: records `id.supersedes =
-   * supersededId`, adds a `SUPERSEDED_BY` edge from `id` to `supersededId`
+   * supersededId`, adds a `SUPERSEDED_BY` edge from `supersededId` to `id`
    * (ownership `'reference'` — deleting either node never cascades to the
    * other), and suppresses the superseded node (see {@link suppressNode}) so
    * retrieval prefers the newer node without deleting the old one. Both the
@@ -2211,7 +2211,7 @@ export class PolyGraph {
   supersede(id: string, supersededId: string, amount = 1, reason = 'superseded'): PolyNode | undefined {
     if (!this.nodes.has(id) || !this.nodes.has(supersededId)) return undefined
     this.patchNode(id, { set: { supersedes: supersededId } })
-    this.addEdge(id, SUPERSEDED_BY_EDGE, supersededId, undefined, 'reference')
+    this.addEdge(supersededId, SUPERSEDED_BY_EDGE, id, undefined, 'reference')
     this.suppressNode(supersededId, amount, reason)
     return this.getNode(id)
   }

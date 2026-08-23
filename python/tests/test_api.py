@@ -362,7 +362,7 @@ def test_supersede_records_supersedes_adds_edge_and_suppresses_the_old_node():
 
     updated = graph.supersede("new", "old")
     assert updated["supersedes"] == "old"
-    assert graph.get_edge_targets("new", "SUPERSEDED_BY") == ["old"]
+    assert graph.get_edge_targets("old", "SUPERSEDED_BY") == ["new"]
 
     state = graph.get_activation_state("old")
     assert state["inhibition"] == pytest.approx(1.0, abs=1e-5)

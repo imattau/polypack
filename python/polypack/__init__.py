@@ -2277,8 +2277,8 @@ class PolyGraph:
 
     def supersede(self, id_: str, superseded_id: str, amount: float = 1.0, reason: Optional[str] = "superseded") -> Optional[Node]:
         """Mark `id_` as superseding `superseded_id`: records `id_.supersedes =
-        superseded_id`, adds a `SUPERSEDED_BY` edge from `id_` to
-        `superseded_id` (ownership "reference" — deleting either node never
+        superseded_id`, adds a `SUPERSEDED_BY` edge from `superseded_id` to
+        `id_` (ownership "reference" — deleting either node never
         cascades to the other), and suppresses the superseded node (see
         `suppress_node`) so retrieval prefers the newer node without deleting
         the old one. Both the historical relationship and the stale node
@@ -2287,7 +2287,7 @@ class PolyGraph:
         if id_ not in self._nodes or superseded_id not in self._nodes:
             return None
         self.patch_node(id_, set={"supersedes": superseded_id})
-        self.add_edge(id_, SUPERSEDED_BY_EDGE, superseded_id, ownership="reference")
+        self.add_edge(superseded_id, SUPERSEDED_BY_EDGE, id_, ownership="reference")
         self.suppress_node(superseded_id, amount, reason)
         return self.get_node(id_)
 

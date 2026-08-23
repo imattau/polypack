@@ -2505,8 +2505,8 @@ impl Graph {
     }
 
     /// Mark `id` as superseding `superseded_id`: records `id.supersedes =
-    /// superseded_id`, adds a [`SUPERSEDED_BY_EDGE`] edge from `id` to
-    /// `superseded_id` (`EdgeOwnership::Reference` — deleting either node
+    /// superseded_id`, adds a [`SUPERSEDED_BY_EDGE`] edge from `superseded_id`
+    /// to `id` (`EdgeOwnership::Reference` — deleting either node
     /// never cascades to the other), and suppresses the superseded node (see
     /// [`Self::suppress_node`]) so retrieval prefers the newer node without
     /// deleting the old one. Both the historical relationship and the stale
@@ -2525,7 +2525,7 @@ impl Graph {
         let mut set = serde_json::Map::new();
         set.insert("supersedes".to_string(), serde_json::json!(superseded_id));
         self.patch_node(id, set, Vec::new(), serde_json::Map::new(), serde_json::Map::new(), None)?;
-        self.add_edge(id, SUPERSEDED_BY_EDGE, superseded_id, None, EdgeOwnership::Reference)?;
+        self.add_edge(superseded_id, SUPERSEDED_BY_EDGE, id, None, EdgeOwnership::Reference)?;
         self.suppress_node(superseded_id, amount, reason)?;
         Ok(self.nodes.get(id))
     }
@@ -3590,7 +3590,7 @@ mod tests {
 
         let updated = g.supersede("new", "old", 1.0, Some("superseded")).unwrap().unwrap();
         assert_eq!(updated.supersedes.as_deref(), Some("old"));
-        assert_eq!(g.get_edge_targets("new", SUPERSEDED_BY_EDGE), vec!["old"]);
+        assert_eq!(g.get_edge_targets("old", SUPERSEDED_BY_EDGE), vec!["new"]);
 
         let state = g.get_activation_state("old").unwrap();
         assert!((state.inhibition.unwrap_or(0.0) - 1.0).abs() < 1e-5);
