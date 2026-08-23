@@ -3,6 +3,15 @@
 All notable changes to this project are documented here. This project follows
 [Semantic Versioning](https://semver.org/).
 
+## [3.3.1] - 2026-08-23
+
+### Fixed
+
+- `Graph.supersede()` wrote the `SUPERSEDED_BY` edge backwards (from the new
+  node to the old one), so graph traversal read the relationship as "the new
+  node is superseded by the old one" instead of the reverse. Fixed identically
+  across the Rust, TypeScript, and Python implementations.
+
 ## [3.3.0] - 2026-08-23
 
 ### Added
