@@ -2059,6 +2059,98 @@ mod tests {
     }
 
     #[test]
+    fn identity_cache_not_updated_when_wal_append_fails_and_retry_still_commits() {
+        struct FailOnceOnAppend {
+            inner: InMemoryStorage,
+            target: &'static str,
+            armed: bool,
+        }
+        impl Storage for FailOnceOnAppend {
+            fn read(&self, name: &str) -> Result<Option<Vec<u8>>> { self.inner.read(name) }
+            fn write(&mut self, name: &str, data: &[u8]) -> Result<()> { self.inner.write(name, data) }
+            fn append(&mut self, name: &str, data: &[u8]) -> Result<()> {
+                if self.armed && name == self.target {
+                    self.armed = false;
+                    return Err(PolypackError::Storage("injected failure".into()));
+                }
+                self.inner.append(name, data)
+            }
+            fn delete(&mut self, name: &str) -> Result<()> { self.inner.delete(name) }
+            fn exists(&self, name: &str) -> Result<bool> { self.inner.exists(name) }
+        }
+
+        let mut store = Store::new(Box::new(FailOnceOnAppend { inner: InMemoryStorage::new(), target: WAL_FILE, armed: true }), StoreConfig::default());
+        let changes = batch(&[node("once")]);
+        assert!(store.apply_with_transaction(&changes, Some("tx-fail")).is_err());
+        assert_eq!(store.node_count().unwrap(), 0);
+        assert_eq!(store.mutation_log().unwrap().len(), 0);
+
+        // The WAL append failed before the identity was ever recorded, so the
+        // retry must actually commit rather than being swallowed as a no-op.
+        store.apply_with_transaction(&changes, Some("tx-fail")).unwrap();
+        assert_eq!(store.node_count().unwrap(), 1);
+        assert!(store.get_node("once").unwrap().is_some());
+        assert_eq!(store.mutation_log().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn identity_cache_not_updated_when_mutation_log_append_fails_and_retry_still_commits() {
+        struct FailOnceOnAppend {
+            inner: InMemoryStorage,
+            target: &'static str,
+            armed: bool,
+        }
+        impl Storage for FailOnceOnAppend {
+            fn read(&self, name: &str) -> Result<Option<Vec<u8>>> { self.inner.read(name) }
+            fn write(&mut self, name: &str, data: &[u8]) -> Result<()> { self.inner.write(name, data) }
+            fn append(&mut self, name: &str, data: &[u8]) -> Result<()> {
+                if self.armed && name == self.target {
+                    self.armed = false;
+                    return Err(PolypackError::Storage("injected failure".into()));
+                }
+                self.inner.append(name, data)
+            }
+            fn delete(&mut self, name: &str) -> Result<()> { self.inner.delete(name) }
+            fn exists(&self, name: &str) -> Result<bool> { self.inner.exists(name) }
+        }
+
+        let mut store = Store::new(Box::new(FailOnceOnAppend { inner: InMemoryStorage::new(), target: MUTATION_LOG_FILE, armed: true }), StoreConfig::default());
+        let changes = batch(&[node("once")]);
+        assert!(store.apply_with_transaction(&changes, Some("tx-fail")).is_err());
+        assert_eq!(store.mutation_log().unwrap().len(), 0);
+
+        // The WAL entry was appended but the mutation-log append (where the
+        // identity cache is updated) failed, so a retry with the same
+        // transaction_id must still commit, not be treated as already applied.
+        store.apply_with_transaction(&changes, Some("tx-fail")).unwrap();
+        assert!(store.get_node("once").unwrap().is_some());
+        assert_eq!(store.mutation_log().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn identity_cache_is_not_left_half_built_when_mutation_log_is_corrupt() {
+        let storage = shared();
+        // Two lines: the log-parser tolerates a corrupt *final* line (a crash
+        // mid-append), so put the bad line first to force a genuine parse error.
+        storage.lock().unwrap().write(MUTATION_LOG_FILE, b"{ not json\n{ not json either\n").unwrap();
+
+        let mut store = Store::new(Box::new(storage.clone()), StoreConfig::default());
+        // ensure_loaded fails while parsing the corrupt log; `loaded` and the
+        // identity caches must stay at their untouched defaults rather than a
+        // partially-populated state, so a later valid load starts clean.
+        assert!(store.apply(&batch(&[node("a")])).is_err());
+
+        storage.lock().unwrap().write(MUTATION_LOG_FILE, b"").unwrap();
+        let mut recovered = Store::new(Box::new(storage), StoreConfig::default());
+        recovered.apply_with_transaction(&batch(&[node("a")]), Some("tx-1")).unwrap();
+        assert!(recovered.get_node("a").unwrap().is_some());
+        // A fresh Store's cache is rebuilt from persisted records, so a
+        // retried transaction_id is still recognized after this reload.
+        recovered.apply_with_transaction(&batch(&[node("b")]), Some("tx-1")).unwrap();
+        assert!(recovered.get_node("b").unwrap().is_none());
+    }
+
+    #[test]
     fn grows_compaction_threshold_with_store() {
         let snapshots = Arc::new(Mutex::new(0usize));
 
