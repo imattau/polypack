@@ -1,4 +1,11 @@
-# polypack
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/logo-lockup-dark.svg">
+    <img src="docs/assets/logo-lockup.svg" alt="polypack" height="64">
+  </picture>
+</p>
+
+<p align="center">Embedded graph and vector memory for adaptive, local-first apps.</p>
 
 [![npm version](https://img.shields.io/npm/v/%400xx0lostcause0xx0%2Fpolypack?logo=npm)](https://www.npmjs.com/package/@0xx0lostcause0xx0/polypack)
 [![GitHub release](https://img.shields.io/github/v/release/imattau/polypack?logo=github)](https://github.com/imattau/polypack/releases/latest)

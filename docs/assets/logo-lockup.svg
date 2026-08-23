@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 350 120" width="350" height="120" role="img" aria-label="polypack">
+  <title>polypack</title>
+  <g fill="none" stroke="#232a36" stroke-width="2.25" stroke-linecap="round">
+    <polygon points="60,18 96.4,39 96.4,81 60,102 23.6,81 23.6,39" />
+    <line x1="60" y1="60" x2="60" y2="18" />
+    <line x1="60" y1="60" x2="23.6" y2="81" />
+  </g>
+  <line x1="60" y1="60" x2="96.4" y2="81" stroke="#e2762f" stroke-width="2.75" stroke-linecap="round" />
+  <g fill="#232a36">
+    <circle cx="60" cy="18" r="5.5" />
+    <circle cx="96.4" cy="39" r="5.5" />
+    <circle cx="60" cy="102" r="5.5" />
+    <circle cx="23.6" cy="81" r="5.5" />
+    <circle cx="23.6" cy="39" r="5.5" />
+  </g>
+  <circle cx="60" cy="60" r="7.5" fill="#232a36" />
+  <circle cx="96.4" cy="81" r="6.5" fill="#e2762f" />
+  <text x="142" y="73" font-family="'Space Mono', 'JetBrains Mono', ui-monospace, monospace" font-weight="700" font-size="38" fill="#232a36" letter-spacing="-0.5">polypack</text>
+</svg>
