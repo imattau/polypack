@@ -1,5 +1,5 @@
 export { BinaryStoreAdapter } from './binary-store.js'
-export type { BinaryStoreConfig } from './binary-store.js'
+export type { BinaryStoreConfig, MutationLogRetention } from './binary-store.js'
 export { OPFSFileIO } from './file-io.js'
 export type { FileIO } from './file-io.js'
 export type { PersistenceAdapter, PersistenceChanges, PersistedNodeQuery } from './adapter.js'

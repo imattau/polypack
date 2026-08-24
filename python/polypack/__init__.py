@@ -2042,10 +2042,23 @@ class PolyGraph:
     # ── persistence (Rust storage state machine) ──
 
     @classmethod
-    def open(cls, directory: str, read_only: bool = False, compact_threshold: int = 10_000) -> "PolyGraph":
+    def open(
+        cls,
+        directory: str,
+        read_only: bool = False,
+        compact_threshold: int = 10_000,
+        mutation_log_max_entries: Optional[int] = None,
+        mutation_log_max_age_ms: Optional[int] = None,
+    ) -> "PolyGraph":
         """Open a directory-backed binary store and load its graph."""
         graph = cls()
-        graph.open_store(directory, read_only=read_only, compact_threshold=compact_threshold)
+        graph.open_store(
+            directory,
+            read_only=read_only,
+            compact_threshold=compact_threshold,
+            mutation_log_max_entries=mutation_log_max_entries,
+            mutation_log_max_age_ms=mutation_log_max_age_ms,
+        )
         return graph
 
     @classmethod
@@ -2062,10 +2075,32 @@ class PolyGraph:
                 shutil.copy2(source_file, destination_path / name)
         return cls.open(str(destination_path))
 
-    def open_store(self, directory: str, read_only: bool = False, compact_threshold: int = 10_000) -> None:
-        """Attach a directory-backed store and load any existing state."""
+    def open_store(
+        self,
+        directory: str,
+        read_only: bool = False,
+        compact_threshold: int = 10_000,
+        mutation_log_max_entries: Optional[int] = None,
+        mutation_log_max_age_ms: Optional[int] = None,
+    ) -> None:
+        """Attach a directory-backed store and load any existing state.
+
+        ``mutation_log_max_entries``/``mutation_log_max_age_ms`` configure an
+        optional retention policy for ``mutations.jsonl``, applied each time
+        the store compacts (i.e. on the same cadence as WAL compaction, and
+        on ``checkpoint()``/``close_store()``). Both default to unset, which
+        keeps the full mutation history forever, matching prior behavior.
+        When both are set, a record is retained only if it satisfies both
+        (the intersection). Trimming drops records from the front of the
+        log, so a sync consumer resuming from a sequence older than the
+        retained window will miss mutations.
+        """
         if not isinstance(compact_threshold, int) or compact_threshold < 1:
             raise PolypackValueError("compact_threshold must be a positive integer")
+        if mutation_log_max_entries is not None and (not isinstance(mutation_log_max_entries, int) or mutation_log_max_entries < 1):
+            raise PolypackValueError("mutation_log_max_entries must be a positive integer")
+        if mutation_log_max_age_ms is not None and (not isinstance(mutation_log_max_age_ms, int) or mutation_log_max_age_ms < 0):
+            raise PolypackValueError("mutation_log_max_age_ms must be a non-negative integer")
         had_pending_state = bool(
             self._dirty
             or self._nodes
@@ -2081,7 +2116,12 @@ class PolyGraph:
         self._dirty_node_ids.clear()
         self._dirty_edge_ids.clear()
         self._dirty_vector_ids.clear()
-        self._store = _NativeStore(DirectoryStorage(directory, read_only=read_only), compact_threshold)
+        self._store = _NativeStore(
+            DirectoryStorage(directory, read_only=read_only),
+            compact_threshold,
+            mutation_log_max_entries,
+            mutation_log_max_age_ms,
+        )
         self._store_directory = Path(directory)
         self._store_read_only = read_only
         self._dirty = False
@@ -2109,6 +2149,16 @@ class PolyGraph:
             raise PolypackStorageError("store was opened read-only")
         self.save()
         self._store.compact()
+
+    def trim_mutation_log(self) -> None:
+        """Trim ``mutations.jsonl`` per the retention policy configured in
+        ``open``/``open_store`` right now, independent of WAL-driven
+        compaction. A no-op when no retention policy was configured."""
+        if self._store is None:
+            raise PolypackStorageError("no store open; call open_store(path) first")
+        if self._store_read_only:
+            raise PolypackStorageError("store was opened read-only")
+        self._store.trim_mutation_log()
 
     def backup(self, destination: str) -> None:
         """Create a consistent directory backup after checkpointing the store."""

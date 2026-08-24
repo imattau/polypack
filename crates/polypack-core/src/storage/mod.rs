@@ -10,7 +10,8 @@ pub mod store;
 pub mod wal;
 
 pub use store::{
-    AdapterCapabilities, Durability, InMemoryStorage, MutationOperation, MutationRecord, NodeQuery, OrderBy, RangeQuery,
+    AdapterCapabilities, Durability, InMemoryStorage, MutationLogRetention, MutationOperation, MutationRecord, NodeQuery,
+    OrderBy, RangeQuery,
     EdgeTypeDefinition, NodeTypeDefinition, SecondaryIndexDefinition, Storage, Store, StoreConfig, VerificationReport,
     VectorSearchCapability,
     DEFAULT_COMPACT_THRESHOLD, INDEXES_FILE, MUTATION_LOG_FILE, SCHEMAS_FILE, SNAPSHOT_FILE, WAL_FILE,

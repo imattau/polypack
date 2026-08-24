@@ -367,7 +367,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
 // ── Storage / NativeStore ──
 
 use polypack_core::storage::{
-    AdapterCapabilities, Durability, NodeQuery, Store as CoreStore, StoreConfig, Storage,
+    AdapterCapabilities, Durability, MutationLogRetention, NodeQuery, Store as CoreStore, StoreConfig, Storage,
     VectorSearchCapability,
 };
 use std::sync::Mutex;
@@ -575,15 +575,33 @@ fn py_to_polypack<T: serde::de::DeserializeOwned>(value: &Bound<'_, PyAny>) -> P
 #[pymethods]
 impl NativeStore {
     #[new]
-    #[pyo3(signature = (storage, compact_threshold=10000))]
-    fn new(storage: Py<PyAny>, compact_threshold: usize) -> Self {
+    #[pyo3(signature = (storage, compact_threshold=10000, mutation_log_max_entries=None, mutation_log_max_age_ms=None))]
+    fn new(
+        storage: Py<PyAny>,
+        compact_threshold: usize,
+        mutation_log_max_entries: Option<usize>,
+        mutation_log_max_age_ms: Option<i64>,
+    ) -> Self {
+        let mutation_log_retention = if mutation_log_max_entries.is_some() || mutation_log_max_age_ms.is_some() {
+            Some(MutationLogRetention { max_entries: mutation_log_max_entries, max_age_ms: mutation_log_max_age_ms })
+        } else {
+            None
+        };
         let config = StoreConfig {
             compact_threshold,
             durability: Durability::Process,
+            mutation_log_retention,
         };
         NativeStore {
             inner: Mutex::new(CoreStore::new(Box::new(PythonStorage(storage)), config)),
         }
+    }
+
+    /// Trim `mutations.jsonl` per the configured retention policy right now,
+    /// independent of WAL-driven compaction. A no-op when no retention
+    /// policy was configured at construction.
+    fn trim_mutation_log(&self) -> PyResult<()> {
+        self.inner.lock().unwrap().trim_mutation_log().map_err(to_pyerr)
     }
 
     fn capabilities(&self, py: Python<'_>) -> PyResult<Py<PyDict>> {

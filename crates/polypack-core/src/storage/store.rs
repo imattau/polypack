@@ -411,6 +411,27 @@ pub struct StoreConfig {
     /// doesn't rewrite its snapshot on every batch. Default 10,000.
     pub compact_threshold: usize,
     pub durability: Durability,
+    /// Retention policy applied to `mutations.jsonl` each time `compact()`
+    /// runs (i.e. on the same cadence as WAL compaction, and on `close()`).
+    /// `None` (the default) keeps the full mutation history forever,
+    /// matching prior behavior. Trimming drops records from the front of
+    /// the log, so a sync consumer resuming from a sequence older than the
+    /// retained window will miss mutations — only enable this when nothing
+    /// depends on `mutation_log_since`/`mutation_log_page` reaching back
+    /// further than the configured window (e.g. replicas re-snapshot
+    /// instead of tailing arbitrarily far behind).
+    pub mutation_log_retention: Option<MutationLogRetention>,
+}
+
+/// Retention policy for `mutations.jsonl`. When both bounds are set, a
+/// record is retained only if it satisfies both (the intersection) — i.e. a
+/// record is dropped as soon as it falls outside either bound.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MutationLogRetention {
+    /// Keep at most this many of the newest records.
+    pub max_entries: Option<usize>,
+    /// Keep only records newer than this age, in milliseconds.
+    pub max_age_ms: Option<i64>,
 }
 
 impl Default for StoreConfig {
@@ -418,6 +439,7 @@ impl Default for StoreConfig {
         StoreConfig {
             compact_threshold: DEFAULT_COMPACT_THRESHOLD,
             durability: Durability::Process,
+            mutation_log_retention: None,
         }
     }
 }
@@ -1191,6 +1213,48 @@ impl Store {
             }
         }
         self.wal_entry_count = remaining;
+        self.trim_mutation_log()?;
+        Ok(())
+    }
+
+    /// Apply `config.mutation_log_retention` to `mutations.jsonl`, dropping
+    /// records that fall outside the configured window. A no-op when no
+    /// retention policy is configured, or when nothing would be dropped.
+    /// Called automatically by `compact()`; also public so a host can trim
+    /// on its own schedule independent of WAL-driven compaction.
+    pub fn trim_mutation_log(&mut self) -> Result<()> {
+        let Some(retention) = self.config.mutation_log_retention else { return Ok(()) };
+        if retention.max_entries.is_none() && retention.max_age_ms.is_none() {
+            return Ok(());
+        }
+        let records = self.mutation_log()?;
+        let len = records.len();
+        if len == 0 {
+            return Ok(());
+        }
+        let now = now_millis();
+        let retained: Vec<&MutationRecord> = records
+            .iter()
+            .enumerate()
+            .filter(|(index, record)| {
+                let within_count = retention.max_entries.map_or(true, |max| *index >= len.saturating_sub(max));
+                let within_age = retention.max_age_ms.map_or(true, |max_age| now.saturating_sub(record.timestamp) <= max_age);
+                within_count && within_age
+            })
+            .map(|(_, record)| record)
+            .collect();
+        if retained.len() == len {
+            return Ok(());
+        }
+        let mut encoded = Vec::new();
+        for record in retained {
+            encoded.extend_from_slice(&serde_json::to_vec(record).map_err(|error| PolypackError::CorruptData(format!("mutation log: {error}")))?);
+            encoded.push(b'\n');
+        }
+        self.storage.write(MUTATION_LOG_FILE, &encoded)?;
+        if self.config.durability == Durability::Fsync {
+            self.storage.sync(MUTATION_LOG_FILE)?;
+        }
         Ok(())
     }
 
@@ -1619,6 +1683,78 @@ mod tests {
         let wal = storage.lock().unwrap().read(WAL_FILE).unwrap().unwrap();
         assert!(wal.is_empty());
         s.close().unwrap();
+    }
+
+    #[test]
+    fn mutation_log_retention_none_keeps_full_history() {
+        let storage = shared();
+        let config = StoreConfig { compact_threshold: 1, ..Default::default() };
+        let mut s = Store::new(Box::new(storage), config);
+        for id in ["a", "b", "c"] {
+            s.apply(&batch(&[node(id)])).unwrap();
+        }
+        assert_eq!(s.mutation_log().unwrap().len(), 3);
+        s.close().unwrap();
+    }
+
+    #[test]
+    fn mutation_log_retention_by_count_trims_oldest_on_compact() {
+        let storage = shared();
+        let config = StoreConfig {
+            compact_threshold: 1,
+            mutation_log_retention: Some(MutationLogRetention { max_entries: Some(2), max_age_ms: None }),
+            ..Default::default()
+        };
+        let mut s = Store::new(Box::new(storage), config);
+        for id in ["a", "b", "c", "d"] {
+            // compact_threshold: 1 means every apply() triggers compact(),
+            // which in turn trims the mutation log.
+            s.apply(&batch(&[node(id)])).unwrap();
+        }
+        let log = s.mutation_log().unwrap();
+        assert_eq!(log.len(), 2);
+        let ids: Vec<&str> = log
+            .iter()
+            .flat_map(|record| record.operations.iter())
+            .map(|op| op.payload["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, vec!["c", "d"]);
+        // Trimming the durable log must not affect node data.
+        let mut ids = s.node_ids().unwrap();
+        ids.sort();
+        assert_eq!(ids, vec!["a".to_string(), "b".to_string(), "c".to_string(), "d".to_string()]);
+        s.close().unwrap();
+    }
+
+    #[test]
+    fn mutation_log_retention_by_age_trims_old_records_on_compact() {
+        let storage = shared();
+        let config = StoreConfig {
+            compact_threshold: 1,
+            mutation_log_retention: Some(MutationLogRetention { max_entries: None, max_age_ms: Some(0) }),
+            ..Default::default()
+        };
+        let mut s = Store::new(Box::new(storage), config);
+        s.apply(&batch(&[node("old")])).unwrap();
+        // The record from the first apply() is now strictly older than "now"
+        // by the time the second apply()'s compact() runs, so a zero max age
+        // drops it while the just-written record survives.
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        s.apply(&batch(&[node("new")])).unwrap();
+        let log = s.mutation_log().unwrap();
+        let ids: Vec<&str> =
+            log.iter().flat_map(|record| record.operations.iter()).map(|op| op.payload["id"].as_str().unwrap()).collect();
+        assert_eq!(ids, vec!["new"]);
+        s.close().unwrap();
+    }
+
+    #[test]
+    fn trim_mutation_log_is_a_noop_without_retention_config() {
+        let storage = shared();
+        let mut s = Store::new(Box::new(storage), StoreConfig::default());
+        s.apply(&batch(&[node("a")])).unwrap();
+        s.trim_mutation_log().unwrap();
+        assert_eq!(s.mutation_log().unwrap().len(), 1);
     }
 
     #[test]

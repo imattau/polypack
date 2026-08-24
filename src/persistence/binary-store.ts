@@ -19,6 +19,18 @@ const DEFAULT_COMPACT_THRESHOLD = 10_000
 /** Compact once the WAL holds at least this share of the store's record count. */
 const COMPACT_RATIO = 4
 
+/**
+ * Retention policy for `mutations.msgpack`. When both bounds are set, a
+ * record is retained only if it satisfies both (the intersection) — i.e. a
+ * record is dropped as soon as it falls outside either bound.
+ */
+export interface MutationLogRetention {
+  /** Keep at most this many of the newest records. */
+  maxEntries?: number
+  /** Keep only records newer than this age, in milliseconds. */
+  maxAgeMs?: number
+}
+
 export interface BinaryStoreConfig {
   /** Directory holding `snapshot.msgpack` and `wal.msgpack`. */
   storeDir: string
@@ -37,6 +49,18 @@ export interface BinaryStoreConfig {
   readOnly?: boolean
   /** Age after which an abandoned writer lock may be recovered. */
   staleLockMs?: number
+  /**
+   * Retention policy applied to `mutations.msgpack` each time `compact()`
+   * runs (i.e. on the same cadence as WAL compaction, and on `close()`).
+   * Undefined (the default) keeps the full mutation history forever,
+   * matching prior behavior. Trimming drops records from the front of the
+   * log, so a sync consumer resuming from a sequence older than the
+   * retained window will miss mutations — only enable this when nothing
+   * depends on `getMutationsSince`/`getMutationLogPage` reaching back
+   * further than the configured window (e.g. replicas re-snapshot instead
+   * of tailing arbitrarily far behind).
+   */
+  mutationLogRetention?: MutationLogRetention
 }
 
 interface ResolvedBinaryStoreConfig {
@@ -46,6 +70,7 @@ interface ResolvedBinaryStoreConfig {
   syncWrites: boolean
   readOnly: boolean
   staleLockMs: number
+  mutationLogRetention?: MutationLogRetention
 }
 
 /**
@@ -87,6 +112,7 @@ export class BinaryStoreAdapter implements PersistenceAdapter {
       syncWrites: config.syncWrites ?? false,
       readOnly: config.readOnly ?? false,
       staleLockMs: config.staleLockMs ?? DEFAULT_STALE_LOCK_MS,
+      mutationLogRetention: config.mutationLogRetention,
     }
     this.capabilities = {
       atomicBatches: true,
@@ -325,6 +351,44 @@ export class BinaryStoreAdapter implements PersistenceAdapter {
       }
     }
     this.walEntryCount = remaining
+    await this.trimMutationLogLocked()
+  }
+
+  /**
+   * Apply `config.mutationLogRetention` to `mutations.msgpack`, dropping
+   * records that fall outside the configured window. A no-op when no
+   * retention policy is configured, or when nothing would be dropped. Must
+   * run under the operation queue with the store already loaded — called by
+   * `compact()` and by the public `trimMutationLog()` wrapper below.
+   */
+  private async trimMutationLogLocked(): Promise<void> {
+    const retention = this.config.mutationLogRetention
+    if (!retention || (retention.maxEntries === undefined && retention.maxAgeMs === undefined)) return
+    const len = this.mutationRecords.length
+    if (len === 0) return
+    const now = Date.now()
+    const retained = this.mutationRecords.filter((record, index) => {
+      const withinCount = retention.maxEntries === undefined || index >= len - retention.maxEntries
+      const withinAge = retention.maxAgeMs === undefined || now - record.timestamp <= retention.maxAgeMs
+      return withinCount && withinAge
+    })
+    if (retained.length === len) return
+    this.mutationRecords = retained
+    await this.io.writeFile(MUTATION_LOG_FILE, encodeMutationRecords(retained))
+  }
+
+  /**
+   * Trim `mutations.msgpack` per `config.mutationLogRetention` right now,
+   * independent of WAL-driven compaction. A no-op when no retention policy
+   * is configured. See `trimMutationLogLocked` for the policy semantics.
+   */
+  async trimMutationLog(): Promise<void> {
+    this.assertOpen()
+    this.assertWritable()
+    await this.enqueue(async () => {
+      await this.ensureLoaded()
+      await this.trimMutationLogLocked()
+    })
   }
 
   private scheduleCompact(): void {

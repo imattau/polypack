@@ -628,6 +628,7 @@ impl NativeStore {
         let config = StoreConfig {
             compact_threshold: compact_threshold.unwrap_or(10_000) as usize,
             durability: Durability::Process,
+            mutation_log_retention: None,
         };
         let lock_dir = PathBuf::from(dir);
         let storage = FsStorage::new(lock_dir.clone(), read_only.unwrap_or(false)).map_err(to_napi_err)?;
@@ -906,6 +907,7 @@ pub fn restore_store(source: String, destination: String, compact_threshold: Opt
     let config = StoreConfig {
         compact_threshold: compact_threshold.unwrap_or(10_000) as usize,
         durability: Durability::Process,
+        mutation_log_retention: None,
     };
     let mut inner = CoreStore::restore(&source_storage, Box::new(destination_storage), config).map_err(to_napi_err)?;
     let report = inner.verify().map_err(to_napi_err)?;

@@ -256,6 +256,93 @@ describe('BinaryStoreAdapter', () => {
     })
   })
 
+  describe('mutation log retention', () => {
+    it('keeps full history when no retention policy is configured', async () => {
+      const io = new MemoryFileIO()
+      const a = new BinaryStoreAdapter({ storeDir: 'test', compactThreshold: 1_000_000, fileIO: io })
+      for (const id of ['a', 'b', 'c']) {
+        await a.putNode({ id, type: 't', data: {}, vector: null, insertedAt: 1, updatedAt: 1 })
+      }
+      await a.checkpoint()
+      expect(await a.getMutationsSince(0n)).toHaveLength(3)
+      await a.close()
+    })
+
+    it('trims to the newest N records on compact', async () => {
+      const io = new MemoryFileIO()
+      const a = new BinaryStoreAdapter({
+        storeDir: 'test',
+        compactThreshold: 1_000_000,
+        fileIO: io,
+        mutationLogRetention: { maxEntries: 2 },
+      })
+      for (const id of ['a', 'b', 'c', 'd']) {
+        await a.putNode({ id, type: 't', data: {}, vector: null, insertedAt: 1, updatedAt: 1 })
+      }
+      await a.checkpoint()
+      const records = await a.getMutationsSince(0n)
+      expect(records).toHaveLength(2)
+      const ids = records.flatMap(r => r.operations.map(op => (op.payload as { id: string }).id))
+      expect(ids).toEqual(['c', 'd'])
+      // Trimming the durable log must not affect node data.
+      expect((await a.allNodeIds()).sort()).toEqual(['a', 'b', 'c', 'd'])
+      await a.close()
+    })
+
+    it('trims records older than the configured age on compact', async () => {
+      const io = new MemoryFileIO()
+      const a = new BinaryStoreAdapter({
+        storeDir: 'test',
+        compactThreshold: 1_000_000,
+        fileIO: io,
+        mutationLogRetention: { maxAgeMs: 0 },
+      })
+      await a.putNode({ id: 'old', type: 't', data: {}, vector: null, insertedAt: 1, updatedAt: 1 })
+      await new Promise(r => setTimeout(r, 2))
+      await a.putNode({ id: 'new', type: 't', data: {}, vector: null, insertedAt: 2, updatedAt: 2 })
+      await a.checkpoint()
+      const records = await a.getMutationsSince(0n)
+      const ids = records.flatMap(r => r.operations.map(op => (op.payload as { id: string }).id))
+      expect(ids).toEqual(['new'])
+      await a.close()
+    })
+
+    it('survives close and reopen with the trimmed log intact', async () => {
+      const io = new MemoryFileIO()
+      const a = new BinaryStoreAdapter({
+        storeDir: 'test',
+        compactThreshold: 1_000_000,
+        fileIO: io,
+        mutationLogRetention: { maxEntries: 1 },
+      })
+      await a.putNode({ id: 'a', type: 't', data: {}, vector: null, insertedAt: 1, updatedAt: 1 })
+      await a.putNode({ id: 'b', type: 't', data: {}, vector: null, insertedAt: 2, updatedAt: 2 })
+      await a.checkpoint()
+      await a.close()
+
+      const b = new BinaryStoreAdapter({ storeDir: 'test', fileIO: io })
+      const records = await b.getMutationsSince(0n)
+      expect(records).toHaveLength(1)
+      await b.close()
+    })
+
+    it('trimMutationLog trims outside of WAL-driven compaction', async () => {
+      const io = new MemoryFileIO()
+      const a = new BinaryStoreAdapter({
+        storeDir: 'test',
+        compactThreshold: 1_000_000,
+        fileIO: io,
+        mutationLogRetention: { maxEntries: 1 },
+      })
+      await a.putNode({ id: 'a', type: 't', data: {}, vector: null, insertedAt: 1, updatedAt: 1 })
+      await a.putNode({ id: 'b', type: 't', data: {}, vector: null, insertedAt: 2, updatedAt: 2 })
+      expect(await a.getMutationsSince(0n)).toHaveLength(2)
+      await a.trimMutationLog()
+      expect(await a.getMutationsSince(0n)).toHaveLength(1)
+      await a.close()
+    })
+  })
+
   describe('persistence across instances', () => {
     it('survives close and reopen with snapshot', async () => {
       const io = new MemoryFileIO()

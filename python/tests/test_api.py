@@ -485,6 +485,89 @@ def test_latest_mutation_sequence_cursor(tmp_path):
     assert graph.latest_mutation_sequence() == graph.mutation_log()[-1]["sequence"]
 
 
+def test_mutation_log_retention_keeps_full_history_by_default(tmp_path):
+    graph = PolyGraph.open(str(tmp_path), compact_threshold=1)
+    for id_ in "abc":
+        graph.add_node({"id": id_, "type": "t", "data": {}, "insertedAt": 1, "updatedAt": 1})
+        graph.save()
+    assert len(graph.mutation_log()) == 3
+    graph.close_store()
+
+
+def test_mutation_log_retention_trims_to_newest_n_on_compact(tmp_path):
+    graph = PolyGraph.open(str(tmp_path), compact_threshold=1, mutation_log_max_entries=2)
+    for id_ in "abcd":
+        graph.add_node({"id": id_, "type": "t", "data": {}, "insertedAt": 1, "updatedAt": 1})
+        graph.save()
+    records = graph.mutation_log()
+    assert len(records) == 2
+    ids = [
+        operation["payload"]["id"]
+        for record in records
+        for operation in record["operations"]
+        if operation["operationType"] == "putNode"
+    ]
+    assert ids == ["c", "d"]
+    # Trimming the durable log must not affect node data.
+    assert [graph.get_node(id_) is not None for id_ in "abcd"] == [True, True, True, True]
+    graph.close_store()
+
+
+def test_mutation_log_retention_trims_by_age_on_compact(tmp_path):
+    import time
+
+    graph = PolyGraph.open(str(tmp_path), compact_threshold=1, mutation_log_max_age_ms=50)
+    graph.add_node({"id": "old", "type": "t", "data": {}, "insertedAt": 1, "updatedAt": 1})
+    graph.save()
+    time.sleep(0.1)
+    graph.add_node({"id": "new", "type": "t", "data": {}, "insertedAt": 2, "updatedAt": 2})
+    graph.save()
+    records = graph.mutation_log()
+    ids = [
+        operation["payload"]["id"]
+        for record in records
+        for operation in record["operations"]
+        if operation["operationType"] == "putNode"
+    ]
+    assert ids == ["new"]
+    graph.close_store()
+
+
+def test_mutation_log_retention_survives_close_and_reopen(tmp_path):
+    graph = PolyGraph.open(str(tmp_path), compact_threshold=1, mutation_log_max_entries=1)
+    graph.add_node({"id": "a", "type": "t", "data": {}, "insertedAt": 1, "updatedAt": 1})
+    graph.save()
+    graph.add_node({"id": "b", "type": "t", "data": {}, "insertedAt": 2, "updatedAt": 2})
+    graph.save()
+    graph.close_store()
+
+    reopened = PolyGraph.open(str(tmp_path))
+    assert len(reopened.mutation_log()) == 1
+    reopened.close_store()
+
+
+def test_trim_mutation_log_trims_outside_of_wal_driven_compaction(tmp_path):
+    graph = PolyGraph.open(str(tmp_path), mutation_log_max_entries=1)
+    graph.add_node({"id": "a", "type": "t", "data": {}, "insertedAt": 1, "updatedAt": 1})
+    graph.save()
+    graph.add_node({"id": "b", "type": "t", "data": {}, "insertedAt": 2, "updatedAt": 2})
+    graph.save()
+    assert len(graph.mutation_log()) == 2
+    graph.trim_mutation_log()
+    assert len(graph.mutation_log()) == 1
+    graph.close_store()
+
+
+def test_mutation_log_max_entries_must_be_a_positive_integer(tmp_path):
+    with pytest.raises(PolypackValueError):
+        PolyGraph.open(str(tmp_path), mutation_log_max_entries=0)
+
+
+def test_mutation_log_max_age_ms_must_be_non_negative(tmp_path):
+    with pytest.raises(PolypackValueError):
+        PolyGraph.open(str(tmp_path), mutation_log_max_age_ms=-1)
+
+
 def test_durable_mutation_log_fixture(tmp_path):
     fixture_path = Path(__file__).resolve().parents[2] / "fixtures" / "database-core" / "durable-mutation-log.json"
     fixture = json.loads(fixture_path.read_text())
