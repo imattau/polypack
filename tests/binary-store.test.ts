@@ -295,10 +295,13 @@ describe('BinaryStoreAdapter', () => {
         storeDir: 'test',
         compactThreshold: 1_000_000,
         fileIO: io,
-        mutationLogRetention: { maxAgeMs: 0 },
+        mutationLogRetention: { maxAgeMs: 50 },
       })
       await a.putNode({ id: 'old', type: 't', data: {}, vector: null, insertedAt: 1, updatedAt: 1 })
-      await new Promise(r => setTimeout(r, 2))
+      // The "old" record is well past the 50ms window by the time checkpoint
+      // runs, while "new" (just written) is comfortably inside it — avoids
+      // racing on a zero-width window under CI load.
+      await new Promise(r => setTimeout(r, 100))
       await a.putNode({ id: 'new', type: 't', data: {}, vector: null, insertedAt: 2, updatedAt: 2 })
       await a.checkpoint()
       const records = await a.getMutationsSince(0n)
