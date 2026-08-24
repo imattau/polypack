@@ -1731,15 +1731,15 @@ mod tests {
         let storage = shared();
         let config = StoreConfig {
             compact_threshold: 1,
-            mutation_log_retention: Some(MutationLogRetention { max_entries: None, max_age_ms: Some(0) }),
+            mutation_log_retention: Some(MutationLogRetention { max_entries: None, max_age_ms: Some(50) }),
             ..Default::default()
         };
         let mut s = Store::new(Box::new(storage), config);
         s.apply(&batch(&[node("old")])).unwrap();
-        // The record from the first apply() is now strictly older than "now"
-        // by the time the second apply()'s compact() runs, so a zero max age
-        // drops it while the just-written record survives.
-        std::thread::sleep(std::time::Duration::from_millis(2));
+        // The "old" record is now well past the 50ms window by the time the
+        // second apply()'s compact() runs, while "new" (just written) is
+        // comfortably inside it — avoids racing on a zero-width window.
+        std::thread::sleep(std::time::Duration::from_millis(100));
         s.apply(&batch(&[node("new")])).unwrap();
         let log = s.mutation_log().unwrap();
         let ids: Vec<&str> =

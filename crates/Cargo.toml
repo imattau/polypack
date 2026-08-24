@@ -4,7 +4,7 @@ members = ["polypack-core", "polypack-node", "polypack-python", "polypack-graph"
 
 [workspace.package]
 edition = "2021"
-version = "3.3.2"
+version = "3.4.0"
 license = "MIT"
 
 [profile.release]

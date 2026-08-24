@@ -3,6 +3,24 @@
 All notable changes to this project are documented here. This project follows
 [Semantic Versioning](https://semver.org/).
 
+## [3.4.0] - 2026-08-24
+
+### Added
+
+- Opt-in retention/trimming for the durable mutation log
+  (`mutations.jsonl`/`mutations.msgpack`), which previously grew without
+  bound for the life of a store. A `MutationLogRetention` policy (max entry
+  count and/or max age, applied as an intersection when both are set) can
+  now be configured and is applied on the existing compaction cadence, plus
+  a standalone trim call independent of WAL-driven compaction:
+  - Rust: `StoreConfig.mutation_log_retention` + `Store::trim_mutation_log`.
+  - TypeScript: `BinaryStoreConfig.mutationLogRetention` +
+    `BinaryStoreAdapter.trimMutationLog`.
+  - Python: `PolyGraph.open`/`open_store`'s `mutation_log_max_entries`/
+    `mutation_log_max_age_ms` + `PolyGraph.trim_mutation_log`.
+  - Defaults to unset everywhere, preserving the prior unbounded-history
+    behavior.
+
 ## [3.3.2] - 2026-08-23
 
 ### Fixed

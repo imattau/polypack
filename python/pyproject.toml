@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "polypack-db"
-version = "3.3.2"
+version = "3.4.0"
 description = "Embedded local-first property graph with vector search"
 readme = "README.md"
 requires-python = ">=3.8"

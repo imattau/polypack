@@ -1,6 +1,6 @@
 {
   "name": "@0xx0lostcause0xx0/polypack-native",
-  "version": "3.3.2",
+  "version": "3.4.0",
   "description": "NAPI-RS bindings exposing the polypack-core vector engine to Node.js",
   "repository": {
     "type": "git",
@@ -21,11 +21,11 @@
     "src"
   ],
   "optionalDependencies": {
-    "@0xx0lostcause0xx0/polypack-native-darwin-x64": "3.3.2",
-    "@0xx0lostcause0xx0/polypack-native-darwin-arm64": "3.3.2",
-    "@0xx0lostcause0xx0/polypack-native-linux-x64-gnu": "3.3.2",
-    "@0xx0lostcause0xx0/polypack-native-linux-arm64-gnu": "3.3.2",
-    "@0xx0lostcause0xx0/polypack-native-win32-x64-msvc": "3.3.2"
+    "@0xx0lostcause0xx0/polypack-native-darwin-x64": "3.4.0",
+    "@0xx0lostcause0xx0/polypack-native-darwin-arm64": "3.4.0",
+    "@0xx0lostcause0xx0/polypack-native-linux-x64-gnu": "3.4.0",
+    "@0xx0lostcause0xx0/polypack-native-linux-arm64-gnu": "3.4.0",
+    "@0xx0lostcause0xx0/polypack-native-win32-x64-msvc": "3.4.0"
   },
   "napi": {
     "binaryName": "polypack-native",
