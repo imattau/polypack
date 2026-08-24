@@ -1237,8 +1237,8 @@ impl Store {
             .iter()
             .enumerate()
             .filter(|(index, record)| {
-                let within_count = retention.max_entries.map_or(true, |max| *index >= len.saturating_sub(max));
-                let within_age = retention.max_age_ms.map_or(true, |max_age| now.saturating_sub(record.timestamp) <= max_age);
+                let within_count = retention.max_entries.is_none_or(|max| *index >= len.saturating_sub(max));
+                let within_age = retention.max_age_ms.is_none_or(|max_age| now.saturating_sub(record.timestamp) <= max_age);
                 within_count && within_age
             })
             .map(|(_, record)| record)
