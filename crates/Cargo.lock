@@ -251,7 +251,7 @@ checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 
 [[package]]
 name = "polypack-core"
-version = "3.4.0"
+version = "3.4.1"
 dependencies = [
  "rmp-serde",
  "rmpv",
@@ -261,7 +261,7 @@ dependencies = [
 
 [[package]]
 name = "polypack-graph"
-version = "3.4.0"
+version = "3.4.1"
 dependencies = [
  "polypack-core",
  "serde",
@@ -270,7 +270,7 @@ dependencies = [
 
 [[package]]
 name = "polypack-node"
-version = "3.4.0"
+version = "3.4.1"
 dependencies = [
  "napi",
  "napi-derive",
@@ -281,7 +281,7 @@ dependencies = [
 
 [[package]]
 name = "polypack-python"
-version = "3.4.0"
+version = "3.4.1"
 dependencies = [
  "numpy",
  "polypack-core",

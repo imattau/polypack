@@ -91,6 +91,10 @@ export class BinaryStoreAdapter implements PersistenceAdapter {
   private secondaryIndexes = new SecondaryIndexBuckets()
   private schemaDefinitions: PersistedSchemaDefinitions = { nodeTypes: [], edgeTypes: [] }
   private mutationRecords: MutationRecord[] = []
+  /** Mirrors `mutationRecords`' operationId/transactionId fields for O(1)
+   *  idempotency checks in `applyChanges` instead of an O(n) scan per call. */
+  private mutationOperationIds = new Set<string>()
+  private mutationTransactionIds = new Set<string>()
   private nextMutationSequence = 1n
   private byType = new Map<string, Set<string>>()
   private edgesBySource = new Map<string, Set<string>>()
@@ -185,6 +189,16 @@ export class BinaryStoreAdapter implements PersistenceAdapter {
     if (byTarget) {
       byTarget.delete(id)
       if (byTarget.size === 0) this.edgesByTarget.delete(edge.target)
+    }
+  }
+
+  /** Rebuild the operationId/transactionId membership sets from `mutationRecords`. */
+  private rebuildMutationIdentityIndex(): void {
+    this.mutationOperationIds.clear()
+    this.mutationTransactionIds.clear()
+    for (const record of this.mutationRecords) {
+      this.mutationOperationIds.add(record.operationId)
+      this.mutationTransactionIds.add(record.transactionId)
     }
   }
 
@@ -286,6 +300,7 @@ export class BinaryStoreAdapter implements PersistenceAdapter {
       if (this.mutationRecords.length > 0) {
         this.nextMutationSequence = this.mutationRecords[this.mutationRecords.length - 1].sequence + 1n
       }
+      this.rebuildMutationIdentityIndex()
     }
   }
 
@@ -374,6 +389,7 @@ export class BinaryStoreAdapter implements PersistenceAdapter {
     })
     if (retained.length === len) return
     this.mutationRecords = retained
+    this.rebuildMutationIdentityIndex()
     await this.io.writeFile(MUTATION_LOG_FILE, encodeMutationRecords(retained))
   }
 
@@ -405,11 +421,8 @@ export class BinaryStoreAdapter implements PersistenceAdapter {
     await this.enqueue(async () => {
       await this.ensureLoaded()
       if (
-        (changes.operationId || changes.transactionId) &&
-        this.mutationRecords.some(record =>
-          (changes.operationId && record.operationId === changes.operationId) ||
-          (changes.transactionId && record.transactionId === changes.transactionId),
-        )
+        (changes.operationId && this.mutationOperationIds.has(changes.operationId)) ||
+        (changes.transactionId && this.mutationTransactionIds.has(changes.transactionId))
       ) return
       const entries: WalEntry[] = []
       if (changes.indexDefinitions) {
@@ -458,6 +471,8 @@ export class BinaryStoreAdapter implements PersistenceAdapter {
         if (record) {
           await this.io.appendFile(MUTATION_LOG_FILE, encodeMutationRecords([record]))
           this.mutationRecords.push(record)
+          this.mutationOperationIds.add(record.operationId)
+          this.mutationTransactionIds.add(record.transactionId)
           this.nextMutationSequence++
         }
         this.walEntryCount += entries.length

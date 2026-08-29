@@ -3,6 +3,18 @@
 All notable changes to this project are documented here. This project follows
 [Semantic Versioning](https://semver.org/).
 
+## [3.4.1] - 2026-08-29
+
+### Fixed
+
+- `BinaryStoreAdapter.applyChanges`'s idempotency check scanned the entire
+  in-memory mutation log on every identity-bearing call (any write inside
+  `graph.transaction()`), an O(total historical mutation count) cost per
+  call — the same bug class fixed in the Rust core's
+  `Store::apply_with_identity` in 3.3.2. Replaced the `Array.some()` scan
+  with `mutationOperationIds`/`mutationTransactionIds` sets kept in sync
+  with `mutationRecords` (on load, on push, and on retention trimming).
+
 ## [3.4.0] - 2026-08-24
 
 ### Added
