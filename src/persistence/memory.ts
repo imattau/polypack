@@ -27,6 +27,8 @@ export class MemoryAdapter implements PersistenceAdapter {
   private secondaryIndexes = new SecondaryIndexBuckets()
   private schemaDefinitions: PersistedSchemaDefinitions = { nodeTypes: [], edgeTypes: [] }
   private mutations: MutationRecord[] = []
+  private mutationOperationIds = new Set<string>()
+  private mutationTransactionIds = new Set<string>()
   private nextMutation = 1n
   private readonly maxNodes: number | undefined
 
@@ -120,7 +122,10 @@ export class MemoryAdapter implements PersistenceAdapter {
   }
 
   async applyChanges(changes: PersistenceChanges): Promise<void> {
-    if (changes.operationId && this.mutations.some(record => record.operationId === changes.operationId)) return
+    if (
+      (changes.operationId && this.mutationOperationIds.has(changes.operationId)) ||
+      (changes.transactionId && this.mutationTransactionIds.has(changes.transactionId))
+    ) return
     if (changes.indexDefinitions) {
       this.indexDefinitions = changes.indexDefinitions.map(index => ({ ...index, fields: [...index.fields] }))
       this.secondaryIndexes.setDefinitions(this.indexDefinitions)
@@ -137,6 +142,8 @@ export class MemoryAdapter implements PersistenceAdapter {
     const record = mutationRecordFromChanges(changes, this.nextMutation)
     if (record) {
       this.mutations.push(record)
+      this.mutationOperationIds.add(record.operationId)
+      this.mutationTransactionIds.add(record.transactionId)
       this.nextMutation++
     }
   }
