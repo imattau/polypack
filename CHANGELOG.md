@@ -3,6 +3,15 @@
 All notable changes to this project are documented here. This project follows
 [Semantic Versioning](https://semver.org/).
 
+## [3.4.2] - 2026-10-03
+
+### Fixed
+
+- `MemoryAdapter.applyChanges` now deduplicates both operation IDs and
+  transaction IDs in constant time, matching the binary adapter and Rust
+  store. This prevents retried transactions from being applied twice and
+  avoids scanning the full in-memory mutation history on each write.
+
 ## [3.4.1] - 2026-08-29
 
 ### Fixed
