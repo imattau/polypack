@@ -110,7 +110,7 @@ fn unpack_mutation_vectors(value: &mut serde_json::Value) -> Result<()> {
             let Some(hex) = vector.get("__polypack_f32_hex").and_then(serde_json::Value::as_str) else { continue };
             if hex.len() % 8 != 0 { return Err(PolypackError::CorruptData("invalid packed Float32 mutation vector".into())); }
             let mut values = Vec::with_capacity(hex.len() / 8);
-            for chunk in hex.as_bytes().chunks_exact(8) {
+            for chunk in hex.as_bytes().chunks(8) {
                 let word = std::str::from_utf8(chunk).ok().and_then(|part| u32::from_str_radix(part, 16).ok())
                     .ok_or_else(|| PolypackError::CorruptData("invalid packed Float32 mutation vector".into()))?;
                 values.push(serde_json::Value::from(f32::from_bits(word) as f64));

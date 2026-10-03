@@ -338,7 +338,7 @@ fn msg_vector_f64(value: &Msg) -> Result<Vec<f64>> {
     if let Msg::Array(items) = value { return msg_vec_f64(items); }
     if let Some(Msg::Bin(bytes)) = value.get("__polypack_f32") {
         if bytes.len() % 4 != 0 { return Err(PolypackError::CorruptData("packed Float32 vector has invalid byte length".into())); }
-        return Ok(bytes.chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]) as f64).collect());
+        return Ok(bytes.chunks(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]) as f64).collect());
     }
     Err(PolypackError::CorruptData("vector must be a numeric array or packed Float32 map".into()))
 }
