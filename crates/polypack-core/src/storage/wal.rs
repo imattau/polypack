@@ -2,6 +2,7 @@
 //! TypeScript `WalEntry`.
 
 use crate::model::{Edge, Node};
+use crate::storage::format::VectorPrecision;
 
 // `Node` carries several optional provenance/activation fields, making it far
 // larger than the other variants. Boxing it would ripple through every WAL
@@ -17,4 +18,5 @@ pub enum WalEntry {
     PutVector { id: String, vector: Vec<f64> },
     DeleteVector(String),
     ClearAll,
+    SetPrecision(VectorPrecision),
 }

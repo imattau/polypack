@@ -24,9 +24,9 @@ A store directory contains two files:
 Files are treated as opaque byte streams; the storage adapter (filesystem,
 OPFS, memory) owns bytes only.
 
-## 3. Snapshot format (version 1)
+## 3. Snapshot format (versions 1 and 2)
 
-A single MessagePack map:
+A version 1 snapshot is a single MessagePack map:
 
 ```text
 {
@@ -37,10 +37,18 @@ A single MessagePack map:
 }
 ```
 
+Version 2 adds `vectorPrecision` (`float64` or `float32`). Float64 snapshots
+retain the v1 numeric-array payloads. Float32 vectors are encoded as a
+MessagePack map `{ "__polypack_f32": bin }`; `bin` contains consecutive
+little-endian IEEE-754 binary32 values. This applies to both the `vectors`
+table and each node's optional `vector`. Public decoding expands these packed
+payloads to the existing numeric-array representation. Readers must accept v1
+as Float64 and reject unsupported versions or precision labels.
+
 `version` is an integer. Readers must reject snapshots with an unsupported
 version with a precise version error.
 
-## 4. WAL format (version 1)
+## 4. WAL format (versions 1 and 2)
 
 A WAL is a byte sequence of frames. Each frame is:
 
@@ -59,7 +67,20 @@ An entry is one of:
 { "kind": "putVector",  "id": id, "vector": [number, ...] }
 { "kind": "deleteVector", "id": id }
 { "kind": "clearAll" }
+{ "kind": "setPrecision", "precision": "float32" | "float64" }
 ```
+
+Version 2 Float32 `putVector` and `putNode.vector` payloads use the same packed
+map encoding as snapshots. The first WAL entry in a new store records its
+precision so recovery before the first snapshot adopts the right setting.
+
+Precision changes are explicit offline operations. The Node and Python
+filesystem helpers build and verify a sibling store, retain the original at a
+caller-selected backup path (or a timestamped default), and then replace the
+store directory. Applications must stop all processes using the store during
+migration. On failure before replacement, the source remains untouched; if
+replacement fails after the source rename, the helpers attempt to restore the
+backup.
 
 Decoding stops at the first truncated or invalid frame; the trailing partial
 frame is ignored. A crash mid-append therefore loses at most the in-flight
@@ -153,6 +174,12 @@ The current Rust and Python directory implementations encode one JSON object
 per newline in `mutations.jsonl`. Each operation is represented as
 `{ "operationType": string, "payload": object }`. The recovery WAL remains
 MessagePack-framed and is not interchangeable with this logical log.
+For Float32 stores, Rust/Python writers encode `putNode.vector` and
+`putVector.vector` as `{ "__polypack_f32_hex": string }`, where each value is
+the eight-digit lowercase hexadecimal form of its IEEE-754 binary32 bit pattern.
+Readers expand this marker back to numeric arrays; legacy JSON numeric arrays
+remain readable. This keeps the mutation-log API shape stable while avoiding
+Float64-sized decimal payloads for Float32 vectors.
 
 Implementations expose cursor reads over records whose sequence is greater than
 the supplied cursor. Bounded page reads are recommended for replication and

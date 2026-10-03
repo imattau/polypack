@@ -4,7 +4,69 @@
 //! `specification/data-model.md` section 6.
 
 use crate::error::{PolypackError, Result};
+use crate::storage::VectorPrecision;
 use std::collections::HashMap;
+
+#[derive(Clone)]
+pub(crate) enum StoredVector {
+    F32(Vec<f32>),
+    F64(Vec<f64>),
+}
+
+impl StoredVector {
+    pub(crate) fn new(vector: &[f64], precision: VectorPrecision) -> Self {
+        match precision {
+            VectorPrecision::Float32 => Self::F32(vector.iter().map(|value| *value as f32).collect()),
+            VectorPrecision::Float64 => Self::F64(vector.to_vec()),
+        }
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        match self { Self::F32(vector) => vector.len(), Self::F64(vector) => vector.len() }
+    }
+
+    pub(crate) fn value(&self, index: usize) -> f64 {
+        match self { Self::F32(vector) => vector[index] as f64, Self::F64(vector) => vector[index] }
+    }
+
+    pub(crate) fn to_f64(&self) -> Vec<f64> {
+        match self { Self::F32(vector) => vector.iter().map(|value| *value as f64).collect(), Self::F64(vector) => vector.clone() }
+    }
+
+    pub(crate) fn similarity(&self, query: &[f64], distance: DistanceFn) -> Result<f64> {
+        mixed_similarity(query.len(), |index| query[index], self, distance)
+    }
+
+    pub(crate) fn similarity_to(&self, other: &Self, distance: DistanceFn) -> Result<f64> {
+        mixed_similarity(self.len(), |index| self.value(index), other, distance)
+    }
+}
+
+fn mixed_similarity(len: usize, left: impl Fn(usize) -> f64, right: &StoredVector, distance: DistanceFn) -> Result<f64> {
+    if len != right.len() {
+        return Err(PolypackError::DimensionMismatch { expected: len, got: right.len() });
+    }
+    let mut dot = 0.0;
+    let mut left_norm = 0.0;
+    let mut right_norm = 0.0;
+    let mut euclidean_sum = 0.0;
+    for index in 0..len {
+        let a = left(index);
+        let b = right.value(index);
+        dot += a * b;
+        left_norm += a * a;
+        right_norm += b * b;
+        let delta = a - b;
+        euclidean_sum += delta * delta;
+    }
+    match distance {
+        DistanceFn::Cosine => {
+            let denominator = left_norm.sqrt() * right_norm.sqrt();
+            Ok(if denominator == 0.0 { 0.0 } else { dot / denominator })
+        }
+        DistanceFn::Euclidean => Ok(1.0 / (1.0 + euclidean_sum.sqrt())),
+    }
+}
 
 /// Cosine similarity in `[0, 1]` (`0` for a zero vector). Errs on dimension mismatch.
 pub fn cosine(a: &[f64], b: &[f64]) -> Result<f64> {
@@ -53,18 +115,32 @@ pub struct ScoredId {
 /// Exact in-memory vector index with the same ordering semantics as the
 /// TypeScript `VectorIndex`: ties break by insertion order.
 pub struct ExactIndex {
-    entries: Vec<(String, Vec<f64>)>,
+    entries: Vec<(String, StoredVector)>,
     positions: HashMap<String, usize>,
     distance: DistanceFn,
+    precision: VectorPrecision,
 }
 
 impl ExactIndex {
     pub fn new(distance: DistanceFn) -> Self {
+        Self::new_with_precision(distance, VectorPrecision::Float64)
+    }
+
+    pub fn new_with_precision(distance: DistanceFn, precision: VectorPrecision) -> Self {
         ExactIndex {
             entries: Vec::new(),
             positions: HashMap::new(),
             distance,
+            precision,
         }
+    }
+
+    pub fn set_precision(&mut self, precision: VectorPrecision) {
+        if self.precision == precision { return; }
+        for (_, vector) in &mut self.entries {
+            *vector = StoredVector::new(&vector.to_f64(), precision);
+        }
+        self.precision = precision;
     }
 
     pub fn add(&mut self, id: &str, vector: &[f64]) -> Result<()> {
@@ -75,11 +151,11 @@ impl ExactIndex {
             return Err(PolypackError::InvalidArgument("vector must contain finite values".into()));
         }
         if let Some(&pos) = self.positions.get(id) {
-            self.entries[pos] = (id.to_string(), vector.to_vec());
+            self.entries[pos] = (id.to_string(), StoredVector::new(vector, self.precision));
             return Ok(());
         }
         self.positions.insert(id.to_string(), self.entries.len());
-        self.entries.push((id.to_string(), vector.to_vec()));
+        self.entries.push((id.to_string(), StoredVector::new(vector, self.precision)));
         Ok(())
     }
 
@@ -96,12 +172,16 @@ impl ExactIndex {
         self.positions.contains_key(id)
     }
 
-    pub fn get(&self, id: &str) -> Option<&[f64]> {
-        self.positions.get(id).map(|&pos| self.entries[pos].1.as_slice())
+    pub fn get(&self, id: &str) -> Option<Vec<f64>> {
+        self.positions.get(id).map(|&pos| self.entries[pos].1.to_f64())
     }
 
     pub fn size(&self) -> usize {
         self.entries.len()
+    }
+
+    pub fn resident_vector_bytes(&self) -> usize {
+        self.entries.iter().map(|(_, vector)| vector.len() * if self.precision == VectorPrecision::Float32 { 4 } else { 8 }).sum()
     }
 
     pub fn clear(&mut self) {
@@ -111,7 +191,7 @@ impl ExactIndex {
 
     /// (id, vector) pairs in insertion order.
     pub fn entries(&self) -> Vec<(String, Vec<f64>)> {
-        self.entries.clone()
+        self.entries.iter().map(|(id, vector)| (id.clone(), vector.to_f64())).collect()
     }
 
     pub fn query(&self, vector: &[f64], top_k: usize, threshold: f64) -> Result<Vec<ScoredId>> {
@@ -131,10 +211,7 @@ impl ExactIndex {
             if v.len() != vector.len() {
                 return Err(PolypackError::DimensionMismatch { expected: vector.len(), got: v.len() });
             }
-            let score = match self.distance {
-                DistanceFn::Cosine => cosine(vector, v)?,
-                DistanceFn::Euclidean => euclidean(vector, v)?,
-            };
+            let score = v.similarity(vector, self.distance)?;
             if score < threshold {
                 continue;
             }
@@ -230,6 +307,14 @@ mod tests {
         idx.remove("a");
         assert!(!idx.has("a"));
         assert_eq!(idx.size(), 0);
+    }
+
+    #[test]
+    fn float32_retains_half_vector_payload_and_widens_detached_reads() {
+        let mut index = ExactIndex::new_with_precision(DistanceFn::Cosine, VectorPrecision::Float32);
+        index.add("a", &[1.0 / 3.0; 384]).unwrap();
+        assert_eq!(index.resident_vector_bytes(), 384 * 4);
+        assert_eq!(index.get("a").unwrap()[0], (1.0f64 / 3.0) as f32 as f64);
     }
 
     #[test]

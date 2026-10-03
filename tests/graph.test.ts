@@ -12,6 +12,28 @@ describe('PolyGraph', () => {
     graph = new PolyGraph()
   })
 
+  it('stores Float32 node vectors compactly and widens public reads', () => {
+    const compact = new PolyGraph(undefined, undefined, undefined, undefined, undefined, 'float32')
+    compact.addNode({ id: 'f32', type: 'doc', data: {}, vector: new Float32Array([1 / 3]), insertedAt: 1, updatedAt: 1 })
+    expect(compact.getNode('f32')!.vector).toBeInstanceOf(Float64Array)
+    expect(compact.getNode('f32')!.vector![0]).toBe(Math.fround(1 / 3))
+    expect(compact['nodes'].get('f32')!.vector).toBeInstanceOf(Float32Array)
+  })
+
+  it('adopts recorded precision before hydrating from a durable adapter', async () => {
+    const io = new MemoryFileIO()
+    const writer = new BinaryStoreAdapter({ storeDir: 'graph-f32', fileIO: io, vectorPrecision: 'float32' })
+    await writer.putNode({ id: 'n', type: 'doc', data: {}, vector: [1 / 3], insertedAt: 1, updatedAt: 1 })
+    await writer.close()
+    const adapter = new BinaryStoreAdapter({ storeDir: 'graph-f32', fileIO: io })
+    const restored = new PolyGraph(adapter)
+    await restored.warm()
+    expect(restored.vectorPrecision).toBe('float32')
+    expect(restored['nodes'].get('n')!.vector).toBeInstanceOf(Float32Array)
+    expect(restored.getNode('n')!.vector).toBeInstanceOf(Float64Array)
+    await adapter.close()
+  })
+
   describe('node CRUD', () => {
     it('adds and retrieves a node', () => {
       graph.addNode({

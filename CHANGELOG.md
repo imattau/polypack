@@ -3,6 +3,31 @@
 All notable changes to this project are documented here. This project follows
 [Semantic Versioning](https://semver.org/).
 
+## [3.5.0] - 2026-10-03
+
+### Added
+
+- Opt-in Float32 vector precision across TypeScript, Rust, and Python. Float64
+  remains the default; Float32 stores quantize vectors at write time and keep
+  compact buffers in the TypeScript and native exact/HNSW indexes, Rust Store,
+  and Python graph cache. Public vector reads retain their existing numeric
+  shapes and widen Float32 values.
+- Persistence v2 packs Float32 vectors in snapshots, WAL records, and durable
+  mutation logs while continuing to read v1 Float64 stores. Stores record their
+  precision and reject explicit precision mismatches. Offline precision
+  migration APIs convert in either direction and retain a verified backup.
+- Node and Python exact/HNSW index constructors accept explicit vector
+  precision; TypeScript index and graph inputs accept `Float32Array`.
+
+### Notes
+
+- Float32 is opt-in and may alter similarity rankings through expected
+  quantization. The 384-dimensional 50K-vector benchmark exceeded the current
+  5% latency target on the measured host; 100K passed. Keep Float64 as the
+  default and evaluate workload-specific latency before opting in.
+- Widening a Float32 store cannot restore precision discarded during earlier
+  writes.
+
 ## [3.4.2] - 2026-10-03
 
 ### Fixed

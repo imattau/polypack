@@ -147,17 +147,33 @@ describe('cross-language byte compatibility', () => {
     if (!available) return
     const dir = tempDir('ts-to-rust')
     try {
-      const ts = new BinaryStoreAdapter({ storeDir: dir, fileIO: new NodeFileIO(dir) })
+      const ts = new BinaryStoreAdapter({ storeDir: dir, fileIO: new NodeFileIO(dir), vectorPrecision: 'float32' })
       await ts.bulkPutNodes([
-        { id: 'a', type: 'doc', data: { v: 1 }, vector: [1, 0], insertedAt: 1, updatedAt: 1 },
+        { id: 'a', type: 'doc', data: { v: 1 }, vector: [1 / 3, 0], insertedAt: 1, updatedAt: 1 },
         { id: 'b', type: 'doc', data: { v: 2 }, vector: null, insertedAt: 2, updatedAt: 2 },
       ])
       await ts.close()
 
       const native = new NativeStore(dir)
       expect(native.nodeIds().sort()).toEqual(['a', 'b'])
-      expect(native.getNode('a')).toMatchObject({ vector: [1, 0] })
+      expect(native.getNode('a')).toMatchObject({ vector: [Math.fround(1 / 3), 0] })
       native.close()
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('round-trips the shared Float32 snapshot format from Rust to TypeScript', async () => {
+    if (!available) return
+    const dir = tempDir('rust-f32-to-ts')
+    try {
+      const native = new NativeStore(dir, undefined, false, 'float32')
+      native.apply({ putNodes: [{ ...node('f32'), vector: [1 / 3] }] })
+      native.close()
+      const ts = new BinaryStoreAdapter({ storeDir: dir, fileIO: new NodeFileIO(dir) })
+      expect(await ts.getVectorPrecision()).toBe('float32')
+      expect((await ts.getNode('f32'))?.vector?.[0]).toBe(Math.fround(1 / 3))
+      await ts.close()
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }

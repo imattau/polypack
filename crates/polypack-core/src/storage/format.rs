@@ -15,6 +15,16 @@ use crate::storage::wal::WalEntry;
 
 const SNAPSHOT_VERSION: i64 = 1;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VectorPrecision { Float64, Float32 }
+
+fn packed_vector(vector: &[f64], precision: VectorPrecision) -> Msg {
+    if precision == VectorPrecision::Float64 { return Msg::Array(vector.iter().map(|x| Msg::Float(*x)).collect()); }
+    let mut bytes = Vec::with_capacity(vector.len() * 4);
+    for value in vector { bytes.extend_from_slice(&(*value as f32).to_le_bytes()); }
+    Msg::map(vec![("__polypack_f32", Msg::Bin(bytes))])
+}
+
 fn json_to_msg(value: &serde_json::Value) -> Msg {
     match value {
         serde_json::Value::Null => Msg::Nil,
@@ -43,6 +53,7 @@ fn msg_to_json(msg: &Msg) -> serde_json::Value {
         Msg::Int(i) => serde_json::Value::Number((*i).into()),
         Msg::Float(f) => serde_json::Value::Number(serde_json::Number::from_f64(*f).unwrap_or(serde_json::Number::from(0))),
         Msg::Str(s) => serde_json::Value::String(s.clone()),
+        Msg::Bin(bytes) => serde_json::Value::Array(bytes.iter().map(|byte| serde_json::Value::from(*byte)).collect()),
         Msg::Array(items) => serde_json::Value::Array(items.iter().map(msg_to_json).collect()),
         Msg::Map(entries) => {
             let mut map = serde_json::Map::new();
@@ -160,11 +171,11 @@ fn msg_to_activation(msg: &Msg) -> Result<Option<crate::model::NodeActivation>> 
     }))
 }
 
-fn node_to_msg(node: &Node) -> Msg {
+fn node_to_msg(node: &Node, precision: VectorPrecision) -> Msg {
     let vector = node
         .vector
         .as_ref()
-        .map(|v| Msg::Array(v.iter().map(|x| Msg::Float(*x)).collect()))
+        .map(|v| packed_vector(v, precision))
         .unwrap_or(Msg::Nil);
     let mut fields = vec![
         ("id", Msg::Str(node.id.clone())),
@@ -239,7 +250,7 @@ fn msg_to_node(msg: &Msg) -> Result<Node> {
         _ => return Err(PolypackError::CorruptData("node data must be a map".into())),
     };
     let vector = match msg.get("vector") {
-        Some(Msg::Array(items)) => Some(msg_vec_f64(items)?),
+        Some(value @ Msg::Array(_)) | Some(value @ Msg::Map(_)) => Some(msg_vector_f64(value)?),
         Some(Msg::Nil) | None => None,
         _ => return Err(PolypackError::CorruptData("node vector must be an array or null".into())),
     };
@@ -323,6 +334,15 @@ fn msg_vec_f64(items: &[Msg]) -> Result<Vec<f64>> {
         .collect()
 }
 
+fn msg_vector_f64(value: &Msg) -> Result<Vec<f64>> {
+    if let Msg::Array(items) = value { return msg_vec_f64(items); }
+    if let Some(Msg::Bin(bytes)) = value.get("__polypack_f32") {
+        if bytes.len() % 4 != 0 { return Err(PolypackError::CorruptData("packed Float32 vector has invalid byte length".into())); }
+        return Ok(bytes.chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]) as f64).collect());
+    }
+    Err(PolypackError::CorruptData("vector must be a numeric array or packed Float32 map".into()))
+}
+
 fn msg_int_field(msg: &Msg, key: &str) -> Result<i64> {
     match msg.get(key) {
         Some(Msg::Int(i)) => Ok(*i),
@@ -400,6 +420,7 @@ pub struct SnapshotData {
     pub nodes: Vec<(String, Node)>,
     pub edges: Vec<(String, Edge)>,
     pub vectors: Vec<(String, Vec<f64>)>,
+    pub vector_precision: VectorPrecision,
 }
 
 pub fn encode_snapshot(
@@ -407,10 +428,14 @@ pub fn encode_snapshot(
     edges: &[(String, Edge)],
     vectors: &[(String, Vec<f64>)],
 ) -> Vec<u8> {
+    encode_snapshot_with_precision(nodes, edges, vectors, VectorPrecision::Float64, false)
+}
+
+pub fn encode_snapshot_with_precision(nodes: &[(String, Node)], edges: &[(String, Edge)], vectors: &[(String, Vec<f64>)], precision: VectorPrecision, version2: bool) -> Vec<u8> {
     let nodes_msg = Msg::Array(
         nodes
             .iter()
-            .map(|(id, n)| Msg::Array(vec![Msg::Str(id.clone()), node_to_msg(n)]))
+            .map(|(id, n)| Msg::Array(vec![Msg::Str(id.clone()), node_to_msg(n, precision)]))
             .collect(),
     );
     let edges_msg = Msg::Array(
@@ -425,17 +450,19 @@ pub fn encode_snapshot(
             .map(|(id, v)| {
                 Msg::Array(vec![
                     Msg::Str(id.clone()),
-                    Msg::Array(v.iter().map(|x| Msg::Float(*x)).collect()),
+                    packed_vector(v, precision),
                 ])
             })
             .collect(),
     );
-    let snap = Msg::map(vec![
-        ("version", Msg::Int(SNAPSHOT_VERSION)),
+    let mut fields = vec![
+        ("version", Msg::Int(if version2 { 2 } else { SNAPSHOT_VERSION })),
         ("nodes", nodes_msg),
         ("edges", edges_msg),
         ("vectors", vectors_msg),
-    ]);
+    ];
+    if version2 { fields.push(("vectorPrecision", Msg::Str(if precision == VectorPrecision::Float32 { "float32" } else { "float64" }.into()))); }
+    let snap = Msg::map(fields);
     let mut out = Vec::new();
     encode(&snap, &mut out);
     out
@@ -444,9 +471,14 @@ pub fn encode_snapshot(
 pub fn decode_snapshot(data: &[u8]) -> Result<SnapshotData> {
     let msg = decode(data)?;
     let version = msg_int_field(&msg, "version")?;
-    if version != SNAPSHOT_VERSION {
+    if version != SNAPSHOT_VERSION && version != 2 {
         return Err(PolypackError::FormatVersion(version as u64));
     }
+    let vector_precision = if version == 1 { VectorPrecision::Float64 } else { match msg.get_str("vectorPrecision") {
+        Some("float32") => VectorPrecision::Float32,
+        Some("float64") => VectorPrecision::Float64,
+        _ => return Err(PolypackError::CorruptData("invalid snapshot vectorPrecision".into())),
+    }};
     let nodes = match msg.get("nodes") {
         Some(Msg::Array(items)) => {
             let mut out = Vec::with_capacity(items.len());
@@ -487,7 +519,7 @@ pub fn decode_snapshot(data: &[u8]) -> Result<SnapshotData> {
                     Msg::Array(pair) if pair.len() == 2 => {
                         let id = msg_str(&pair[0])?;
                         let vector = match &pair[1] {
-                            Msg::Array(v) => msg_vec_f64(v)?,
+                            value @ (Msg::Array(_) | Msg::Map(_)) => msg_vector_f64(value)?,
                             _ => return Err(PolypackError::CorruptData("vector entry must be [id, array]".into())),
                         };
                         out.push((id, vector));
@@ -499,7 +531,7 @@ pub fn decode_snapshot(data: &[u8]) -> Result<SnapshotData> {
         }
         _ => Vec::new(),
     };
-    Ok(SnapshotData { nodes, edges, vectors })
+    Ok(SnapshotData { nodes, edges, vectors, vector_precision })
 }
 
 fn msg_str(msg: &Msg) -> Result<String> {
@@ -510,9 +542,13 @@ fn msg_str(msg: &Msg) -> Result<String> {
 }
 
 pub fn encode_wal(entries: &[WalEntry]) -> Vec<u8> {
+    encode_wal_with_precision(entries, VectorPrecision::Float64)
+}
+
+pub fn encode_wal_with_precision(entries: &[WalEntry], precision: VectorPrecision) -> Vec<u8> {
     let mut out = Vec::new();
     for entry in entries {
-        let body = entry_to_msg(entry);
+        let body = entry_to_msg(entry, precision);
         let mut frame = Vec::new();
         encode(&body, &mut frame);
         out.extend_from_slice(&(frame.len() as u32).to_be_bytes());
@@ -521,19 +557,23 @@ pub fn encode_wal(entries: &[WalEntry]) -> Vec<u8> {
     out
 }
 
-fn entry_to_msg(entry: &WalEntry) -> Msg {
+fn entry_to_msg(entry: &WalEntry, precision: VectorPrecision) -> Msg {
     match entry {
-        WalEntry::PutNode(node) => Msg::map(vec![("kind", Msg::str("putNode")), ("node", node_to_msg(node))]),
+        WalEntry::PutNode(node) => Msg::map(vec![("kind", Msg::str("putNode")), ("node", node_to_msg(node, precision))]),
         WalEntry::DeleteNode(id) => Msg::map(vec![("kind", Msg::str("deleteNode")), ("id", Msg::Str(id.clone()))]),
         WalEntry::PutEdge(edge) => Msg::map(vec![("kind", Msg::str("putEdge")), ("edge", edge_to_msg(edge))]),
         WalEntry::DeleteEdge(id) => Msg::map(vec![("kind", Msg::str("deleteEdge")), ("id", Msg::Str(id.clone()))]),
         WalEntry::PutVector { id, vector } => Msg::map(vec![
             ("kind", Msg::str("putVector")),
             ("id", Msg::Str(id.clone())),
-            ("vector", Msg::Array(vector.iter().map(|x| Msg::Float(*x)).collect())),
+            ("vector", packed_vector(vector, precision)),
         ]),
         WalEntry::DeleteVector(id) => Msg::map(vec![("kind", Msg::str("deleteVector")), ("id", Msg::Str(id.clone()))]),
         WalEntry::ClearAll => Msg::map(vec![("kind", Msg::str("clearAll"))]),
+        WalEntry::SetPrecision(precision) => Msg::map(vec![
+            ("kind", Msg::str("setPrecision")),
+            ("precision", Msg::str(if *precision == VectorPrecision::Float32 { "float32" } else { "float64" })),
+        ]),
     }
 }
 
@@ -582,13 +622,18 @@ fn msg_to_entry(msg: &Msg) -> Result<WalEntry> {
         "putVector" => {
             let id = msg_str_field(msg, "id")?;
             let vector = match msg.get("vector") {
-                Some(Msg::Array(items)) => msg_vec_f64(items)?,
+                Some(value @ (Msg::Array(_) | Msg::Map(_))) => msg_vector_f64(value)?,
                 _ => return Err(PolypackError::CorruptData("putVector missing vector".into())),
             };
             Ok(WalEntry::PutVector { id, vector })
         }
         "deleteVector" => Ok(WalEntry::DeleteVector(msg_str_field(msg, "id")?)),
         "clearAll" => Ok(WalEntry::ClearAll),
+        "setPrecision" => match msg.get_str("precision") {
+            Some("float32") => Ok(WalEntry::SetPrecision(VectorPrecision::Float32)),
+            Some("float64") => Ok(WalEntry::SetPrecision(VectorPrecision::Float64)),
+            _ => Err(PolypackError::CorruptData("invalid WAL vector precision".into())),
+        },
         other => Err(PolypackError::CorruptData(format!("unknown wal kind {other}"))),
     }
 }
@@ -689,6 +734,20 @@ mod tests {
         let decoded = decode_snapshot(&bytes).unwrap();
         assert_eq!(decoded.nodes[0].1, n);
         assert_eq!(decoded.vectors[0].1, vec![0.5]);
+    }
+
+    #[test]
+    fn v2_float32_snapshot_decodes_packed_vectors() {
+        let mut node = node("n1");
+        node.vector = Some(vec![1.0 / 3.0, 1.0]);
+        let bytes = encode_snapshot_with_precision(
+            &[("n1".into(), node)], &[], &[("n1".into(), vec![1.0 / 3.0, 1.0])],
+            VectorPrecision::Float32, true,
+        );
+        let decoded = decode_snapshot(&bytes).unwrap();
+        assert_eq!(decoded.vector_precision, VectorPrecision::Float32);
+        assert_eq!(decoded.vectors[0].1[0], (1.0f64 / 3.0) as f32 as f64);
+        assert_eq!(decoded.nodes[0].1.vector.as_ref().unwrap()[1], 1.0);
     }
 
     #[test]

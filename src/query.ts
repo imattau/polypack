@@ -67,7 +67,7 @@ export class GraphQuery {
     limit?: number
     offset?: number
     afterSteps?: TraversalStep[]
-    similarVector?: { vector: number[]; threshold: number; topK?: number }
+    similarVector?: { vector: ArrayLike<number>; threshold: number; topK?: number }
     joinFilters?: Array<(node: PolyNode) => boolean>
     activationAbove?: number
     activationOrder?: 'asc' | 'desc'
@@ -190,7 +190,7 @@ export class GraphQuery {
     return this
   }
 
-  similarTo(vector: number[], threshold = 0, topK?: number): this {
+  similarTo(vector: ArrayLike<number>, threshold = 0, topK?: number): this {
     assertFiniteVector(vector, 'query vector')
     if (!Number.isFinite(threshold)) throw new RangeError('threshold must be finite')
     if (topK !== undefined) assertNonNegativeInteger(topK, 'topK')
@@ -386,7 +386,7 @@ export class GraphQuery {
     }
     if (this.opts.similarVector) {
       const s: Record<string, unknown> = {
-        vector: [...this.opts.similarVector.vector],
+        vector: Array.from(this.opts.similarVector.vector),
         threshold: this.opts.similarVector.threshold,
       }
       if (this.opts.similarVector.topK !== undefined) s.topK = this.opts.similarVector.topK

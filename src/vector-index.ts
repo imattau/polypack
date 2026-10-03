@@ -1,5 +1,10 @@
 /** Returns a similarity score where larger values are better matches. */
 export type DistanceFunction = (a: ArrayLike<number>, b: ArrayLike<number>) => number
+export type VectorPrecision = 'float64' | 'float32'
+
+function storedVector(vector: ArrayLike<number>, precision: VectorPrecision): Float64Array | Float32Array {
+  return precision === 'float32' ? new Float32Array(vector) : new Float64Array(vector)
+}
 
 function vectorLength(a: ArrayLike<number>, b: ArrayLike<number>): number {
   if (a.length !== b.length) {
@@ -34,6 +39,21 @@ export function euclideanSimilarity(a: ArrayLike<number>, b: ArrayLike<number>):
   return 1 / (1 + Math.sqrt(sum))
 }
 
+function vectorNorm(vector: ArrayLike<number>): number {
+  let sum = 0
+  for (let i = 0; i < vector.length; i++) sum += vector[i] * vector[i]
+  return Math.sqrt(sum)
+}
+
+function cosineWithNorms(a: ArrayLike<number>, b: ArrayLike<number>, normA: number, normB: number): number {
+  const len = vectorLength(a, b)
+  const denom = normA * normB
+  if (denom === 0) return 0
+  let dot = 0
+  for (let i = 0; i < len; i++) dot += a[i] * b[i]
+  return dot / denom
+}
+
 /**
  * Structural surface shared by `VectorIndex`, `HNSWIndex`, and the native
  * engines from `@0xx0lostcause0xx0/polypack-native` (`NativeVectorIndex`,
@@ -42,65 +62,85 @@ export function euclideanSimilarity(a: ArrayLike<number>, b: ArrayLike<number>):
  * without a nominal-typing mismatch against `VectorIndex`'s private fields.
  */
 export interface VectorIndexLike {
-  add(id: string, vector: number[] | Float64Array): void
-  hydrate(id: string, vector: number[] | Float64Array): void
-  addMany(entries: Array<{ id: string; vector: number[] | Float64Array }>): void
+  add(id: string, vector: number[] | Float64Array | Float32Array): void
+  hydrate(id: string, vector: number[] | Float64Array | Float32Array): void
+  addMany(entries: Array<{ id: string; vector: number[] | Float64Array | Float32Array }>): void
   remove(id: string): void
   removeMany(ids: string[]): void
-  query(vector: number[], topK: number, threshold?: number): Array<{ id: string; score: number }>
+  query(vector: ArrayLike<number>, topK: number, threshold?: number): Array<{ id: string; score: number }>
   clear(): void
   readonly size: number
   entries(): IterableIterator<[string, Float64Array]>
   has(id: string): boolean
   get(id: string): Float64Array | undefined
+  setPrecision?(precision: VectorPrecision): void
 }
 
 /** Exact in-memory vector index with O(n log k) top-k selection. */
 export class VectorIndex implements VectorIndexLike {
-  private vectors = new Map<string, Float64Array>()
+  private vectors = new Map<string, Float64Array | Float32Array>()
+  private norms = new Map<string, number>()
   private onChange?: (id: string) => void
   private distanceFn: DistanceFunction
 
-  constructor(onChange?: (id: string) => void, distanceFn?: DistanceFunction) {
+  constructor(onChange?: (id: string) => void, distanceFn?: DistanceFunction, private precision: VectorPrecision = 'float64') {
     this.onChange = onChange
     this.distanceFn = distanceFn ?? cosineSimilarity
   }
 
-  add(id: string, vector: number[] | Float64Array): void {
+  setPrecision(precision: VectorPrecision): void {
+    if (precision === this.precision) return
+    this.precision = precision
+    for (const [id, vector] of this.vectors) {
+      const stored = storedVector(vector, precision)
+      this.vectors.set(id, stored)
+      if (this.distanceFn === cosineSimilarity) this.norms.set(id, vectorNorm(stored))
+    }
+  }
+
+  add(id: string, vector: number[] | Float64Array | Float32Array): void {
     if (!id) throw new TypeError('Vector id must not be empty')
     assertFiniteVector(vector)
-    this.vectors.set(id, new Float64Array(vector))
+    const stored = storedVector(vector, this.precision)
+    this.vectors.set(id, stored)
+    if (this.distanceFn === cosineSimilarity) this.norms.set(id, vectorNorm(stored))
     this.onChange?.(id)
   }
 
   /** Add an already-persisted vector without marking it dirty again. */
-  hydrate(id: string, vector: number[] | Float64Array): void {
+  hydrate(id: string, vector: number[] | Float64Array | Float32Array): void {
     if (!id) throw new TypeError('Vector id must not be empty')
     assertFiniteVector(vector)
-    this.vectors.set(id, new Float64Array(vector))
+    const stored = storedVector(vector, this.precision)
+    this.vectors.set(id, stored)
+    if (this.distanceFn === cosineSimilarity) this.norms.set(id, vectorNorm(stored))
   }
 
-  addMany(entries: Array<{ id: string; vector: number[] | Float64Array }>): void {
+  addMany(entries: Array<{ id: string; vector: number[] | Float64Array | Float32Array }>): void {
     for (const { id, vector } of entries) {
       if (!id) throw new TypeError('Vector id must not be empty')
       assertFiniteVector(vector)
-      this.vectors.set(id, new Float64Array(vector))
+      const stored = storedVector(vector, this.precision)
+      this.vectors.set(id, stored)
+      if (this.distanceFn === cosineSimilarity) this.norms.set(id, vectorNorm(stored))
       this.onChange?.(id)
     }
   }
 
   remove(id: string): void {
     this.vectors.delete(id)
+    this.norms.delete(id)
   }
 
   removeMany(ids: string[]): void {
     for (const id of ids) {
       this.vectors.delete(id)
+      this.norms.delete(id)
     }
   }
 
   query(
-    vector: number[],
+    vector: ArrayLike<number>,
     topK: number,
     threshold = 0
   ): Array<{ id: string; score: number }> {
@@ -109,6 +149,7 @@ export class VectorIndex implements VectorIndexLike {
     if (!Number.isFinite(threshold)) throw new RangeError('threshold must be finite')
     if (topK === 0) return []
     const heap: Array<{ id: string; score: number; order: number }> = []
+    const queryNorm = this.distanceFn === cosineSimilarity ? vectorNorm(vector) : 0
     let order = 0
 
     const isLess = (a: typeof heap[number], b: typeof heap[number]) =>
@@ -135,7 +176,9 @@ export class VectorIndex implements VectorIndexLike {
     }
 
     for (const [id, v] of this.vectors) {
-      const score = this.distanceFn(vector, v)
+      const score = this.distanceFn === cosineSimilarity
+        ? cosineWithNorms(vector, v, queryNorm, this.norms.get(id) ?? 0)
+        : this.distanceFn(vector, v)
       if (score < threshold) continue
       const candidate = { id, score, order: order++ }
       if (heap.length < topK) {
@@ -153,6 +196,7 @@ export class VectorIndex implements VectorIndexLike {
 
   clear(): void {
     this.vectors.clear()
+    this.norms.clear()
   }
 
   get size(): number {

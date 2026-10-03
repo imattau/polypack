@@ -5,8 +5,9 @@
 
 use crate::error::{PolypackError, Result};
 use crate::model::{validate_batch, ChangeBatch, Edge, MemoryClass, Node};
-use crate::storage::format::{decode_snapshot, decode_wal, encode_snapshot, encode_wal};
+use crate::storage::format::{decode_snapshot, decode_wal, encode_snapshot_with_precision, encode_wal_with_precision, VectorPrecision};
 use crate::storage::wal::WalEntry;
+use crate::vector::StoredVector;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
@@ -70,6 +71,54 @@ fn mutation_operations(changes: &ChangeBatch) -> Vec<MutationOperation> {
         operations.push(MutationOperation { operation_type: "deleteVector".into(), payload: serde_json::json!({ "id": id }) });
     }
     operations
+}
+
+fn pack_mutation_vectors(record: &MutationRecord, precision: VectorPrecision) -> Result<Vec<u8>> {
+    let mut value = serde_json::to_value(record).map_err(|error| PolypackError::CorruptData(error.to_string()))?;
+    if precision == VectorPrecision::Float32 {
+        if let Some(operations) = value.get_mut("operations").and_then(serde_json::Value::as_array_mut) {
+            for operation in operations {
+                let kind = operation.get("operationType").and_then(serde_json::Value::as_str).unwrap_or_default();
+                let target = if kind == "putNode" { operation.get_mut("payload").and_then(|payload| payload.get_mut("vector")) }
+                    else if kind == "putVector" { operation.get_mut("payload").and_then(|payload| payload.get_mut("vector")) }
+                    else { None };
+                if let Some(vector) = target {
+                    if let Some(values) = vector.as_array() {
+                        let mut packed = String::with_capacity(values.len() * 8);
+                        for value in values {
+                            let number = value.as_f64().ok_or_else(|| PolypackError::CorruptData("mutation vector contains a non-number".into()))?;
+                            let bits = (number as f32).to_bits();
+                            for shift in (0..8).rev() {
+                                packed.push(b"0123456789abcdef"[((bits >> (shift * 4)) & 0xf) as usize] as char);
+                            }
+                        }
+                        *vector = serde_json::json!({ "__polypack_f32_hex": packed });
+                    }
+                }
+            }
+        }
+    }
+    serde_json::to_vec(&value).map_err(|error| PolypackError::CorruptData(error.to_string()))
+}
+
+fn unpack_mutation_vectors(value: &mut serde_json::Value) -> Result<()> {
+    if let Some(operations) = value.get_mut("operations").and_then(serde_json::Value::as_array_mut) {
+        for operation in operations {
+            let kind = operation.get("operationType").and_then(serde_json::Value::as_str).unwrap_or_default();
+            if !matches!(kind, "putNode" | "putVector") { continue; }
+            let Some(vector) = operation.get_mut("payload").and_then(|payload| payload.get_mut("vector")) else { continue };
+            let Some(hex) = vector.get("__polypack_f32_hex").and_then(serde_json::Value::as_str) else { continue };
+            if hex.len() % 8 != 0 { return Err(PolypackError::CorruptData("invalid packed Float32 mutation vector".into())); }
+            let mut values = Vec::with_capacity(hex.len() / 8);
+            for chunk in hex.as_bytes().chunks_exact(8) {
+                let word = std::str::from_utf8(chunk).ok().and_then(|part| u32::from_str_radix(part, 16).ok())
+                    .ok_or_else(|| PolypackError::CorruptData("invalid packed Float32 mutation vector".into()))?;
+                values.push(serde_json::Value::from(f32::from_bits(word) as f64));
+            }
+            *vector = serde_json::Value::Array(values);
+        }
+    }
+    Ok(())
 }
 
 /// Numeric-range predicate used by [`NodeQuery`], matching the TypeScript
@@ -410,6 +459,8 @@ pub struct StoreConfig {
     /// (`max(compact_threshold, records / COMPACT_RATIO)`), so a large store
     /// doesn't rewrite its snapshot on every batch. Default 10,000.
     pub compact_threshold: usize,
+    /// Requested vector precision for new stores; an existing store's recorded precision wins unless explicitly mismatched.
+    pub vector_precision: Option<VectorPrecision>,
     pub durability: Durability,
     /// Retention policy applied to `mutations.jsonl` each time `compact()`
     /// runs (i.e. on the same cadence as WAL compaction, and on `close()`).
@@ -438,6 +489,7 @@ impl Default for StoreConfig {
     fn default() -> Self {
         StoreConfig {
             compact_threshold: DEFAULT_COMPACT_THRESHOLD,
+            vector_precision: None,
             durability: Durability::Process,
             mutation_log_retention: None,
         }
@@ -450,7 +502,7 @@ impl Default for StoreConfig {
 pub struct Store {
     nodes: HashMap<String, Node>,
     edges: HashMap<String, Edge>,
-    vectors: HashMap<String, Vec<f64>>,
+    vectors: HashMap<String, StoredVector>,
     by_type: HashMap<String, HashSet<String>>,
     index_definitions: HashMap<String, SecondaryIndexDefinition>,
     secondary_indexes: HashMap<String, HashMap<String, HashSet<String>>>,
@@ -460,6 +512,8 @@ pub struct Store {
     edges_by_target: HashMap<String, HashSet<String>>,
     wal_entry_count: usize,
     config: StoreConfig,
+    vector_precision: VectorPrecision,
+    precision_recorded: bool,
     storage: Box<dyn Storage>,
     closed: bool,
     loaded: bool,
@@ -470,6 +524,7 @@ pub struct Store {
 
 impl Store {
     pub fn new(storage: Box<dyn Storage>, config: StoreConfig) -> Self {
+        let vector_precision = config.vector_precision.unwrap_or(VectorPrecision::Float64);
         Store {
             nodes: HashMap::new(),
             edges: HashMap::new(),
@@ -483,6 +538,8 @@ impl Store {
             edges_by_target: HashMap::new(),
             wal_entry_count: 0,
             config,
+            vector_precision,
+            precision_recorded: false,
             storage,
             closed: false,
             loaded: false,
@@ -494,6 +551,17 @@ impl Store {
 
     pub fn capabilities(&self) -> AdapterCapabilities {
         self.storage.capabilities()
+    }
+
+    pub fn vector_precision(&mut self) -> Result<VectorPrecision> {
+        self.ensure_loaded()?;
+        Ok(self.vector_precision)
+    }
+
+    /// Payload bytes retained by the store's compact vector table (excluding ids/maps).
+    pub fn resident_vector_bytes(&mut self) -> Result<usize> {
+        self.ensure_loaded()?;
+        Ok(self.vectors.values().map(|vector| vector.len() * if self.vector_precision == VectorPrecision::Float32 { 4 } else { 8 }).sum())
     }
 
     pub fn read_auxiliary(&mut self, name: &str) -> Result<Option<Vec<u8>>> {
@@ -523,7 +591,14 @@ impl Store {
         let last_index = lines.len().checked_sub(1);
         let mut records = Vec::with_capacity(lines.len());
         for (index, line) in lines.into_iter().enumerate() {
-            match serde_json::from_slice(line) {
+            let parsed = match serde_json::from_slice::<serde_json::Value>(line) {
+                Ok(mut value) => match unpack_mutation_vectors(&mut value) {
+                    Ok(()) => serde_json::from_value(value).map_err(|error| error.to_string()),
+                    Err(error) => Err(error.to_string()),
+                },
+                Err(error) => Err(error.to_string()),
+            };
+            match parsed {
                 Ok(record) => records.push(record),
                 // A crash mid-append can leave a truncated final line; tolerate that
                 // one case so an otherwise-intact log still loads. Any other line
@@ -533,6 +608,30 @@ impl Store {
             }
         }
         Ok(records)
+    }
+
+    /// Replace the destination store's initial migration record with a source
+    /// history. Intended for offline precision migrations before publication.
+    pub fn replace_mutation_log(&mut self, records: &[MutationRecord]) -> Result<()> {
+        self.ensure_loaded()?;
+        if self.mutation_log()?.len() > 1 {
+            return Err(PolypackError::InvalidArgument("mutation history replacement is only allowed on a fresh migration destination".into()));
+        }
+        for pair in records.windows(2) {
+            if pair[1].sequence <= pair[0].sequence {
+                return Err(PolypackError::InvalidArgument("mutation history sequences must be strictly increasing".into()));
+            }
+        }
+        let mut encoded = Vec::new();
+        for record in records {
+            encoded.extend_from_slice(&pack_mutation_vectors(record, self.vector_precision)?);
+            encoded.push(b'\n');
+        }
+        self.storage.write(MUTATION_LOG_FILE, &encoded)?;
+        self.mutation_sequence = records.last().map(|record| record.sequence).unwrap_or(0);
+        self.seen_operation_ids = records.iter().map(|record| record.operation_id.clone()).collect();
+        self.seen_transaction_ids = records.iter().map(|record| record.transaction_id.clone()).collect();
+        Ok(())
     }
 
     pub fn mutation_log_since(&mut self, sequence: u64) -> Result<Vec<MutationRecord>> {
@@ -1110,13 +1209,43 @@ impl Store {
         self.load_schema_metadata()?;
         if let Some(data) = self.storage.read(SNAPSHOT_FILE)? {
             let snapshot = decode_snapshot(&data)?;
+            if let Some(requested) = self.config.vector_precision {
+                if requested != snapshot.vector_precision {
+                    return Err(PolypackError::InvalidArgument(format!(
+                        "store vector precision mismatch: uses {:?}, requested {:?}; use offline precision migration",
+                        snapshot.vector_precision, requested
+                    )));
+                }
+            }
+            self.vector_precision = snapshot.vector_precision;
+            self.precision_recorded = true;
             self.nodes = snapshot.nodes.into_iter().collect();
             self.edges = snapshot.edges.into_iter().collect();
-            self.vectors = snapshot.vectors.into_iter().collect();
+            self.vectors = snapshot.vectors.into_iter().map(|(id, vector)| (id, StoredVector::new(&vector, self.vector_precision))).collect();
+            for node in self.nodes.values_mut() {
+                if let Some(vector) = node.vector.take() {
+                    self.vectors.entry(node.id.clone()).or_insert_with(|| StoredVector::new(&vector, self.vector_precision));
+                }
+            }
         }
         if let Some(wal_data) = self.storage.read(WAL_FILE)? {
             if !wal_data.is_empty() {
-                for entry in decode_wal(&wal_data) {
+                let recovered = decode_wal(&wal_data);
+                if let Some(WalEntry::SetPrecision(precision)) = recovered.iter().find(|entry| matches!(entry, WalEntry::SetPrecision(_))) {
+                    if self.precision_recorded && self.vector_precision != *precision {
+                        return Err(PolypackError::CorruptData("WAL precision conflicts with snapshot precision".into()));
+                    }
+                    if !self.precision_recorded {
+                        if self.config.vector_precision.is_some_and(|requested| requested != *precision) {
+                            return Err(PolypackError::InvalidArgument("store vector precision does not match requested precision".into()));
+                        }
+                        self.vector_precision = *precision;
+                        self.precision_recorded = true;
+                    }
+                } else if !self.precision_recorded && self.config.vector_precision == Some(VectorPrecision::Float32) {
+                    return Err(PolypackError::InvalidArgument("legacy WAL store uses float64 vectors".into()));
+                }
+                for entry in recovered {
                     self.replay(entry);
                 }
                 // Persist the snapshot BEFORE deleting the WAL so a crash
@@ -1145,9 +1274,14 @@ impl Store {
 
     fn replay(&mut self, entry: WalEntry) {
         match entry {
+            WalEntry::SetPrecision(precision) => { self.vector_precision = precision; self.precision_recorded = true; }
             WalEntry::PutNode(node) => {
                 self.index_node(&node);
-                self.nodes.insert(node.id.clone(), node.clone());
+                let mut stored = node.clone();
+                if let Some(vector) = stored.vector.take() {
+                    self.vectors.entry(stored.id.clone()).or_insert_with(|| StoredVector::new(&vector, self.vector_precision));
+                }
+                self.nodes.insert(stored.id.clone(), stored);
             }
             WalEntry::DeleteNode(id) => {
                 self.unindex_node(&id);
@@ -1162,7 +1296,7 @@ impl Store {
                 self.edges.remove(&id);
             }
             WalEntry::PutVector { id, vector } => {
-                self.vectors.insert(id, vector);
+                self.vectors.insert(id, StoredVector::new(&vector, self.vector_precision));
             }
             WalEntry::DeleteVector(id) => {
                 self.vectors.remove(&id);
@@ -1179,10 +1313,14 @@ impl Store {
     }
 
     fn write_snapshot(&mut self) -> Result<()> {
-        let nodes: Vec<(String, Node)> = self.nodes.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        let nodes: Vec<(String, Node)> = self.nodes.iter().map(|(id, stored)| {
+            let mut node = stored.clone();
+            node.vector = self.vectors.get(id).map(StoredVector::to_f64);
+            (id.clone(), node)
+        }).collect();
         let edges: Vec<(String, Edge)> = self.edges.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-        let vectors: Vec<(String, Vec<f64>)> = self.vectors.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-        self.storage.write(SNAPSHOT_FILE, &encode_snapshot(&nodes, &edges, &vectors))?;
+        let vectors: Vec<(String, Vec<f64>)> = self.vectors.iter().map(|(id, vector)| (id.clone(), vector.to_f64())).collect();
+        self.storage.write(SNAPSHOT_FILE, &encode_snapshot_with_precision(&nodes, &edges, &vectors, self.vector_precision, true))?;
         if self.config.durability == Durability::Fsync {
             self.storage.sync(SNAPSHOT_FILE)?;
             self.storage.sync_dir()?;
@@ -1206,7 +1344,7 @@ impl Store {
                 let entries = decode_wal(&wal_data);
                 remaining = entries.len().saturating_sub(generation);
                 if remaining > 0 {
-                    self.storage.write(WAL_FILE, &encode_wal(&entries[generation..]))?;
+                    self.storage.write(WAL_FILE, &encode_wal_with_precision(&entries[generation..], self.vector_precision))?;
                 } else {
                     self.storage.write(WAL_FILE, &[])?;
                 }
@@ -1248,7 +1386,7 @@ impl Store {
         }
         let mut encoded = Vec::new();
         for record in retained {
-            encoded.extend_from_slice(&serde_json::to_vec(record).map_err(|error| PolypackError::CorruptData(format!("mutation log: {error}")))?);
+            encoded.extend_from_slice(&pack_mutation_vectors(record, self.vector_precision).map_err(|error| PolypackError::CorruptData(format!("mutation log: {error}")))?);
             encoded.push(b'\n');
         }
         self.storage.write(MUTATION_LOG_FILE, &encoded)?;
@@ -1304,10 +1442,26 @@ impl Store {
         {
             return Ok(());
         }
+        let mut normalized = changes.clone();
+        if self.vector_precision == VectorPrecision::Float32 {
+            for node in &mut normalized.put_nodes {
+                if let Some(vector) = &mut node.vector {
+                    for value in vector { *value = (*value as f32) as f64; }
+                }
+            }
+            for entry in &mut normalized.put_vectors {
+                for value in &mut entry.vector { *value = (*value as f32) as f64; }
+            }
+        }
+        let changes = &normalized;
         validate_batch(changes)?;
         self.validate_pending_schema(changes)?;
         self.validate_pending_indexes(changes)?;
         let mut entries: Vec<WalEntry> = Vec::new();
+        if !self.precision_recorded {
+            entries.push(WalEntry::SetPrecision(self.vector_precision));
+            self.precision_recorded = true;
+        }
         for id in &changes.delete_node_ids {
             entries.push(WalEntry::DeleteNode(id.clone()));
         }
@@ -1329,7 +1483,7 @@ impl Store {
         if entries.is_empty() {
             return Ok(());
         }
-        let encoded = encode_wal(&entries);
+        let encoded = encode_wal_with_precision(&entries, self.vector_precision);
         self.storage.append(WAL_FILE, &encoded)?;
         if self.config.durability == Durability::Fsync {
             self.storage.sync(WAL_FILE)?;
@@ -1346,7 +1500,7 @@ impl Store {
             base_revision,
             metadata,
         };
-        let mut encoded_record = serde_json::to_vec(&record).map_err(|error| PolypackError::CorruptData(error.to_string()))?;
+        let mut encoded_record = pack_mutation_vectors(&record, self.vector_precision)?;
         encoded_record.push(b'\n');
         self.storage.append(MUTATION_LOG_FILE, &encoded_record)?;
         if self.config.durability == Durability::Fsync {
@@ -1370,14 +1524,18 @@ impl Store {
         }
         for node in &changes.put_nodes {
             self.index_node(node);
-            self.nodes.insert(node.id.clone(), node.clone());
+            let mut stored = node.clone();
+            if let Some(vector) = stored.vector.take() {
+                self.vectors.insert(stored.id.clone(), StoredVector::new(&vector, self.vector_precision));
+            }
+            self.nodes.insert(stored.id.clone(), stored);
         }
         for edge in &changes.put_edges {
             self.edges.insert(edge.id.clone(), edge.clone());
             self.index_edge(edge);
         }
         for v in &changes.put_vectors {
-            self.vectors.insert(v.id.clone(), v.vector.clone());
+            self.vectors.insert(v.id.clone(), StoredVector::new(&v.vector, self.vector_precision));
         }
         self.wal_entry_count += entries.len();
         if self.wal_entry_count >= self.effective_compact_threshold() {
@@ -1449,6 +1607,9 @@ impl Store {
             .filter(|n| matches_node(n, query))
             .cloned()
             .collect();
+        for node in &mut results {
+            node.vector = self.vectors.get(&node.id).map(StoredVector::to_f64);
+        }
         if let Some(limit) = query.max_result_size {
             if results.len() > limit {
                 return Err(PolypackError::ResourceLimit { name: "maxResultSize".into(), limit });
@@ -1548,17 +1709,20 @@ impl Store {
 
     pub fn get_node(&mut self, id: &str) -> Result<Option<Node>> {
         self.ensure_loaded()?;
-        Ok(self.nodes.get(id).cloned())
+        Ok(self.nodes.get(id).cloned().map(|mut node| {
+            node.vector = self.vectors.get(id).map(StoredVector::to_f64);
+            node
+        }))
     }
 
     pub fn get_vector(&mut self, id: &str) -> Result<Option<Vec<f64>>> {
         self.ensure_loaded()?;
-        Ok(self.vectors.get(id).cloned())
+        Ok(self.vectors.get(id).map(StoredVector::to_f64))
     }
 
     pub fn vectors_snapshot(&mut self) -> Result<Vec<(String, Vec<f64>)>> {
         self.ensure_loaded()?;
-        Ok(self.vectors.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+        Ok(self.vectors.iter().map(|(id, vector)| (id.clone(), vector.to_f64())).collect())
     }
 
     pub fn edges_snapshot(&mut self) -> Result<Vec<(String, Edge)>> {
@@ -1610,6 +1774,32 @@ mod tests {
         ids.sort();
         assert_eq!(ids, vec!["a".to_string(), "b".to_string()]);
         s.close().unwrap();
+    }
+
+    #[test]
+    fn float32_store_quantizes_values_and_rejects_mismatch() {
+        let storage = shared();
+        let config = StoreConfig { vector_precision: Some(VectorPrecision::Float32), ..Default::default() };
+        {
+            let mut store = Store::new(Box::new(storage.clone()), config);
+            let mut item = node("f32");
+            item.vector = Some(vec![1.0 / 3.0; 384]);
+            store.apply(&ChangeBatch { put_nodes: vec![item], put_vectors: vec![crate::model::VectorEntry { id: "f32".into(), vector: vec![1.0 / 3.0; 384] }], ..Default::default() }).unwrap();
+            assert_eq!(store.get_vector("f32").unwrap().unwrap()[0], (1.0f64 / 3.0) as f32 as f64);
+            assert_eq!(store.resident_vector_bytes().unwrap(), 384 * 4);
+            assert!(store.nodes.get("f32").unwrap().vector.is_none());
+            let mutation = store.mutation_log().unwrap().pop().unwrap();
+            let mutation_vector = mutation.operations.iter().find(|operation| operation.operation_type == "putVector").unwrap().payload["vector"].as_array().unwrap();
+            assert_eq!(mutation_vector.len(), 384);
+            assert_eq!(mutation_vector[0].as_f64().unwrap(), (1.0f64 / 3.0) as f32 as f64);
+            let raw_log = storage.lock().unwrap().read(MUTATION_LOG_FILE).unwrap().unwrap();
+            assert!(raw_log.len() < 384 * 8 * 3);
+            store.close().unwrap();
+        }
+        let mut reopen = Store::new(Box::new(storage.clone()), StoreConfig::default());
+        assert_eq!(reopen.get_vector("f32").unwrap().unwrap()[0], (1.0f64 / 3.0) as f32 as f64);
+        let mut mismatch = Store::new(Box::new(storage), StoreConfig { vector_precision: Some(VectorPrecision::Float64), ..Default::default() });
+        assert!(mismatch.node_ids().is_err());
     }
 
     #[test]

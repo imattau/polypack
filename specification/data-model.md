@@ -20,6 +20,12 @@ A node is the primary entity of the graph.
 | `type`      | UTF-8 string         | yes      | Non-empty.                                       |
 | `data`      | object               | yes      | MessagePack-compatible values only.              |
 | `vector`    | array of finite f64  | no       | Uniform dimension within an index.               |
+
+Stores may opt into `vectorPrecision: "float32"`. Inputs are rounded to
+IEEE-754 binary32 before indexing and persistence, while public reads remain
+detached numeric arrays. `float64` remains the default. Changing an existing
+store's precision requires an explicit offline migration; opening it with a
+conflicting explicit precision is an error.
 | `insertedAt`| integer millis       | yes      | Finite, non-negative.                            |
 | `updatedAt` | integer millis       | yes      | Finite, non-negative.                            |
 | `revision`  | non-negative integer | no       | Defaults to `0`; increments on successful update. |

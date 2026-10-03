@@ -5,6 +5,7 @@
 pub mod format;
 pub mod file;
 pub mod migration;
+pub mod precision_migration;
 pub mod msgpack;
 pub mod store;
 pub mod wal;
@@ -17,5 +18,7 @@ pub use store::{
     DEFAULT_COMPACT_THRESHOLD, INDEXES_FILE, MUTATION_LOG_FILE, SCHEMAS_FILE, SNAPSHOT_FILE, WAL_FILE,
 };
 pub use file::FileStorage;
+pub use format::VectorPrecision;
 pub use migration::{migrate_storage, FormatArtifact, FormatMigrationRegistry, FormatMigrationReport};
+pub use precision_migration::{migrate_vector_precision, VectorPrecisionMigration};
 pub use wal::WalEntry;

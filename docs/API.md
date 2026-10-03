@@ -308,6 +308,36 @@ constructor section above. `update(id, vector)` also exists but is
 `@deprecated`: it's identical to `add()` (which already overwrites an
 existing id) and isn't part of `VectorIndexLike`, so prefer `add()`.
 
+### Vector precision migration
+
+Precision is selected when creating a binary store with `vectorPrecision: 'float32'` or
+`'float64'`. Existing stores adopt their recorded precision when the setting is omitted;
+an explicit mismatch is rejected. To change an existing Node filesystem store, stop all
+processes using it and run the offline migration helper:
+
+```ts
+import { migrateVectorPrecision } from '@0xx0lostcause0xx0/polypack/persistence/node'
+
+const result = await migrateVectorPrecision('./graph-store', 'float32', {
+  backupDir: './graph-store-before-float32',
+})
+```
+
+The Node helper verifies the converted store before replacement and leaves the original
+at `backupDir`. Python exposes the equivalent operation on an open `PolyGraph`:
+
+```python
+result = graph.migrate_vector_precision("float32", "./graph-store-before-float32")
+```
+
+Float32-to-Float64 migration widens the rounded values; it cannot restore precision
+discarded by an earlier Float32 conversion. Both filesystem helpers are offline
+operations; OPFS and other adapters require their own migration workflow.
+
+Direct Rust filesystem users can call `polypack_core::storage::migrate_vector_precision`
+with the store path, target `VectorPrecision`, and an optional backup path. It has the
+same stop-all-writers requirement and retains the source directory as the backup.
+
 ### Text embeddings
 
 - `EmbeddingProvider` defines `embed(text)` and an optional `dimensions`. The

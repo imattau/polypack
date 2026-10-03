@@ -45,6 +45,26 @@ describe('BinaryStoreAdapter', () => {
     adapter = createAdapter()
   })
 
+  it('records Float32 precision, quantizes writes, and rejects explicit mismatches', async () => {
+    const io = new MemoryFileIO()
+    const writer = new BinaryStoreAdapter({ storeDir: 'precision', fileIO: io, vectorPrecision: 'float32', compactThreshold: 1 })
+    await writer.putNode({ ...serNode('n'), vector: [1 / 3] })
+    await writer.putVector('n', [1 / 3])
+    await writer.close()
+
+    const reopened = new BinaryStoreAdapter({ storeDir: 'precision', fileIO: io })
+    expect((await reopened.getNode('n'))!.vector![0]).toBe(Math.fround(1 / 3))
+    expect(reopened.precision).toBe('float32')
+    expect((await reopened.getVectors(['n']))[0].vector[0]).toBe(Math.fround(1 / 3))
+    const mutations = await reopened.getMutationsSince(0n)
+    const operations = mutations.flatMap(record => record.operations)
+    expect(operations.find(op => op.type === 'putNode')?.payload.vector).toEqual([Math.fround(1 / 3)])
+    expect(operations.find(op => op.type === 'putVector')?.payload.vector).toEqual([Math.fround(1 / 3)])
+    await expect(new BinaryStoreAdapter({ storeDir: 'precision', fileIO: io, vectorPrecision: 'float64' }).allNodeIds())
+      .rejects.toMatchObject({ name: 'VectorPrecisionMismatchError' })
+    await reopened.close()
+  })
+
   describe('nodes', () => {
     it('putNode and getNode', async () => {
       const node: SerializedNode = { id: 'n1', type: 'doc', data: { x: 1 }, vector: null, insertedAt: 10, updatedAt: 10 }

@@ -20,6 +20,8 @@ export interface EngineInfo {
   query: 'rust-native' | 'typescript'
 }
 
+export type VectorPrecision = 'float32' | 'float64'
+
 /** True when the native addon for this platform loaded successfully. */
 export function isNativeAvailable(): boolean
 
@@ -31,10 +33,10 @@ export function detectEngine(): string
 
 /** Drop-in replacement for the TypeScript `VectorIndex`. */
 export class NativeVectorIndex {
-  constructor(onChange?: (id: string) => void, distance?: 'cosine' | 'euclidean')
-  add(id: string, vector: number[] | Float64Array): void
-  hydrate(id: string, vector: number[] | Float64Array): void
-  addMany(entries: Array<{ id: string; vector: number[] | Float64Array }>): void
+  constructor(onChange?: (id: string) => void, distance?: 'cosine' | 'euclidean', vectorPrecision?: VectorPrecision)
+  add(id: string, vector: number[] | Float32Array | Float64Array): void
+  hydrate(id: string, vector: number[] | Float32Array | Float64Array): void
+  addMany(entries: Array<{ id: string; vector: number[] | Float32Array | Float64Array }>): void
   remove(id: string): void
   removeMany(ids: string[]): void
   query(vector: number[], topK: number, threshold?: number): ScoredId[]
@@ -50,15 +52,16 @@ export interface NativeHnswConfig {
   Mmax0?: number
   efConstruction?: number
   efSearch?: number
+  vectorPrecision?: VectorPrecision
 }
 
 /** Drop-in replacement for the TypeScript `HNSWIndex` (cosine distance only). */
 export class NativeHnswIndex {
   constructor(onChange?: (id: string) => void, distanceFn?: DistanceFunction, config?: NativeHnswConfig)
-  add(id: string, vector: number[] | Float64Array): void
-  update(id: string, vector: number[] | Float64Array): void
-  hydrate(id: string, vector: number[] | Float64Array): void
-  addMany(entries: Array<{ id: string; vector: number[] | Float64Array }>): void
+  add(id: string, vector: number[] | Float32Array | Float64Array): void
+  update(id: string, vector: number[] | Float32Array | Float64Array): void
+  hydrate(id: string, vector: number[] | Float32Array | Float64Array): void
+  addMany(entries: Array<{ id: string; vector: number[] | Float32Array | Float64Array }>): void
   remove(id: string): void
   removeMany(ids: string[]): void
   query(vector: number[], topK: number, threshold?: number): ScoredId[]
@@ -115,8 +118,8 @@ export interface NativeChangeBatch {
  * TypeScript `BinaryStoreAdapter`.
  */
 export class NativeStore {
-  constructor(directory: string, compactThreshold?: number, readOnly?: boolean)
-  static restore(source: string, destination: string, compactThreshold?: number): NativeStore
+  constructor(directory: string, compactThreshold?: number, readOnly?: boolean, vectorPrecision?: VectorPrecision)
+  static restore(source: string, destination: string, compactThreshold?: number, vectorPrecision?: VectorPrecision): NativeStore
   apply(changes: NativeChangeBatch): void
   nodeIds(): string[]
   nodeCount(): number

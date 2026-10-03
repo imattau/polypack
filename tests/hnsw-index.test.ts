@@ -4,6 +4,16 @@ import { VectorIndex, cosineSimilarity, euclideanSimilarity } from '../src/vecto
 import type { VectorIndexLike } from '../src/vector-index'
 
 describe('HNSWIndex', () => {
+  it('stores Float32 precision and returns detached Float64 reads', () => {
+    const index = new HNSWIndex(undefined, undefined, { vectorPrecision: 'float32' })
+    index.add('a', new Float32Array([1 / 3, 1]))
+    const read = index.get('a')!
+    expect(read).toBeInstanceOf(Float64Array)
+    expect(read[0]).toBe(Math.fround(1 / 3))
+    read[0] = 0
+    expect(index.get('a')![0]).toBe(Math.fround(1 / 3))
+  })
+
   describe('CRUD', () => {
     it('adds and retrieves a vector', () => {
       const index = new HNSWIndex()

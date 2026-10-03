@@ -38,6 +38,17 @@ def test_exact_index_numpy_and_lists():
     assert sorted(i for i, _ in idx.entries()) == ["a", "b"]
 
 
+def test_float32_exact_and_hnsw_indexes_quantize_and_accept_float32_arrays():
+    value = 1 / 3
+    exact = ExactIndex(vector_precision="float32")
+    exact.add("a", np.asarray([value], dtype=np.float32))
+    assert exact.get("a") == [float(np.float32(value))]
+
+    hnsw = HnswIndex(vector_precision="float32")
+    hnsw.add("a", np.asarray([value], dtype=np.float32))
+    assert hnsw.get("a") == [float(np.float32(value))]
+
+
 def test_exact_index_dimension_error():
     idx = ExactIndex()
     idx.add("a", [1.0, 0.0])
@@ -446,6 +457,45 @@ def test_persist_round_trip(tmp_path):
     assert g2.get_node("n1")["data"] == {"title": "Hello"}
     assert g2.get_edge_targets("n1", "LINKS") == ["n2"]
     g2.close_store()
+
+
+def test_float32_precision_is_recorded_and_mismatch_is_rejected(tmp_path):
+    graph = PolyGraph.open(str(tmp_path), vector_precision="float32")
+    graph.add_node({"id": "f32", "type": "doc", "data": {}, "vector": [1 / 3], "insertedAt": 1, "updatedAt": 1})
+    assert graph._nodes["f32"]["vector"].dtype == np.float32
+    assert graph._nodes["f32"]["vector"].nbytes == 4
+    assert graph.get_node("f32")["vector"] == [float(np.float32(1 / 3))]
+    graph.update_node("f32", {"updated": True})
+    assert graph._nodes["f32"]["vector"].dtype == np.float32
+    graph.save()
+    mutation_vector = next(op["payload"]["vector"] for record in graph.mutation_log() for op in record["operations"] if op["operationType"] == "putNode")
+    assert mutation_vector == [float(np.float32(1 / 3))]
+    graph.close_store()
+    assert "__polypack_f32_hex" in (tmp_path / "mutations.jsonl").read_text(encoding="utf-8")
+
+    reopened = PolyGraph.open(str(tmp_path))
+    assert reopened.get_node("f32")["vector"][0] == float(np.float32(1 / 3))
+    reopened.close_store()
+    with pytest.raises(PolypackValueError, match="vector precision"):
+        PolyGraph.open(str(tmp_path), vector_precision="float64")
+
+
+def test_offline_vector_precision_migration_keeps_backup_and_mutation_history(tmp_path):
+    store_dir = tmp_path / "store"
+    backup_dir = tmp_path / "before-float32"
+    graph = PolyGraph.open(str(store_dir), vector_precision="float64")
+    graph.add_node({"id": "f64", "type": "doc", "data": {}, "vector": [1 / 3], "insertedAt": 1, "updatedAt": 1})
+    graph.save()
+    sequence = graph._store.latest_mutation_sequence()
+
+    result = graph.migrate_vector_precision("float32", str(backup_dir))
+    assert result["from"] == "float64" and result["to"] == "float32"
+    assert graph.get_node("f64")["vector"][0] == float(np.float32(1 / 3))
+    assert graph._store.latest_mutation_sequence() == sequence
+    backup = PolyGraph.open(str(backup_dir))
+    assert backup.get_node("f64")["vector"][0] == 1 / 3
+    backup.close_store()
+    graph.close_store()
 
 
 def test_close_after_save_does_not_append_a_duplicate_mutation(tmp_path):

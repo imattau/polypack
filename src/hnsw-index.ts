@@ -1,5 +1,5 @@
 import { cosineSimilarity } from './vector-index.js'
-import type { DistanceFunction, VectorIndexLike } from './vector-index.js'
+import type { DistanceFunction, VectorIndexLike, VectorPrecision } from './vector-index.js'
 import { assertFiniteVector, assertNonNegativeInteger } from './utils.js'
 
 export interface HNSWConfig {
@@ -11,6 +11,8 @@ export interface HNSWConfig {
   efConstruction?: number
   /** Candidate list size while querying. Higher = better recall, slower queries. Default 200. */
   efSearch?: number
+  /** Numeric precision retained for stored vectors. Defaults to `float64`. */
+  vectorPrecision?: VectorPrecision
 }
 
 interface Candidate {
@@ -23,6 +25,7 @@ const DEF: Required<HNSWConfig> = {
   Mmax0: 32,
   efConstruction: 200,
   efSearch: 200,
+  vectorPrecision: 'float64',
 }
 
 /** All four knobs must be positive integers — 0 or negative silently degrades the graph to unusable. */
@@ -42,7 +45,8 @@ function assertValidHnswConfig(config: Required<HNSWConfig>): void {
  * (no tombstones) so repeated churn doesn't degrade the graph.
  */
 export class HNSWIndex implements VectorIndexLike {
-  private nodes = new Map<string, Float64Array>()
+  private nodes = new Map<string, Float64Array | Float32Array>()
+  private precision: VectorPrecision
   private nodeLevel = new Map<string, number>()
   private adjacency = new Map<number, Map<string, Set<string>>>()
   private entryPoint: string | null = null
@@ -62,18 +66,27 @@ export class HNSWIndex implements VectorIndexLike {
     this.onChange = onChange
     this.distanceFn = distanceFn ?? cosineSimilarity
     this.config = { ...DEF, ...config }
+    this.precision = this.config.vectorPrecision
     assertValidHnswConfig(this.config)
     this.mL = 1 / Math.log(Math.max(this.config.M, 2))
     this.levelRng = rng ?? Math.random
   }
 
+  setPrecision(precision: VectorPrecision): void {
+    if (precision === this.precision) return
+    const entries = [...this.nodes]
+    this.precision = precision
+    this.clear()
+    for (const [id, vector] of entries) this.hydrate(id, vector)
+  }
+
   // ── Public API ──
 
-  add(id: string, vector: number[] | Float64Array): void {
+  add(id: string, vector: number[] | Float64Array | Float32Array): void {
     if (!id) throw new TypeError('Vector id must not be empty')
     assertFiniteVector(vector)
     if (this.nodes.has(id)) this.remove(id)
-    const stored = new Float64Array(vector)
+    const stored = this.precision === 'float32' ? new Float32Array(vector) : new Float64Array(vector)
     const level = this.assignLevel()
     this.nodes.set(id, stored)
     this.insertIntoGraph(id, level)
@@ -87,26 +100,26 @@ export class HNSWIndex implements VectorIndexLike {
    * can't call it. Use `add()` instead — it already overwrites an existing
    * id the same way. Kept only for source compatibility.
    */
-  update(id: string, vector: number[] | Float64Array): void {
+  update(id: string, vector: number[] | Float64Array | Float32Array): void {
     this.add(id, vector)
   }
 
-  hydrate(id: string, vector: number[] | Float64Array): void {
+  hydrate(id: string, vector: number[] | Float64Array | Float32Array): void {
     if (!id) throw new TypeError('Vector id must not be empty')
     assertFiniteVector(vector)
     if (this.nodes.has(id)) this.remove(id)
-    const stored = new Float64Array(vector)
+    const stored = this.precision === 'float32' ? new Float32Array(vector) : new Float64Array(vector)
     const level = this.assignLevel()
     this.nodes.set(id, stored)
     this.insertIntoGraph(id, level)
   }
 
-  addMany(entries: Array<{ id: string; vector: number[] | Float64Array }>): void {
+  addMany(entries: Array<{ id: string; vector: number[] | Float64Array | Float32Array }>): void {
     for (const { id, vector } of entries) {
       if (!id) throw new TypeError('Vector id must not be empty')
       assertFiniteVector(vector)
       if (this.nodes.has(id)) this.remove(id)
-      const stored = new Float64Array(vector)
+      const stored = this.precision === 'float32' ? new Float32Array(vector) : new Float64Array(vector)
       const level = this.assignLevel()
       this.nodes.set(id, stored)
       this.insertIntoGraph(id, level)
@@ -125,7 +138,7 @@ export class HNSWIndex implements VectorIndexLike {
   }
 
   query(
-    vector: number[],
+    vector: ArrayLike<number>,
     topK: number,
     threshold = 0,
   ): Array<{ id: string; score: number }> {

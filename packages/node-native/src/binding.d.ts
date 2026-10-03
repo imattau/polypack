@@ -20,6 +20,8 @@ export interface NativeHnswConfig {
   efSearch?: number
   /** `"cosine"` (default) or `"euclidean"`. */
   distance?: string
+  vectorPrecision?: 'float32' | 'float64'
+  vectorPrecision?: 'float32' | 'float64'
 }
 
 export interface NativeNodeActivation {
@@ -54,7 +56,7 @@ export interface NativeActivationScoreBreakdown {
 }
 
 export interface NativeExactIndexBinding {
-  constructor(distance?: string): NativeExactIndexBinding
+  constructor(distance?: string, vectorPrecision?: 'float32' | 'float64'): NativeExactIndexBinding
   add(id: string, vector: Float64Array): void
   addMany(ids: string[], vectors: Float64Array[]): void
   remove(id: string): void
@@ -83,10 +85,10 @@ export interface NativeHnswIndexBinding {
 }
 
 export interface NativeBinding {
-  NativeExactIndex: new (distance?: string) => NativeExactIndexBinding
+  NativeExactIndex: new (distance?: string, vectorPrecision?: 'float32' | 'float64') => NativeExactIndexBinding
   NativeHnswIndex: new (config?: NativeHnswConfig, levelSeed?: number) => NativeHnswIndexBinding
-  NativeStore: new (directory: string, compactThreshold?: number, readOnly?: boolean) => NativeStoreBinding
-  restoreStore(source: string, destination: string, compactThreshold?: number): NativeStoreBinding
+  NativeStore: new (directory: string, compactThreshold?: number, readOnly?: boolean, vectorPrecision?: 'float32' | 'float64') => NativeStoreBinding
+  restoreStore(source: string, destination: string, compactThreshold?: number, vectorPrecision?: 'float32' | 'float64'): NativeStoreBinding
   engineInfo(): EngineInfo
   executeQueryPlan(nodes: unknown[], edges: unknown[], plan: Record<string, unknown>): string[]
   aggregateQueryPlan(

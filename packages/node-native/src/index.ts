@@ -11,7 +11,7 @@ import { createRequire } from 'node:module'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { cosineSimilarity as cosine, euclideanSimilarity as euclidean } from '../../../src/vector-index.js'
-import type { DistanceFunction } from '../../../src/vector-index.js'
+import type { DistanceFunction, VectorPrecision } from '../../../src/vector-index.js'
 import { setNativeQueryExecutor, isNativeQueryExecutorActive } from '../../../src/query.js'
 import type {
   EngineInfo as BindingEngineInfo,
@@ -140,7 +140,7 @@ function callNative<T>(fn: () => T): T {
   }
 }
 
-function toFloat64(vector: number[] | Float64Array): Float64Array {
+function toFloat64(vector: number[] | Float32Array | Float64Array): Float64Array {
   return vector instanceof Float64Array ? vector : new Float64Array(vector)
 }
 
@@ -158,26 +158,26 @@ export class NativeVectorIndex {
   private inner: NativeExactIndexBinding
   private onChange?: (id: string) => void
 
-  constructor(onChange?: (id: string) => void, distance: 'cosine' | 'euclidean' = 'cosine') {
+  constructor(onChange?: (id: string) => void, distance: 'cosine' | 'euclidean' = 'cosine', vectorPrecision: VectorPrecision = 'float64') {
     assertAvailable()
     this.onChange = onChange
-    this.inner = new native.NativeExactIndex(distance)
+    this.inner = new native.NativeExactIndex(distance, vectorPrecision)
   }
 
-  add(id: string, vector: number[] | Float64Array): void {
+  add(id: string, vector: number[] | Float32Array | Float64Array): void {
     if (!id) throw new TypeError('Vector id must not be empty')
     assertFiniteVector(vector)
     callNative(() => this.inner.add(id, toFloat64(vector)))
     this.onChange?.(id)
   }
 
-  hydrate(id: string, vector: number[] | Float64Array): void {
+  hydrate(id: string, vector: number[] | Float32Array | Float64Array): void {
     if (!id) throw new TypeError('Vector id must not be empty')
     assertFiniteVector(vector)
     callNative(() => this.inner.add(id, toFloat64(vector)))
   }
 
-  addMany(entries: Array<{ id: string; vector: number[] | Float64Array }>): void {
+  addMany(entries: Array<{ id: string; vector: number[] | Float32Array | Float64Array }>): void {
     const ids: string[] = []
     const vectors: Float64Array[] = []
     for (const { id, vector } of entries) {
@@ -241,7 +241,7 @@ export class NativeHnswIndex {
   constructor(
     onChange?: (id: string) => void,
     distanceFn?: DistanceFunction,
-    config?: { M?: number; Mmax0?: number; efConstruction?: number; efSearch?: number },
+    config?: { M?: number; Mmax0?: number; efConstruction?: number; efSearch?: number; vectorPrecision?: VectorPrecision },
   ) {
     assertAvailable()
     if (distanceFn && distanceFn !== cosine && distanceFn !== euclidean) {
@@ -255,32 +255,33 @@ export class NativeHnswIndex {
         efConstruction: config?.efConstruction,
         efSearch: config?.efSearch,
         distance: distanceFn === euclidean ? 'euclidean' : 'cosine',
+        vectorPrecision: config?.vectorPrecision,
       },
       7,
     )
   }
 
-  add(id: string, vector: number[] | Float64Array): void {
+  add(id: string, vector: number[] | Float32Array | Float64Array): void {
     if (!id) throw new TypeError('Vector id must not be empty')
     assertFiniteVector(vector)
     callNative(() => this.inner.add(id, toFloat64(vector)))
     this.onChange?.(id)
   }
 
-  update(id: string, vector: number[] | Float64Array): void {
+  update(id: string, vector: number[] | Float32Array | Float64Array): void {
     if (!id) throw new TypeError('Vector id must not be empty')
     assertFiniteVector(vector)
     callNative(() => this.inner.update(id, toFloat64(vector)))
     this.onChange?.(id)
   }
 
-  hydrate(id: string, vector: number[] | Float64Array): void {
+  hydrate(id: string, vector: number[] | Float32Array | Float64Array): void {
     if (!id) throw new TypeError('Vector id must not be empty')
     assertFiniteVector(vector)
     callNative(() => this.inner.add(id, toFloat64(vector)))
   }
 
-  addMany(entries: Array<{ id: string; vector: number[] | Float64Array }>): void {
+  addMany(entries: Array<{ id: string; vector: Float32Array | Float64Array | number[] }>): void {
     const ids: string[] = []
     const vectors: Float64Array[] = []
     for (const { id, vector } of entries) {
@@ -397,16 +398,16 @@ export interface NativeChangeBatch {
 export class NativeStore {
   private inner: NativeStoreBinding
 
-  constructor(directory: string, compactThreshold?: number, readOnly = false) {
+  constructor(directory: string, compactThreshold?: number, readOnly = false, vectorPrecision?: VectorPrecision) {
     assertAvailable()
-    this.inner = new native.NativeStore(directory, compactThreshold, readOnly)
+    this.inner = new native.NativeStore(directory, compactThreshold, readOnly, vectorPrecision)
   }
 
   /** Restore and validate a native store from a directory backup. */
-  static restore(source: string, destination: string, compactThreshold?: number): NativeStore {
+  static restore(source: string, destination: string, compactThreshold?: number, vectorPrecision?: VectorPrecision): NativeStore {
     assertAvailable()
     const restored = Object.create(NativeStore.prototype) as NativeStore
-    restored.inner = callNative(() => native.restoreStore(source, destination, compactThreshold))
+    restored.inner = callNative(() => native.restoreStore(source, destination, compactThreshold, vectorPrecision))
     return restored
   }
 

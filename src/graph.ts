@@ -6,7 +6,7 @@ import { SchemaValidationError } from './schema-errors.js'
 import { ResourceLimitError } from './resource-errors.js'
 import { AdapterCapabilityError } from './capability-errors.js'
 import { VectorIndex } from './vector-index.js'
-import type { VectorIndexLike } from './vector-index.js'
+import type { VectorIndexLike, VectorPrecision } from './vector-index.js'
 import { GraphQuery } from './query.js'
 import { PersistedGraphQuery } from './persisted-query.js'
 import { MigrationRegistry } from './migrations.js'
@@ -31,6 +31,7 @@ import type { EmbeddingProvider } from './embedding.js'
 
 type EdgeEntry = { id: string; target: string; type: string; data?: Record<string, unknown>; revision: number; createdAt: number }
 type EdgeIndex = Map<string, Map<string, EdgeEntry>>
+type PolyNodeInput = Omit<PolyNode, 'vector'> & { vector?: Float64Array | Float32Array }
 
 const DEFAULT_HOT_CACHE_MAX = 50000
 
@@ -124,6 +125,7 @@ export class PolyGraph {
   readonly hotCacheMax: number
   readonly embedding: EmbeddingProvider
   readonly transform?: DataTransform
+  vectorPrecision: VectorPrecision
   private resourceLimits: GraphResourceLimits = {}
   readonly migrations = new MigrationRegistry()
 
@@ -764,12 +766,14 @@ export class PolyGraph {
     embedding?: EmbeddingProvider,
     transform?: DataTransform,
     createVectorIndex?: (onChange: (id: string) => void) => VectorIndexLike,
+    vectorPrecision: VectorPrecision = 'float64',
   ) {
     this.persistence = adapter ?? new MemoryAdapter()
     this.hotCacheMax = hotCacheMax ?? DEFAULT_HOT_CACHE_MAX
     this.embedding = embedding ?? defaultEmbedding
     this.transform = transform
-    this.vectors = (createVectorIndex ?? ((onChange) => new VectorIndex(onChange)))((id) => {
+    this.vectorPrecision = vectorPrecision
+    this.vectors = (createVectorIndex ?? ((onChange) => new VectorIndex(onChange, undefined, vectorPrecision)))((id) => {
       this.dirtyVectors.add(id)
       this.schedulePersist()
     })
@@ -1012,7 +1016,7 @@ export class PolyGraph {
   // ── Node CRUD ──
 
   /** Insert or replace a node. Replacement updates type/vector indexes; data and vector are structured-cloned on entry. */
-  addNode(node: PolyNode, options?: WriteOptions): void {
+  addNode(node: PolyNodeInput, options?: WriteOptions): void {
     this.assertMutationAllowed()
     const stored = this.prepareNode(node)
     this.insertNode(stored, options?.expectedRevision)
@@ -1025,7 +1029,7 @@ export class PolyGraph {
    * into one flush, and the persistence debounce is scheduled once for the
    * whole batch. Prefer this over a loop of `addNode` for large inserts.
    */
-  addNodes(nodes: PolyNode[]): void {
+  addNodes(nodes: PolyNodeInput[]): void {
     this.assertMutationAllowed()
     if (nodes.length === 0) return
     if (this.resourceLimits.maxBatchSize !== undefined && nodes.length > this.resourceLimits.maxBatchSize) {
@@ -1042,7 +1046,7 @@ export class PolyGraph {
     this.schedulePersist()
   }
 
-  protected prepareNode(node: PolyNode): PolyNode {
+  protected prepareNode(node: PolyNodeInput): PolyNode {
     if (!node.id) throw new TypeError('Node id must not be empty')
     if (!node.type) throw new TypeError('Node type must not be empty')
     if (!Number.isFinite(node.insertedAt) || node.insertedAt < 0 ||
@@ -1051,12 +1055,13 @@ export class PolyGraph {
     }
     if (node.vector) assertFiniteVector(node.vector)
     if (node.activation) this.assertActivation(node.activation)
-    this.assertProvenance(node)
+    this.assertProvenance(node as PolyNode)
     const serializedData = this.applySerialize(node.id, node.data as Record<string, unknown>)
     if (node.revision !== undefined && (!Number.isInteger(node.revision) || node.revision < 0)) {
       throw new RangeError('Node revision must be a non-negative integer')
     }
-    const prepared = clonePolyNode({ ...node, data: serializedData, revision: node.revision ?? 0 })
+    const prepared = clonePolyNode({ ...node, vector: node.vector ? new Float64Array(node.vector) : undefined, data: serializedData, revision: node.revision ?? 0 })
+    if (prepared.vector && this.vectorPrecision === 'float32') prepared.vector = this.storeVector(prepared.vector)
     this.checkNodeResources(prepared, serializedData)
     this.validateNodeSchema(prepared)
     return prepared
@@ -1165,7 +1170,7 @@ export class PolyGraph {
       id: serialized.id,
       type: serialized.type,
       data: cloneData(serialized.data),
-      vector: serialized.vector ? new Float64Array(serialized.vector) : undefined,
+      vector: serialized.vector ? this.storeVector(serialized.vector) : undefined,
       insertedAt: serialized.insertedAt,
       updatedAt: serialized.updatedAt,
       revision: serialized.revision ?? 0,
@@ -1192,18 +1197,19 @@ export class PolyGraph {
   updateNode(
     id: string,
     data: Partial<Record<string, unknown>>,
-    vector?: Float64Array | WriteOptions,
+    vector?: Float64Array | Float32Array | WriteOptions,
     activation?: NodeActivation,
     options?: WriteOptions,
   ): PolyNode | undefined {
     this.assertMutationAllowed()
     const node = this.nodes.get(id)
     if (!node) return undefined
-    const writeOptions = (vector && !(vector instanceof Float64Array) ? vector : options)
+    const hasVector = vector instanceof Float64Array || vector instanceof Float32Array
+    const writeOptions = (vector && !hasVector ? vector : options)
     if (writeOptions?.expectedRevision !== undefined && (node.revision ?? 0) !== writeOptions.expectedRevision) {
       throw new ConflictError(id, writeOptions.expectedRevision, node.revision ?? 0)
     }
-    if (vector && vector instanceof Float64Array) {
+    if (hasVector) {
       assertFiniteVector(vector)
     }
     const serialized = this.applySerialize(id, data as Record<string, unknown>)
@@ -1211,7 +1217,7 @@ export class PolyGraph {
     const candidate: PolyNode = {
       ...clonePolyNode(node),
       data: { ...cloneData(node.data), ...cloneData(serialized) },
-      vector: vector instanceof Float64Array ? new Float64Array(vector) : node.vector,
+      vector: hasVector ? this.storeVector(vector) : node.vector,
       activation: activation === undefined ? node.activation : { ...activation },
       updatedAt: Date.now(),
       revision: (node.revision ?? 0) + 1,
@@ -1220,10 +1226,10 @@ export class PolyGraph {
     this.validateNodeSchema(candidate)
     this.assertProvenance(candidate)
     Object.assign(node.data, cloneData(serialized))
-    if (vector instanceof Float64Array) {
-      node.vector = new Float64Array(vector)
+    if (hasVector) {
+      node.vector = this.storeVector(vector)
       this.removedVectorIds.delete(id)
-      this.vectors.add(id, [...vector])
+      this.vectors.add(id, node.vector!)
       this.dirtyVectors.add(id)
     }
     if (activation !== undefined) {
@@ -1246,6 +1252,10 @@ export class PolyGraph {
     this.markDirty(id)
     this.emitChange({ type: 'node_updated', nodeId: id, nodeType: node.type })
     return this.applyDeserialize(clonePolyNode(node))
+  }
+
+  private storeVector(vector: ArrayLike<number>): Float64Array {
+    return (this.vectorPrecision === 'float32' ? new Float32Array(vector) : new Float64Array(vector)) as unknown as Float64Array
   }
 
   /** Apply a small, deterministic partial-update language to a node. */
@@ -1956,7 +1966,13 @@ export class PolyGraph {
   /** Load persisted nodes, vectors, and edges. Idempotent — a no-op after the first call until {@link clear} or {@link dispose}. */
   async warm(): Promise<void> {
     if (this._warmed) return
-    this._warmed = true
+    if (this.persistence.getVectorPrecision) {
+      this.vectorPrecision = await this.persistence.getVectorPrecision()
+      this.vectors.setPrecision?.(this.vectorPrecision)
+      for (const node of this.nodes.values()) {
+        if (node.vector) node.vector = this.storeVector(node.vector)
+      }
+    }
     if (this.persistence.getSchemaDefinitions) {
       this.loadPersistedSchemaDefinitions(await this.persistence.getSchemaDefinitions())
     }
@@ -1966,7 +1982,10 @@ export class PolyGraph {
       this.indexDefinitionsDirty = false
     }
     const allNodeIds = await this.persistence.allNodeIds()
-    if (allNodeIds.length === 0) return
+    if (allNodeIds.length === 0) {
+      this._warmed = true
+      return
+    }
 
     const loadCount = Math.min(allNodeIds.length, this.hotCacheMax)
     const hotIds = allNodeIds.slice(allNodeIds.length - loadCount)
@@ -1977,7 +1996,7 @@ export class PolyGraph {
           id: sn.id,
           type: sn.type,
           data: cloneData(sn.data),
-          vector: sn.vector ? new Float64Array(sn.vector) : undefined,
+          vector: sn.vector ? this.storeVector(sn.vector) : undefined,
           insertedAt: sn.insertedAt,
           updatedAt: sn.updatedAt,
           revision: sn.revision ?? 0,
@@ -2023,6 +2042,7 @@ export class PolyGraph {
     for (const nodeType of this._byType.keys()) {
       this.emitChange({ type: 'node_added', nodeType })
     }
+    this._warmed = true
   }
 
   async prune(maxNodes: number): Promise<void> {

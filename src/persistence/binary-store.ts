@@ -2,7 +2,7 @@ import type { SerializedNode, SerializedEdge, AdapterCapabilities, IndexDefiniti
 import type { PersistenceAdapter, PersistenceChanges, PersistedNodeQuery } from './adapter.js'
 import type { PersistedSchemaDefinitions } from '../types.js'
 import { applyPersistedCountPagination, applyPersistedNodeQuery, assertQueryActive, matchesPersistedNode, SecondaryIndexBuckets } from './query.js'
-import type { WalEntry } from './binary-format.js'
+import type { WalEntry, VectorPrecision } from './binary-format.js'
 import { encodeWalEntries, decodeWalEntries, encodeSnapshot, decodeSnapshot, encodeMutationRecords, decodeMutationRecords } from './binary-format.js'
 import type { FileIO } from './file-io.js'
 import { createFileIO } from './file-io.js'
@@ -19,6 +19,13 @@ const DEFAULT_COMPACT_THRESHOLD = 10_000
 /** Compact once the WAL holds at least this share of the store's record count. */
 const COMPACT_RATIO = 4
 
+export class VectorPrecisionMismatchError extends Error {
+  readonly name = 'VectorPrecisionMismatchError'
+  constructor(readonly requested: VectorPrecision, readonly stored: VectorPrecision) {
+    super(`Store uses ${stored} vectors; requested ${requested}. Use the offline precision migration API to change precision.`)
+  }
+}
+
 /**
  * Retention policy for `mutations.msgpack`. When both bounds are set, a
  * record is retained only if it satisfies both (the intersection) — i.e. a
@@ -34,6 +41,8 @@ export interface MutationLogRetention {
 export interface BinaryStoreConfig {
   /** Directory holding `snapshot.msgpack` and `wal.msgpack`. */
   storeDir: string
+  /** Precision recorded for new stores; omitted when opening an existing store adopts its recorded value. */
+  vectorPrecision?: VectorPrecision
   /**
    * Minimum WAL-entry count at which compaction is scheduled (default
    * 10,000). Acts as a lower bound — the effective threshold also grows with
@@ -65,6 +74,7 @@ export interface BinaryStoreConfig {
 
 interface ResolvedBinaryStoreConfig {
   storeDir: string
+  vectorPrecision?: VectorPrecision
   compactThreshold: number
   fileIO?: FileIO
   syncWrites: boolean
@@ -107,10 +117,13 @@ export class BinaryStoreAdapter implements PersistenceAdapter {
   private closed = false
   private queue: Promise<unknown> = Promise.resolve()
   private releaseLock?: () => Promise<void>
+  private vectorPrecision: VectorPrecision = 'float64'
+  private precisionRecorded = false
 
   constructor(config: BinaryStoreConfig) {
     this.config = {
       storeDir: config.storeDir,
+      vectorPrecision: config.vectorPrecision,
       compactThreshold: config.compactThreshold ?? DEFAULT_COMPACT_THRESHOLD,
       fileIO: config.fileIO,
       syncWrites: config.syncWrites ?? false,
@@ -128,6 +141,13 @@ export class BinaryStoreAdapter implements PersistenceAdapter {
       concurrentWriters: false,
       vectorSearch: 'exact',
     }
+  }
+
+  get precision(): VectorPrecision { return this.vectorPrecision }
+
+  async getVectorPrecision(): Promise<VectorPrecision> {
+    await this.enqueue(() => this.ensureLoaded())
+    return this.vectorPrecision
   }
 
   /** Serialise initialisation, mutation, compaction, and shutdown. */
@@ -257,7 +277,14 @@ export class BinaryStoreAdapter implements PersistenceAdapter {
     const snapshotData = await this.io.readFile(SNAPSHOT_FILE)
     let snapshotHasSchema = false
     if (snapshotData) {
-      const { nodes, edges, vectors, indexes, schemaDefinitions } = decodeSnapshot(snapshotData)
+      const { nodes, edges, vectors, indexes, schemaDefinitions, vectorPrecision } = decodeSnapshot(snapshotData)
+      if (this.config.vectorPrecision && this.config.vectorPrecision !== vectorPrecision) {
+        await this.releaseLock?.()
+        this.releaseLock = undefined
+        throw new VectorPrecisionMismatchError(this.config.vectorPrecision, vectorPrecision)
+      }
+      this.vectorPrecision = vectorPrecision
+      this.precisionRecorded = true
       this.nodes = nodes
       this.edges = edges
       this.vectors = vectors
@@ -267,6 +294,8 @@ export class BinaryStoreAdapter implements PersistenceAdapter {
         this.schemaDefinitions = schemaDefinitions
         snapshotHasSchema = true
       }
+    } else {
+      this.vectorPrecision = this.config.vectorPrecision ?? 'float64'
     }
     const schemaData = await this.io.readFile(SCHEMAS_FILE)
     if (schemaData && !snapshotHasSchema) {
@@ -284,7 +313,28 @@ export class BinaryStoreAdapter implements PersistenceAdapter {
       // between the snapshot write and WAL deletion only re-replays an already
       // applied (idempotent) WAL; the old delete-first ordering could lose the
       // recovered changes on a crash.
-      for (const entry of decodeWalEntries(walData)) {
+      const recoveredEntries = [...decodeWalEntries(walData)]
+      const recorded = recoveredEntries.find((entry) => entry.kind === 'setPrecision')
+      if (!snapshotData && recoveredEntries.length > 0 && !recorded && this.config.vectorPrecision === 'float32') {
+        await this.releaseLock?.()
+        this.releaseLock = undefined
+        throw new VectorPrecisionMismatchError('float32', 'float64')
+      }
+      if (recorded?.kind === 'setPrecision') {
+        if (snapshotData && this.precisionRecorded && this.vectorPrecision !== recorded.precision) {
+          await this.releaseLock?.()
+          this.releaseLock = undefined
+          throw new Error('WAL precision conflicts with snapshot precision')
+        }
+        if (this.config.vectorPrecision && this.config.vectorPrecision !== recorded.precision) {
+          await this.releaseLock?.()
+          this.releaseLock = undefined
+          throw new VectorPrecisionMismatchError(this.config.vectorPrecision, recorded.precision)
+        }
+        this.vectorPrecision = recorded.precision
+        this.precisionRecorded = true
+      }
+      for (const entry of recoveredEntries) {
         this.replayEntry(entry)
       }
       if (!this.config.readOnly) {
@@ -337,11 +387,15 @@ export class BinaryStoreAdapter implements PersistenceAdapter {
       case 'setSchema':
         this.schemaDefinitions = structuredClone(entry.schema)
         break
+      case 'setPrecision':
+        this.vectorPrecision = entry.precision
+        this.precisionRecorded = true
+        break
     }
   }
 
   private async writeSnapshot(): Promise<void> {
-    await this.io.writeFile(SNAPSHOT_FILE, encodeSnapshot(this.nodes, this.edges, this.vectors, this.indexDefinitions, this.schemaDefinitions))
+    await this.io.writeFile(SNAPSHOT_FILE, encodeSnapshot(this.nodes, this.edges, this.vectors, this.indexDefinitions, this.schemaDefinitions, this.vectorPrecision))
   }
 
   /**
@@ -360,7 +414,7 @@ export class BinaryStoreAdapter implements PersistenceAdapter {
       const entries = [...decodeWalEntries(walData)]
       remaining = entries.length - generation
       if (remaining > 0) {
-        await this.io.writeFile(WAL_FILE, encodeWalEntries(entries.slice(generation)))
+        await this.io.writeFile(WAL_FILE, encodeWalEntries(entries.slice(generation), this.vectorPrecision))
       } else {
         await this.io.writeFile(WAL_FILE, new Uint8Array(0))
       }
@@ -390,7 +444,7 @@ export class BinaryStoreAdapter implements PersistenceAdapter {
     if (retained.length === len) return
     this.mutationRecords = retained
     this.rebuildMutationIdentityIndex()
-    await this.io.writeFile(MUTATION_LOG_FILE, encodeMutationRecords(retained))
+    await this.io.writeFile(MUTATION_LOG_FILE, encodeMutationRecords(retained, this.vectorPrecision))
   }
 
   /**
@@ -425,6 +479,10 @@ export class BinaryStoreAdapter implements PersistenceAdapter {
         (changes.transactionId && this.mutationTransactionIds.has(changes.transactionId))
       ) return
       const entries: WalEntry[] = []
+      if (!this.precisionRecorded) {
+        entries.push({ kind: 'setPrecision', precision: this.vectorPrecision })
+        this.precisionRecorded = true
+      }
       if (changes.indexDefinitions) {
         this.indexDefinitions = changes.indexDefinitions.map(index => ({ ...index, fields: [...index.fields] }))
         this.secondaryIndexes.setDefinitions(this.indexDefinitions)
@@ -451,9 +509,10 @@ export class BinaryStoreAdapter implements PersistenceAdapter {
         entries.push({ kind: 'deleteVector', id })
       }
       for (const node of changes.putNodes) {
-        this.indexNode(node)
-        this.nodes.set(node.id, node)
-        entries.push({ kind: 'putNode', node })
+        const stored = this.quantizeNode(node)
+        this.indexNode(stored)
+        this.nodes.set(stored.id, stored)
+        entries.push({ kind: 'putNode', node: stored })
       }
       for (const edge of changes.putEdges) {
         this.edges.set(edge.id, edge)
@@ -461,15 +520,21 @@ export class BinaryStoreAdapter implements PersistenceAdapter {
         entries.push({ kind: 'putEdge', edge })
       }
       for (const entry of changes.putVectors) {
-        this.vectors.set(entry.id, entry.vector)
-        entries.push({ kind: 'putVector', id: entry.id, vector: entry.vector })
+        const vector = this.quantize(entry.vector)
+        this.vectors.set(entry.id, vector)
+        entries.push({ kind: 'putVector', id: entry.id, vector })
       }
       if (entries.length > 0) {
-        const encoded = encodeWalEntries(entries)
+        const encoded = encodeWalEntries(entries, this.vectorPrecision)
         await this.io.appendFile(WAL_FILE, encoded)
-        const record = mutationRecordFromChanges(changes, this.nextMutationSequence)
+        const logicalChanges: PersistenceChanges = {
+          ...changes,
+          putNodes: changes.putNodes.map(node => this.quantizeNode(node)),
+          putVectors: changes.putVectors.map(entry => ({ ...entry, vector: this.quantize(entry.vector) })),
+        }
+        const record = mutationRecordFromChanges(logicalChanges, this.nextMutationSequence)
         if (record) {
-          await this.io.appendFile(MUTATION_LOG_FILE, encodeMutationRecords([record]))
+          await this.io.appendFile(MUTATION_LOG_FILE, encodeMutationRecords([record], this.vectorPrecision))
           this.mutationRecords.push(record)
           this.mutationOperationIds.add(record.operationId)
           this.mutationTransactionIds.add(record.transactionId)
@@ -482,6 +547,14 @@ export class BinaryStoreAdapter implements PersistenceAdapter {
         if (changes.schemaDefinitions) await this.io.writeFile(SCHEMAS_FILE, new TextEncoder().encode(JSON.stringify(this.schemaDefinitions)))
       }
     })
+  }
+
+  private quantize(vector: number[]): number[] {
+    return this.vectorPrecision === 'float32' ? [...new Float32Array(vector)] : [...vector]
+  }
+
+  private quantizeNode(node: SerializedNode): SerializedNode {
+    return node.vector ? { ...node, vector: this.quantize(node.vector) } : node
   }
 
   async getIndexDefinitions(): Promise<IndexDefinition[]> {
@@ -600,6 +673,32 @@ export class BinaryStoreAdapter implements PersistenceAdapter {
     return this.mutationRecords
       .filter(record => record.sequence > sequence)
       .map(record => ({ ...record, operations: record.operations.map(operation => ({ ...operation, payload: structuredClone(operation.payload) })) }))
+  }
+
+  /** Install an existing mutation history into an otherwise empty store. Intended for offline migrations. */
+  async importMutationHistory(records: MutationRecord[]): Promise<void> {
+    this.assertOpen()
+    this.assertWritable()
+    await this.enqueue(async () => {
+      await this.ensureLoaded()
+      if (this.mutationRecords.length > 1) throw new Error('Mutation history can only replace the initial migration record')
+      const copied = records.map(record => ({ ...record, operations: record.operations.map(operation => {
+        const payload = structuredClone(operation.payload)
+        if (this.vectorPrecision === 'float32' && (operation.type === 'putNode' || operation.type === 'putVector') && Array.isArray(payload.vector)) {
+          payload.vector = this.quantize(payload.vector as number[])
+        }
+        return { ...operation, payload }
+      }) }))
+      for (let i = 1; i < copied.length; i++) {
+        if (copied[i].sequence <= copied[i - 1].sequence) throw new Error('Mutation history must have increasing sequences')
+      }
+      if (copied.some(record => record.sequence < 1n)) throw new Error('Mutation history sequences must be positive')
+      if (copied.length) await this.io.writeFile(MUTATION_LOG_FILE, encodeMutationRecords(copied, this.vectorPrecision))
+      this.mutationRecords = copied
+      this.mutationOperationIds = new Set(copied.map(record => record.operationId))
+      this.mutationTransactionIds = new Set(copied.map(record => record.transactionId))
+      this.nextMutationSequence = (copied.at(-1)?.sequence ?? 0n) + 1n
+    })
   }
 
   async getMutationLogPage(sequence: bigint, limit: number): Promise<MutationRecord[]> {
@@ -825,7 +924,7 @@ export class BinaryStoreAdapter implements PersistenceAdapter {
       this.edgesByTarget.clear()
       this.secondaryIndexes.rebuild([])
       this.walEntryCount = 0
-      await this.io.writeFile(SNAPSHOT_FILE, encodeSnapshot(this.nodes, this.edges, this.vectors, this.indexDefinitions, this.schemaDefinitions))
+      await this.io.writeFile(SNAPSHOT_FILE, encodeSnapshot(this.nodes, this.edges, this.vectors, this.indexDefinitions, this.schemaDefinitions, this.vectorPrecision))
       await this.io.writeFile(WAL_FILE, new Uint8Array(0))
     })
   }

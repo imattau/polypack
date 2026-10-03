@@ -115,6 +115,18 @@ describe('VectorIndex', () => {
 })
 
 describe('VectorIndex edge cases', () => {
+  it('stores Float32 precision compactly when configured and widens detached reads', () => {
+    const index = new VectorIndex(undefined, undefined, 'float32')
+    const input = new Float32Array([1 / 3, 1])
+    index.add('a', input)
+    const read = index.get('a')!
+    expect(read).toBeInstanceOf(Float64Array)
+    expect(read[0]).toBe(Math.fround(1 / 3))
+    expect(index['vectors'].get('a')).toBeInstanceOf(Float32Array)
+    read[0] = 0
+    expect(index.get('a')![0]).toBe(Math.fround(1 / 3))
+  })
+
   it('query on empty index returns empty array', () => {
     const idx = new VectorIndex()
     expect(idx.query([1, 0, 0], 5)).toHaveLength(0)

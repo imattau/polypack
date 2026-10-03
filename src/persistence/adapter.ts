@@ -1,6 +1,7 @@
 import type { SerializedNode, SerializedEdge, IndexDefinition, MutationRecord, VerificationReport, GraphStats, PersistedSchemaDefinitions } from '../types.js'
 import type { AdapterCapabilities } from '../types.js'
 import type { FileIO } from './file-io.js'
+import type { VectorPrecision } from './binary-format.js'
 
 /** Backwards-compatible adapter-module export for schema metadata. */
 export type { PersistedSchemaDefinitions } from '../types.js'
@@ -39,6 +40,7 @@ export interface PersistenceAdapter {
   readonly capabilities?: AdapterCapabilities
   getIndexDefinitions?(): Promise<IndexDefinition[]>
   getSchemaDefinitions?(): Promise<PersistedSchemaDefinitions>
+  getVectorPrecision?(): Promise<VectorPrecision>
   setSchemaDefinitions?(definitions: PersistedSchemaDefinitions): Promise<void>
   getMutationsSince?(sequence: bigint): Promise<MutationRecord[]>
   getMutationLogPage?(sequence: bigint, limit: number): Promise<MutationRecord[]>

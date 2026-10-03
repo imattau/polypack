@@ -6,7 +6,8 @@
 //! uses cosine distance (`1 - similarity`) internally.
 
 use crate::error::{PolypackError, Result};
-use crate::vector::{cosine, euclidean, DistanceFn};
+use crate::storage::VectorPrecision;
+use crate::vector::{DistanceFn, StoredVector};
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap, HashSet};
 
@@ -87,7 +88,7 @@ impl LevelRng {
 /// remove/update semantics that differ from a naive HNSW implementation.
 #[derive(Clone)]
 pub struct HnswIndex {
-    nodes: HashMap<String, Vec<f64>>,
+    nodes: HashMap<String, StoredVector>,
     node_level: HashMap<String, u32>,
     adjacency: HashMap<u32, HashMap<String, Vec<String>>>,
     entry_point: Option<String>,
@@ -96,6 +97,7 @@ pub struct HnswIndex {
     config: HnswConfig,
     ml: f64,
     level_rng: LevelRng,
+    precision: VectorPrecision,
 }
 
 impl HnswIndex {
@@ -106,6 +108,10 @@ impl HnswIndex {
     /// empty result — silently returning no query hits, or panicking on
     /// insert when graph-building code indexes into that empty result.
     pub fn new(config: HnswConfig, level_seed: u32) -> Result<Self> {
+        Self::new_with_precision(config, level_seed, VectorPrecision::Float64)
+    }
+
+    pub fn new_with_precision(config: HnswConfig, level_seed: u32, precision: VectorPrecision) -> Result<Self> {
         for (name, value) in [
             ("m", config.m),
             ("mmax0", config.mmax0),
@@ -126,7 +132,17 @@ impl HnswIndex {
             ml: 1.0 / (config.m.max(2) as f64).ln(),
             config,
             level_rng: LevelRng(level_seed),
+            precision,
         })
+    }
+
+    pub fn set_precision(&mut self, precision: VectorPrecision) -> Result<()> {
+        if self.precision == precision { return Ok(()); }
+        let values: Vec<(String, Vec<f64>)> = self.nodes.iter().map(|(id, vector)| (id.clone(), vector.to_f64())).collect();
+        self.clear();
+        self.precision = precision;
+        for (id, vector) in values { self.add(&id, &vector)?; }
+        Ok(())
     }
 
     pub fn add(&mut self, id: &str, vector: &[f64]) -> Result<()> {
@@ -139,7 +155,7 @@ impl HnswIndex {
         if self.nodes.contains_key(id) {
             self.remove(id);
         }
-        let stored = vector.to_vec();
+        let stored = StoredVector::new(vector, self.precision);
         let level = self.assign_level();
         self.nodes.insert(id.to_string(), stored);
         self.insert_into_graph(id, level);
@@ -171,16 +187,20 @@ impl HnswIndex {
         self.nodes.len()
     }
 
-    pub fn nodes(&self) -> &HashMap<String, Vec<f64>> {
-        &self.nodes
+    pub fn resident_vector_bytes(&self) -> usize {
+        self.nodes.values().map(|vector| vector.len() * if self.precision == VectorPrecision::Float32 { 4 } else { 8 }).sum()
+    }
+
+    pub fn nodes(&self) -> HashMap<String, Vec<f64>> {
+        self.nodes.iter().map(|(id, vector)| (id.clone(), vector.to_f64())).collect()
     }
 
     pub fn has(&self, id: &str) -> bool {
         self.nodes.contains_key(id)
     }
 
-    pub fn get(&self, id: &str) -> Option<&[f64]> {
-        self.nodes.get(id).map(|v| v.as_slice())
+    pub fn get(&self, id: &str) -> Option<Vec<f64>> {
+        self.nodes.get(id).map(StoredVector::to_f64)
     }
 
     pub fn query(&self, vector: &[f64], top_k: usize, threshold: f64) -> Result<Vec<ScoredId>> {
@@ -230,12 +250,12 @@ impl HnswIndex {
 
     // ── Internals ──
 
-    fn dist(&self, a: &[f64], b: &[f64]) -> f64 {
-        let sim = match self.distance {
-            DistanceFn::Cosine => cosine(a, b),
-            DistanceFn::Euclidean => euclidean(a, b),
-        };
-        1.0 - sim.unwrap_or(0.0)
+    fn dist(&self, a: &[f64], b: &StoredVector) -> f64 {
+        1.0 - b.similarity(a, self.distance).unwrap_or(0.0)
+    }
+
+    fn dist_stored(&self, a: &StoredVector, b: &StoredVector) -> f64 {
+        1.0 - a.similarity_to(b, self.distance).unwrap_or(0.0)
     }
 
     fn assign_level(&mut self) -> u32 {
@@ -325,7 +345,7 @@ impl HnswIndex {
 
     fn greedy_search(&self, q: &[f64], ep: &str, layer: u32) -> String {
         let mut current = ep.to_string();
-        let mut current_dist = self.dist(q, &self.nodes[current.as_str()].clone());
+        let mut current_dist = self.dist(q, &self.nodes[current.as_str()]);
         let mut visited = HashSet::from([current.clone()]);
 
         loop {
@@ -336,7 +356,7 @@ impl HnswIndex {
                     continue;
                 }
                 visited.insert(nid.clone());
-                let n_dist = self.dist(q, &self.nodes[&nid].clone());
+                let n_dist = self.dist(q, &self.nodes[&nid]);
                 if n_dist < current_dist {
                     current = nid;
                     current_dist = n_dist;
@@ -351,7 +371,7 @@ impl HnswIndex {
     }
 
     fn search_layer(&self, q: &[f64], entry: &str, ef: usize, layer: u32) -> Vec<Candidate> {
-        let entry_dist = self.dist(q, &self.nodes[entry].clone());
+        let entry_dist = self.dist(q, &self.nodes[entry]);
 
         let mut visited = HashSet::from([entry.to_string()]);
         let mut candidates: BinaryHeap<Reverse<Candidate>> = BinaryHeap::new();
@@ -373,7 +393,7 @@ impl HnswIndex {
                     continue;
                 }
                 visited.insert(eid.clone());
-                let e_dist = self.dist(q, &self.nodes[&eid].clone());
+                let e_dist = self.dist(q, &self.nodes[&eid]);
                 let worst = results.peek().map(|w| w.dist).unwrap_or(f64::INFINITY);
                 if results.len() < ef || e_dist < worst {
                     candidates.push(Reverse(Candidate { id: eid.clone(), dist: e_dist }));
@@ -403,7 +423,7 @@ impl HnswIndex {
             return;
         }
 
-        let q = self.nodes[id].clone();
+        let q = self.nodes[id].to_f64();
         let mut ep = self.entry_point.clone().unwrap();
 
         for lc in ((level as i32 + 1)..=self.max_layer).rev() {
@@ -458,7 +478,7 @@ impl HnswIndex {
         let mut with_dist: Vec<(f64, String)> = neighbors
             .iter()
             .filter_map(|n| {
-                self.nodes.get(n).map(|nvec| (self.dist(&vec, nvec), n.clone()))
+                self.nodes.get(n).map(|nvec| (self.dist_stored(&vec, nvec), n.clone()))
             })
             .collect();
         with_dist.sort_by(|a, b| {
@@ -577,6 +597,14 @@ mod tests {
         let q = vec8(0.0, 1.0);
         let r = hnsw.query(&q, 5, 0.0).unwrap();
         assert!(r.iter().any(|s| s.id == "a"));
+    }
+
+    #[test]
+    fn float32_retains_half_vector_payload_and_widens_detached_reads() {
+        let mut index = HnswIndex::new_with_precision(HnswConfig::default(), 7, VectorPrecision::Float32).unwrap();
+        index.add("a", &[1.0 / 3.0; 384]).unwrap();
+        assert_eq!(index.resident_vector_bytes(), 384 * 4);
+        assert_eq!(index.get("a").unwrap()[0], (1.0f64 / 3.0) as f32 as f64);
     }
 
     #[test]

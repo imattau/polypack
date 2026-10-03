@@ -14,6 +14,7 @@ pub enum Msg {
     Bool(bool),
     Int(i64),
     Float(f64),
+    Bin(Vec<u8>),
     Str(String),
     Array(Vec<Msg>),
     Map(Vec<(Msg, Msg)>),
@@ -66,6 +67,7 @@ pub fn encode(msg: &Msg, out: &mut Vec<u8>) {
             }
         }
         Msg::Str(s) => encode_str(s, out),
+        Msg::Bin(bytes) => encode_bin(bytes, out),
         Msg::Array(items) => {
             encode_array_header(items.len(), out);
             for item in items {
@@ -131,6 +133,14 @@ fn encode_str(s: &str, out: &mut Vec<u8>) {
         out.extend_from_slice(&(len as u32).to_be_bytes());
     }
     out.extend_from_slice(s.as_bytes());
+}
+
+fn encode_bin(bytes: &[u8], out: &mut Vec<u8>) {
+    let len = bytes.len();
+    if len < 256 { out.push(0xc4); out.push(len as u8); }
+    else if len < 65536 { out.push(0xc5); out.extend_from_slice(&(len as u16).to_be_bytes()); }
+    else { out.push(0xc6); out.extend_from_slice(&(len as u32).to_be_bytes()); }
+    out.extend_from_slice(bytes);
 }
 
 fn encode_array_header(len: usize, out: &mut Vec<u8>) {
@@ -208,6 +218,9 @@ fn decode_value(c: &mut Cursor) -> Result<Msg> {
         0xc0 => Ok(Msg::Nil),
         0xc2 => Ok(Msg::Bool(false)),
         0xc3 => Ok(Msg::Bool(true)),
+        0xc4 => { let len = c.u8()? as usize; Ok(Msg::Bin(c.take(len)?.to_vec())) }
+        0xc5 => { let len = c.be_u16()? as usize; Ok(Msg::Bin(c.take(len)?.to_vec())) }
+        0xc6 => { let len = c.be_u32()? as usize; Ok(Msg::Bin(c.take(len)?.to_vec())) }
         0xcc => Ok(Msg::Int(c.u8()? as i64)),
         0xcd => Ok(Msg::Int(c.be_u16()? as i64)),
         0xce => Ok(Msg::Int(c.be_u32()? as i64)),

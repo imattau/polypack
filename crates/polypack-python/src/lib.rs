@@ -39,6 +39,9 @@ fn to_vec(obj: &Bound<'_, PyAny>) -> PyResult<Vec<f64>> {
     if let Ok(arr) = obj.extract::<PyReadonlyArray1<f64>>() {
         return Ok(arr.as_slice()?.to_vec());
     }
+    if let Ok(arr) = obj.extract::<PyReadonlyArray1<f32>>() {
+        return Ok(arr.as_slice()?.iter().map(|value| *value as f64).collect());
+    }
     obj.extract::<Vec<f64>>()
         .map_err(|_| PyValueError::new_err("vector must be a sequence of floats"))
 }
@@ -68,15 +71,18 @@ struct ExactIndex {
 #[pymethods]
 impl ExactIndex {
     #[new]
-    #[pyo3(signature = (distance="cosine".to_string()))]
-    fn new(distance: String) -> Self {
+    #[pyo3(signature = (distance="cosine".to_string(), vector_precision="float64".to_string()))]
+    fn new(distance: String, vector_precision: String) -> PyResult<Self> {
         let distance = match distance.as_str() {
             "euclidean" => DistanceFn::Euclidean,
             _ => DistanceFn::Cosine,
         };
-        ExactIndex {
-            inner: CoreExactIndex::new(distance),
-        }
+        let precision = match vector_precision.as_str() {
+            "float32" => VectorPrecision::Float32,
+            "float64" => VectorPrecision::Float64,
+            other => return Err(PolypackValueError::new_err(format!("unsupported vector precision {other}"))),
+        };
+        Ok(ExactIndex { inner: CoreExactIndex::new_with_precision(distance, precision) })
     }
 
     fn add(&mut self, id: String, vector: Bound<'_, PyAny>) -> PyResult<()> {
@@ -136,6 +142,16 @@ impl ExactIndex {
         self.inner.clear()
     }
 
+    fn set_precision(&mut self, vector_precision: String) -> PyResult<()> {
+        let precision = match vector_precision.as_str() {
+            "float32" => VectorPrecision::Float32,
+            "float64" => VectorPrecision::Float64,
+            other => return Err(PolypackValueError::new_err(format!("unsupported vector precision {other}"))),
+        };
+        self.inner.set_precision(precision);
+        Ok(())
+    }
+
     fn has(&self, id: String) -> bool {
         self.inner.has(&id)
     }
@@ -165,7 +181,7 @@ struct HnswIndex {
 #[pymethods]
 impl HnswIndex {
     #[new]
-    #[pyo3(signature = (m=16, mmax0=32, ef_construction=200, ef_search=200, level_seed=7, distance="cosine".to_string()))]
+    #[pyo3(signature = (m=16, mmax0=32, ef_construction=200, ef_search=200, level_seed=7, distance="cosine".to_string(), vector_precision="float64".to_string()))]
     fn new(
         m: usize,
         mmax0: usize,
@@ -173,6 +189,7 @@ impl HnswIndex {
         ef_search: usize,
         level_seed: u32,
         distance: String,
+        vector_precision: String,
     ) -> PyResult<Self> {
         let distance = match distance.as_str() {
             "euclidean" => DistanceFn::Euclidean,
@@ -185,8 +202,13 @@ impl HnswIndex {
             ef_search,
             distance,
         };
+        let precision = match vector_precision.as_str() {
+            "float32" => VectorPrecision::Float32,
+            "float64" => VectorPrecision::Float64,
+            other => return Err(PolypackValueError::new_err(format!("unsupported vector precision {other}"))),
+        };
         Ok(HnswIndex {
-            inner: CoreHnswIndex::new(config, level_seed).map_err(to_pyerr)?,
+            inner: CoreHnswIndex::new_with_precision(config, level_seed, precision).map_err(to_pyerr)?,
         })
     }
 
@@ -250,6 +272,16 @@ impl HnswIndex {
 
     fn clear(&mut self) {
         self.inner.clear()
+    }
+
+    fn set_precision(&mut self, vector_precision: String) -> PyResult<()> {
+        let precision = match vector_precision.as_str() {
+            "float32" => VectorPrecision::Float32,
+            "float64" => VectorPrecision::Float64,
+            other => return Err(PolypackValueError::new_err(format!("unsupported vector precision {other}"))),
+        };
+        self.inner.set_precision(precision).map_err(to_pyerr)?;
+        Ok(())
     }
 
     fn has(&self, id: String) -> bool {
@@ -367,8 +399,8 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
 // ── Storage / NativeStore ──
 
 use polypack_core::storage::{
-    AdapterCapabilities, Durability, MutationLogRetention, NodeQuery, Store as CoreStore, StoreConfig, Storage,
-    VectorSearchCapability,
+    AdapterCapabilities, Durability, MutationLogRetention, MutationRecord, NodeQuery, Store as CoreStore, StoreConfig, Storage,
+    VectorPrecision, VectorSearchCapability,
 };
 use std::sync::Mutex;
 
@@ -575,26 +607,34 @@ fn py_to_polypack<T: serde::de::DeserializeOwned>(value: &Bound<'_, PyAny>) -> P
 #[pymethods]
 impl NativeStore {
     #[new]
-    #[pyo3(signature = (storage, compact_threshold=10000, mutation_log_max_entries=None, mutation_log_max_age_ms=None))]
+    #[pyo3(signature = (storage, compact_threshold=10000, mutation_log_max_entries=None, mutation_log_max_age_ms=None, vector_precision=None))]
     fn new(
         storage: Py<PyAny>,
         compact_threshold: usize,
         mutation_log_max_entries: Option<usize>,
         mutation_log_max_age_ms: Option<i64>,
-    ) -> Self {
+        vector_precision: Option<String>,
+    ) -> PyResult<Self> {
         let mutation_log_retention = if mutation_log_max_entries.is_some() || mutation_log_max_age_ms.is_some() {
             Some(MutationLogRetention { max_entries: mutation_log_max_entries, max_age_ms: mutation_log_max_age_ms })
         } else {
             None
         };
+        let vector_precision = match vector_precision.as_deref() {
+            None => None,
+            Some("float32") => Some(VectorPrecision::Float32),
+            Some("float64") => Some(VectorPrecision::Float64),
+            Some(other) => return Err(PolypackValueError::new_err(format!("unsupported vector precision {other}"))),
+        };
         let config = StoreConfig {
             compact_threshold,
+            vector_precision,
             durability: Durability::Process,
             mutation_log_retention,
         };
-        NativeStore {
+        Ok(NativeStore {
             inner: Mutex::new(CoreStore::new(Box::new(PythonStorage(storage)), config)),
-        }
+        })
     }
 
     /// Trim `mutations.jsonl` per the configured retention policy right now,
@@ -602,6 +642,13 @@ impl NativeStore {
     /// policy was configured at construction.
     fn trim_mutation_log(&self) -> PyResult<()> {
         self.inner.lock().unwrap().trim_mutation_log().map_err(to_pyerr)
+    }
+
+    fn vector_precision(&self) -> PyResult<&'static str> {
+        match self.inner.lock().unwrap().vector_precision().map_err(to_pyerr)? {
+            VectorPrecision::Float32 => Ok("float32"),
+            VectorPrecision::Float64 => Ok("float64"),
+        }
     }
 
     fn capabilities(&self, py: Python<'_>) -> PyResult<Py<PyDict>> {
@@ -643,6 +690,12 @@ impl NativeStore {
             list.append(json_to_py(py, &json)?)?;
         }
         Ok(list.unbind())
+    }
+
+    /// Install source mutation history into a fresh migration destination.
+    fn replace_mutation_log(&self, records: Vec<Bound<'_, PyAny>>) -> PyResult<()> {
+        let records = records.iter().map(py_to_polypack::<MutationRecord>).collect::<PyResult<Vec<_>>>()?;
+        self.inner.lock().unwrap().replace_mutation_log(&records).map_err(to_pyerr)
     }
 
     #[pyo3(signature = (sequence=0))]

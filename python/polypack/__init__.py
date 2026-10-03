@@ -609,9 +609,12 @@ class ExactIndex:
     `on_change` notifications on mutations.
     """
 
-    def __init__(self, distance: str = "cosine", on_change: Optional[Callable[[str], None]] = None) -> None:
-        self._inner = _NativeExactIndex(distance)
+    def __init__(self, distance: str = "cosine", on_change: Optional[Callable[[str], None]] = None, vector_precision: str = "float64") -> None:
+        self._inner = _NativeExactIndex(distance, vector_precision)
         self._on_change = on_change
+
+    def set_precision(self, vector_precision: str) -> None:
+        self._inner.set_precision(vector_precision)
 
     def add(self, id_: str, vector: Any) -> None:
         _validate_id(id_, "vector id")
@@ -686,9 +689,13 @@ class HnswIndex:
         ef_search: int = 200,
         level_seed: int = 7,
         distance: str = "cosine",
+        vector_precision: str = "float64",
     ) -> None:
-        self._inner = _NativeHnswIndex(m, mmax0, ef_construction, ef_search, level_seed, distance)
+        self._inner = _NativeHnswIndex(m, mmax0, ef_construction, ef_search, level_seed, distance, vector_precision)
         self._on_change = on_change
+
+    def set_precision(self, vector_precision: str) -> None:
+        self._inner.set_precision(vector_precision)
 
     def add(self, id_: str, vector: Any) -> None:
         _validate_id(id_, "vector id")
@@ -902,7 +909,7 @@ def _copy_node(node: Node) -> Node:
         "id": node["id"],
         "type": node["type"],
         "data": copy.deepcopy(node.get("data") or {}),
-        "vector": None if node.get("vector") is None else list(node.get("vector")),
+        "vector": None if node.get("vector") is None else np.asarray(node.get("vector"), dtype=np.float64).tolist(),
         "insertedAt": node["insertedAt"],
         "updatedAt": node["updatedAt"],
         "revision": int(node.get("revision", 0)),
@@ -1054,11 +1061,15 @@ class PolyGraph:
         self,
         on_orphan: Optional[Callable[[str], None]] = None,
         vector_index: Optional[ExactIndex] = None,
+        vector_precision: str = "float64",
     ) -> None:
+        if vector_precision not in ("float32", "float64"):
+            raise PolypackValueError("vector_precision must be 'float32' or 'float64'")
         self._nodes: dict[str, Node] = {}
         self._edges: dict[str, dict] = {}
         self._incoming: dict[str, dict] = {}
-        self.vectors = vector_index or ExactIndex()
+        self.vectors = vector_index or ExactIndex(vector_precision=vector_precision)
+        self._vector_precision = vector_precision
         self._on_orphan = on_orphan
         self._store: Optional[_NativeStore] = None
         self._store_directory: Optional[Path] = None
@@ -1565,6 +1576,12 @@ class PolyGraph:
 
     # ── node CRUD ──
 
+    def _quantize_vector(self, vector: Any) -> Any:
+        values = _validate_vector(vector)
+        if self._vector_precision == "float32":
+            return np.asarray(values, dtype=np.float32)
+        return values
+
     def add_node(self, node: Node) -> None:
         """Insert or replace a node. Replacement updates the vector index; data and vector are copied on entry."""
         _validate_id(node.get("id"), "node id")
@@ -1586,7 +1603,7 @@ class PolyGraph:
             stored["activation"] = _validate_activation(node["activation"])
         stored.update(_validate_provenance(node))
         if node.get("vector") is not None:
-            stored["vector"] = _validate_vector(node["vector"])
+            stored["vector"] = self._quantize_vector(node["vector"])
         else:
             stored["vector"] = None
         self._validate_node_resource_limits(stored)
@@ -1627,11 +1644,13 @@ class PolyGraph:
         candidate = _copy_node(node)
         candidate["data"].update(data or {})
         if vector is not None:
-            candidate["vector"] = _validate_vector(vector)
+            candidate["vector"] = self._quantize_vector(vector)
         if activation is not None:
             candidate["activation"] = _validate_activation(activation)
         candidate["updatedAt"] = int(time.time() * 1000)
         candidate["revision"] = int(node.get("revision", 0)) + 1
+        if candidate.get("vector") is not None:
+            candidate["vector"] = self._quantize_vector(candidate["vector"])
         self._validate_node_resource_limits(candidate)
         self._validate_node_schema(candidate)
         _validate_provenance(candidate)
@@ -1811,6 +1830,8 @@ class PolyGraph:
         candidate_node["data"] = candidate
         candidate_node["updatedAt"] = int(time.time() * 1000)
         candidate_node["revision"] = actual + 1
+        if candidate_node.get("vector") is not None:
+            candidate_node["vector"] = self._quantize_vector(candidate_node["vector"])
         self._validate_node_resource_limits(candidate_node)
         self._validate_node_schema(candidate_node)
         candidate_node.update(_validate_provenance(candidate_node))
@@ -2049,15 +2070,17 @@ class PolyGraph:
         compact_threshold: int = 10_000,
         mutation_log_max_entries: Optional[int] = None,
         mutation_log_max_age_ms: Optional[int] = None,
+        vector_precision: Optional[str] = None,
     ) -> "PolyGraph":
         """Open a directory-backed binary store and load its graph."""
-        graph = cls()
+        graph = cls(vector_precision=vector_precision or "float64")
         graph.open_store(
             directory,
             read_only=read_only,
             compact_threshold=compact_threshold,
             mutation_log_max_entries=mutation_log_max_entries,
             mutation_log_max_age_ms=mutation_log_max_age_ms,
+            vector_precision=vector_precision,
         )
         return graph
 
@@ -2082,6 +2105,7 @@ class PolyGraph:
         compact_threshold: int = 10_000,
         mutation_log_max_entries: Optional[int] = None,
         mutation_log_max_age_ms: Optional[int] = None,
+        vector_precision: Optional[str] = None,
     ) -> None:
         """Attach a directory-backed store and load any existing state.
 
@@ -2101,6 +2125,8 @@ class PolyGraph:
             raise PolypackValueError("mutation_log_max_entries must be a positive integer")
         if mutation_log_max_age_ms is not None and (not isinstance(mutation_log_max_age_ms, int) or mutation_log_max_age_ms < 0):
             raise PolypackValueError("mutation_log_max_age_ms must be a non-negative integer")
+        if vector_precision not in (None, "float32", "float64"):
+            raise PolypackValueError("vector_precision must be 'float32' or 'float64'")
         had_pending_state = bool(
             self._dirty
             or self._nodes
@@ -2116,17 +2142,21 @@ class PolyGraph:
         self._dirty_node_ids.clear()
         self._dirty_edge_ids.clear()
         self._dirty_vector_ids.clear()
-        self._store = _NativeStore(
+        store_args = (
             DirectoryStorage(directory, read_only=read_only),
             compact_threshold,
             mutation_log_max_entries,
             mutation_log_max_age_ms,
         )
+        self._store = _NativeStore(*store_args) if vector_precision is None else _NativeStore(*store_args, vector_precision)
         self._store_directory = Path(directory)
         self._store_read_only = read_only
         self._dirty = False
         self._load_index_metadata()
         self._load_schema_metadata()
+        read_precision = getattr(self._store, "vector_precision", None)
+        self._vector_precision = read_precision() if read_precision is not None else (vector_precision or "float64")
+        self.vectors.set_precision(self._vector_precision)
         self._load_from_store()
         self._dirty_node_ids = pending_dirty_nodes if had_pending_state else set()
         self._dirty_edge_ids = pending_dirty_edges if had_pending_state else set()
@@ -2149,6 +2179,93 @@ class PolyGraph:
             raise PolypackStorageError("store was opened read-only")
         self.save()
         self._store.compact()
+
+    def migrate_vector_precision(self, vector_precision: str, backup_directory: Optional[str] = None) -> dict:
+        """Offline migration of the attached directory store, retaining its original backup.
+
+        All other processes using the directory must be stopped. Float32-to-Float64
+        migration widens already-rounded values and cannot recover discarded bits.
+        """
+        if vector_precision not in ("float32", "float64"):
+            raise PolypackValueError("vector_precision must be 'float32' or 'float64'")
+        if self._store is None or self._store_directory is None:
+            raise PolypackStorageError("no store open; call open_store(path) first")
+        if self._store_read_only:
+            raise PolypackStorageError("store was opened read-only")
+
+        store_dir = self._store_directory.resolve()
+        parent = store_dir.parent
+        backup_dir = Path(backup_directory).resolve() if backup_directory else Path(f"{store_dir}.backup-{time.time_ns()}")
+        temp_dir = parent / f".{store_dir.name}.migrate-{os.getpid()}-{uuid.uuid4().hex}"
+        if backup_dir == store_dir or store_dir in backup_dir.parents or backup_dir in store_dir.parents:
+            raise PolypackValueError("backup directory must be separate from the store directory")
+        if backup_dir.exists():
+            raise PolypackStorageError(f"backup directory already exists: {backup_dir}")
+        if not store_dir.is_dir():
+            raise PolypackStorageError(f"store directory does not exist: {store_dir}")
+
+        self.checkpoint()
+        source_precision = self._vector_precision
+        mutation_history = self._store.mutation_log()
+        nodes = [copy.deepcopy(node) for node in self._nodes.values()]
+        edges = [copy.deepcopy(edge) for edge_map in self._edges.values() for edge in edge_map.values()]
+        vectors = [{"id": id_, "vector": np.asarray(vector, dtype=np.float64).tolist()} for id_, vector in self.vectors.entries()]
+        expected_counts = (len(nodes), len(edges), len(vectors))
+        target: Optional[PolyGraph] = None
+        source_closed = False
+        source_moved = False
+        try:
+            temp_dir.mkdir()
+            for name in ("indexes.json", "schemas.json"):
+                sidecar = store_dir / name
+                if sidecar.exists():
+                    shutil.copy2(sidecar, temp_dir / name)
+            target = PolyGraph.open(str(temp_dir), vector_precision=vector_precision)
+            target._store.apply(put_nodes=nodes, put_edges=edges, put_vectors=vectors)
+            target._store.replace_mutation_log(mutation_history)
+            target.checkpoint()
+            report = target._store.verify()
+            if (not report["ok"] or
+                    (report["nodeCount"], report["edgeCount"], report["vectorCount"]) != expected_counts or
+                    target._store.latest_mutation_sequence() != (mutation_history[-1]["sequence"] if mutation_history else 0) or
+                    target._store.vector_precision() != vector_precision):
+                raise PolypackStorageError(f"migrated store verification failed: {report.get('errors', [])}")
+            target.close_store()
+            target = None
+
+            self.close_store()
+            source_closed = True
+            os.replace(store_dir, backup_dir)
+            source_moved = True
+            try:
+                os.replace(temp_dir, store_dir)
+            except Exception:
+                os.replace(backup_dir, store_dir)
+                source_moved = False
+                raise
+            replacement = PolyGraph.open(str(store_dir))
+            self.__dict__.clear()
+            self.__dict__.update(replacement.__dict__)
+            return {"storeDirectory": str(store_dir), "backupDirectory": str(backup_dir), "from": source_precision, "to": vector_precision}
+        except Exception:
+            if target is not None:
+                target.close_store()
+            if source_moved:
+                try:
+                    if store_dir.exists():
+                        shutil.rmtree(store_dir)
+                    os.replace(backup_dir, store_dir)
+                except OSError:
+                    pass
+            if source_closed and store_dir.exists():
+                try:
+                    replacement = PolyGraph.open(str(store_dir))
+                    self.__dict__.clear()
+                    self.__dict__.update(replacement.__dict__)
+                except Exception:
+                    pass
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            raise
 
     def trim_mutation_log(self) -> None:
         """Trim ``mutations.jsonl`` per the retention policy configured in

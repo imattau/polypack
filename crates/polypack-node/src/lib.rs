@@ -49,14 +49,19 @@ pub struct NativeExactIndex {
 #[napi]
 impl NativeExactIndex {
   #[napi(constructor)]
-  pub fn new(distance: Option<String>) -> Self {
+  pub fn new(distance: Option<String>, vector_precision: Option<String>) -> Result<Self> {
     let distance = match distance.as_deref() {
       Some("euclidean") => DistanceFn::Euclidean,
       _ => DistanceFn::Cosine,
     };
-    NativeExactIndex {
-      inner: RefCell::new(ExactIndex::new(distance)),
-    }
+    let precision = match vector_precision.as_deref() {
+      None | Some("float64") => polypack_core::storage::VectorPrecision::Float64,
+      Some("float32") => polypack_core::storage::VectorPrecision::Float32,
+      Some(other) => return Err(Error::from_reason(format!("unsupported vector precision {other}"))),
+    };
+    Ok(NativeExactIndex {
+      inner: RefCell::new(ExactIndex::new_with_precision(distance, precision)),
+    })
   }
 
   #[napi]
@@ -122,7 +127,7 @@ impl NativeExactIndex {
 
   #[napi]
   pub fn get(&self, id: String) -> Option<Float64Array> {
-    self.inner.borrow().get(&id).map(|v| Float64Array::from(v.to_vec()))
+    self.inner.borrow().get(&id).map(Float64Array::from)
   }
 
   #[napi]
@@ -153,6 +158,7 @@ pub struct HnswConfigInput {
   pub ef_search: Option<u32>,
   /// `"cosine"` (default) or `"euclidean"`.
   pub distance: Option<String>,
+  pub vector_precision: Option<String>,
 }
 
 #[napi]
@@ -184,7 +190,15 @@ impl NativeHnswIndex {
       },
     };
     Ok(NativeHnswIndex {
-      inner: RefCell::new(HnswIndex::new(cfg, level_seed.unwrap_or(7)).map_err(to_napi_err)?),
+      inner: RefCell::new(HnswIndex::new_with_precision(
+        cfg,
+        level_seed.unwrap_or(7),
+        match config.as_ref().and_then(|c| c.vector_precision.as_deref()) {
+          None | Some("float64") => polypack_core::storage::VectorPrecision::Float64,
+          Some("float32") => polypack_core::storage::VectorPrecision::Float32,
+          Some(other) => return Err(Error::from_reason(format!("unsupported vector precision {other}"))),
+        },
+      ).map_err(to_napi_err)?),
     })
   }
 
@@ -259,7 +273,7 @@ impl NativeHnswIndex {
 
   #[napi]
   pub fn get(&self, id: String) -> Option<Float64Array> {
-    self.inner.borrow().get(&id).map(|v| Float64Array::from(v.to_vec()))
+    self.inner.borrow().get(&id).map(Float64Array::from)
   }
 
   #[napi]
@@ -269,8 +283,7 @@ impl NativeHnswIndex {
       .inner
       .borrow()
       .nodes()
-      .iter()
-      .map(|(id, v)| (id.clone(), v.clone()))
+      .into_iter()
       .collect();
     rows.sort_by(|a, b| a.0.cmp(&b.0));
     rows
@@ -288,7 +301,7 @@ impl NativeHnswIndex {
 // ── Storage / NativeStore ──
 
 use polypack_core::model::{ChangeBatch as CoreChangeBatch, Edge as CoreEdgeModel, MemoryClass as CoreMemoryClass, Node as CoreNodeModel, VectorEntry as CoreVectorEntry};
-use polypack_core::storage::{AdapterCapabilities, Durability, NodeQuery, Store as CoreStore, StoreConfig, Storage, VectorSearchCapability};
+use polypack_core::storage::{AdapterCapabilities, Durability, NodeQuery, Store as CoreStore, StoreConfig, Storage, VectorPrecision, VectorSearchCapability};
 use std::path::{Path, PathBuf};
 
 /// Deserialize an optional napi-bridged JSON field, treating a JS `null`
@@ -614,6 +627,15 @@ fn to_napi_err(e: polypack_core::PolypackError) -> Error {
     Error::from_reason(e.to_string())
 }
 
+fn parse_vector_precision(value: Option<String>) -> Result<Option<VectorPrecision>> {
+    match value.as_deref() {
+        None => Ok(None),
+        Some("float32") => Ok(Some(VectorPrecision::Float32)),
+        Some("float64") => Ok(Some(VectorPrecision::Float64)),
+        Some(other) => Err(Error::from_reason(format!("invalid_argument: unsupported vector precision {other}"))),
+    }
+}
+
 #[napi]
 pub struct NativeStore {
     inner: RefCell<CoreStore>,
@@ -624,9 +646,10 @@ pub struct NativeStore {
 #[napi]
 impl NativeStore {
     #[napi(constructor)]
-    pub fn new(dir: String, compact_threshold: Option<u32>, read_only: Option<bool>) -> Result<Self> {
+    pub fn new(dir: String, compact_threshold: Option<u32>, read_only: Option<bool>, vector_precision: Option<String>) -> Result<Self> {
         let config = StoreConfig {
             compact_threshold: compact_threshold.unwrap_or(10_000) as usize,
+            vector_precision: parse_vector_precision(vector_precision)?,
             durability: Durability::Process,
             mutation_log_retention: None,
         };
@@ -899,13 +922,14 @@ impl NativeStore {
 
 /// Restore a native store from a directory backup and validate the result.
 #[napi]
-pub fn restore_store(source: String, destination: String, compact_threshold: Option<u32>) -> Result<NativeStore> {
+pub fn restore_store(source: String, destination: String, compact_threshold: Option<u32>, vector_precision: Option<String>) -> Result<NativeStore> {
     let source_storage = FsStorage::new(PathBuf::from(source), true).map_err(to_napi_err)?;
     let destination_dir = PathBuf::from(destination);
     let destination_storage = FsStorage::new(destination_dir.clone(), false).map_err(to_napi_err)?;
     let lock_token = destination_storage.lock_token.clone();
     let config = StoreConfig {
         compact_threshold: compact_threshold.unwrap_or(10_000) as usize,
+        vector_precision: parse_vector_precision(vector_precision)?,
         durability: Durability::Process,
         mutation_log_retention: None,
     };
